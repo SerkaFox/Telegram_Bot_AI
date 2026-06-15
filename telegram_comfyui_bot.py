@@ -69,6 +69,19 @@ DIRECTOR_FPS = int(os.getenv("DIRECTOR_FPS", "24"))
 DIRECTOR_ANCHOR_SECONDS = int(os.getenv("DIRECTOR_ANCHOR_SECONDS", "8"))
 MEDIA_LIBRARY_LIMIT = int(os.getenv("MEDIA_LIBRARY_LIMIT", "10"))
 
+DIRECTOR_FACELOCK_PROMPT = (
+    "Continuity lock: keep exactly the same identity as the reference image, same face, facial proportions, eye shape, "
+    "nose, mouth, jawline, hair, body shape, skin tone, outfit state, lighting, camera angle, and background. "
+    "The face must stay stable between frames with no morphing or identity drift. Preserve natural anatomy, stable body "
+    "physics, coherent hands, five fingers per hand, and consistent limb count."
+)
+DIRECTOR_NEGATIVE_PROMPT = (
+    "face morphing, face shifting, face changing, identity drift, different face, inconsistent identity, deformed face, "
+    "asymmetric facial features, blurry face, flickering face, unnatural blinking, frozen face, plastic skin, over-smoothed "
+    "skin, body morphing, deformed body, broken anatomy, extra limbs, missing limbs, extra fingers, fused fingers, bad hands, "
+    "warped hands, distorted torso, broken joints, unstable body proportions"
+)
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
@@ -657,12 +670,7 @@ def build_director_timeline_one_image(
     remaining = float(seconds)
     while remaining > 0:
         length = min(float(anchor_seconds), remaining)
-        segment_prompt = (
-            f"{prompt}\n\n"
-            "Continuity lock: keep exactly the same face, facial proportions, hair, body shape, skin tone, outfit state, "
-            "lighting, camera angle, and background as the reference image. Do not change identity, do not morph the face, "
-            "do not add extra limbs, do not alter anatomy. Natural stable body physics, coherent hands and fingers."
-        )
+        segment_prompt = f"{prompt}\n\n{DIRECTOR_FACELOCK_PROMPT}\n\nAvoid: {DIRECTOR_NEGATIVE_PROMPT}"
         segments.append(
             {
                 "id": f"tg_{uuid.uuid4().hex[:12]}",
@@ -711,8 +719,10 @@ def patch_director_workflow(
         seconds=seconds,
     )
 
+    director_prompt = f"{prompt}\n\n{DIRECTOR_FACELOCK_PROMPT}\n\nAvoid: {DIRECTOR_NEGATIVE_PROMPT}"
+
     # LTXDirector node
-    wf["46"]["inputs"]["global_prompt"] = prompt
+    wf["46"]["inputs"]["global_prompt"] = director_prompt
     wf["46"]["inputs"]["duration_seconds"] = int(seconds)
     wf["46"]["inputs"]["duration_frames"] = int(frames)
     wf["46"]["inputs"]["timeline_data"] = timeline_data
