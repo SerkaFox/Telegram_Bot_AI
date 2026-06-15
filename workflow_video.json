@@ -1,0 +1,347 @@
+{
+  "93": {
+    "inputs": {
+      "text": "Он снимает свои штаны. достает член. Она начинает сосать его голый член помогая рукой.  он крепко держит ее за волосы и голову и наслаждается. он смеется в камеру, когда кончает ей на лицо",
+      "clip": [
+        "373:364",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive Prompt"
+    }
+  },
+  "97": {
+    "inputs": {
+      "image": "ComfyUI_00153_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Input Image"
+    }
+  },
+  "141": {
+    "inputs": {
+      "boundary": 0.9,
+      "seed": 1009507249413571,
+      "steps": 8,
+      "cfg_high_noise": 1,
+      "cfg_low_noise": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "sigma_shift": 8,
+      "denoise": 1,
+      "model_high_noise": [
+        "152",
+        0
+      ],
+      "model_low_noise": [
+        "155",
+        0
+      ],
+      "positive": [
+        "373:358",
+        0
+      ],
+      "negative": [
+        "373:358",
+        1
+      ],
+      "latent_image": [
+        "373:358",
+        2
+      ]
+    },
+    "class_type": "WanMoeKSampler",
+    "_meta": {
+      "title": "Wan MoE KSampler"
+    }
+  },
+  "152": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "371",
+        0
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "LoRA Stack (High Noise)"
+    }
+  },
+  "155": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "372",
+        0
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "LoRA Stack (Low Noise)"
+    }
+  },
+  "164": {
+    "inputs": {
+      "value": 700
+    },
+    "class_type": "easy int",
+    "_meta": {
+      "title": "Width (pixels)"
+    }
+  },
+  "165": {
+    "inputs": {
+      "value": 600
+    },
+    "class_type": "easy int",
+    "_meta": {
+      "title": "Height (Pixels)"
+    }
+  },
+  "243": {
+    "inputs": {
+      "value": 8
+    },
+    "class_type": "easy float",
+    "_meta": {
+      "title": "Video Length (Seconds)"
+    }
+  },
+  "314": {
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "ComfyUI",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "373:363",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "RAW OUTPUT"
+    }
+  },
+  "356": {
+    "inputs": {
+      "size": 720,
+      "mode": true,
+      "images": [
+        "385",
+        0
+      ]
+    },
+    "class_type": "easy imageScaleDownToSize",
+    "_meta": {
+      "title": "Image Scale Down To Size"
+    }
+  },
+  "371": {
+    "inputs": {
+      "unet_name": "wan22EnhancedNSFWSVICamera_nsfwFASTMOVEV2Q4KMH.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  },
+  "372": {
+    "inputs": {
+      "unet_name": "wan22EnhancedNSFWSVICamera_nsfwFASTMOVEV2Q4KML.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  },
+  "385": {
+    "inputs": {
+      "image": "grok-image-ebcebb23-383b-48da-9167-0b8dc93bff3e.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "373:361": {
+    "inputs": {
+      "width": [
+        "164",
+        0
+      ],
+      "height": [
+        "165",
+        0
+      ],
+      "interpolation": "lanczos",
+      "method": "keep proportion",
+      "condition": "always",
+      "multiple_of": 64,
+      "image": [
+        "356",
+        0
+      ]
+    },
+    "class_type": "ImageResize+",
+    "_meta": {
+      "title": "🔧 Image Resize"
+    }
+  },
+  "373:364": {
+    "inputs": {
+      "clip_name": "nsfw_wan_umt5-xxl_fp8_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Wan CLIP"
+    }
+  },
+  "373:357": {
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Wan VAE"
+    }
+  },
+  "373:360": {
+    "inputs": {
+      "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, нижнее белье, ливчик, трусы",
+      "clip": [
+        "373:364",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "373:358": {
+    "inputs": {
+      "width": [
+        "164",
+        0
+      ],
+      "height": [
+        "165",
+        0
+      ],
+      "length": [
+        "373:359",
+        0
+      ],
+      "batch_size": 1,
+      "positive": [
+        "93",
+        0
+      ],
+      "negative": [
+        "373:360",
+        0
+      ],
+      "vae": [
+        "373:357",
+        0
+      ],
+      "start_image": [
+        "373:361",
+        0
+      ]
+    },
+    "class_type": "WanImageToVideo",
+    "_meta": {
+      "title": "WanImageToVideo"
+    }
+  },
+  "373:359": {
+    "inputs": {
+      "value": "a*16+1",
+      "a": [
+        "243",
+        0
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "🔧 Simple Math"
+    }
+  },
+  "373:363": {
+    "inputs": {
+      "samples": [
+        "141",
+        0
+      ],
+      "vae": [
+        "373:357",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "373:362": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "373:363",
+        0
+      ]
+    },
+    "class_type": "PlaySound|pysssss",
+    "_meta": {
+      "title": "PlaySound 🐍"
+    }
+  },
+  "373:365": {
+    "inputs": {
+      "text": "640",
+      "anything": [
+        "373:361",
+        1
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "Show Any"
+    }
+  },
+  "373:366": {
+    "inputs": {
+      "text": "448",
+      "anything": [
+        "373:361",
+        2
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "Show Any"
+    }
+  }
+}

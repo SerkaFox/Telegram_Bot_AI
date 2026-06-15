@@ -1,0 +1,745 @@
+{
+    "3": {
+        "inputs": {
+            "vae_name": "LTX23_video_vae_bf16.safetensors",
+            "device": "main_device",
+            "weight_dtype": "bf16"
+        },
+        "class_type": "VAELoaderKJ",
+        "_meta": {
+            "title": "Video VAELoader"
+        }
+    },
+    "4": {
+        "inputs": {
+            "vae_name": "LTX23_audio_vae_bf16.safetensors",
+            "device": "main_device",
+            "weight_dtype": "bf16"
+        },
+        "class_type": "VAELoaderKJ",
+        "_meta": {
+            "title": "Audio VAELoader"
+        }
+    },
+    "5": {
+        "inputs": {
+            "frame_rate": [
+                "46",
+                5
+            ],
+            "positive": [
+                "46",
+                1
+            ],
+            "negative": [
+                "26",
+                0
+            ]
+        },
+        "class_type": "LTXVConditioning",
+        "_meta": {
+            "title": "LTXVConditioning"
+        }
+    },
+    "7": {
+        "inputs": {
+            "video_latent": [
+                "8",
+                2
+            ],
+            "audio_latent": [
+                "46",
+                3
+            ]
+        },
+        "class_type": "LTXVConcatAVLatent",
+        "_meta": {
+            "title": "LTXVConcatAVLatent"
+        }
+    },
+    "8": {
+        "inputs": {
+            "scale_by": 0.5,
+            "upscale_method": "bicubic",
+            "positive": [
+                "5",
+                0
+            ],
+            "negative": [
+                "5",
+                1
+            ],
+            "vae": [
+                "3",
+                0
+            ],
+            "latent": [
+                "46",
+                2
+            ],
+            "guide_data": [
+                "46",
+                4
+            ]
+        },
+        "class_type": "LTXDirectorGuide",
+        "_meta": {
+            "title": "LTX Director Guide"
+        }
+    },
+    "9": {
+        "inputs": {
+            "cfg": 1,
+            "model": [
+                "46",
+                0
+            ],
+            "positive": [
+                "8",
+                0
+            ],
+            "negative": [
+                "8",
+                1
+            ]
+        },
+        "class_type": "CFGGuider",
+        "_meta": {
+            "title": "CFGGuider"
+        }
+    },
+    "10": {
+        "inputs": {
+            "noise": [
+                "28",
+                0
+            ],
+            "guider": [
+                "9",
+                0
+            ],
+            "sampler": [
+                "29",
+                0
+            ],
+            "sigmas": [
+                "11",
+                0
+            ],
+            "latent_image": [
+                "7",
+                0
+            ]
+        },
+        "class_type": "SamplerCustomAdvanced",
+        "_meta": {
+            "title": "SamplerCustomAdvanced"
+        }
+    },
+    "11": {
+        "inputs": {
+            "scheduler": "linear_quadratic",
+            "steps": 8,
+            "denoise": 1,
+            "model": [
+                "46",
+                0
+            ]
+        },
+        "class_type": "BasicScheduler",
+        "_meta": {
+            "title": "BasicScheduler"
+        }
+    },
+    "13": {
+        "inputs": {
+            "av_latent": [
+                "10",
+                0
+            ]
+        },
+        "class_type": "LTXVSeparateAVLatent",
+        "_meta": {
+            "title": "LTXVSeparateAVLatent"
+        }
+    },
+    "14": {
+        "inputs": {
+            "positive": [
+                "8",
+                0
+            ],
+            "negative": [
+                "8",
+                1
+            ],
+            "latent": [
+                "48",
+                0
+            ]
+        },
+        "class_type": "LTXVCropGuides",
+        "_meta": {
+            "title": "LTXVCropGuides"
+        }
+    },
+    "16": {
+        "inputs": {
+            "samples": [
+                "48",
+                1
+            ],
+            "audio_vae": [
+                "4",
+                0
+            ]
+        },
+        "class_type": "LTXVAudioVAEDecode",
+        "_meta": {
+            "title": "LTXV Audio VAE Decode"
+        }
+    },
+    "26": {
+        "inputs": {
+            "conditioning": [
+                "46",
+                1
+            ]
+        },
+        "class_type": "ConditioningZeroOut",
+        "_meta": {
+            "title": "ConditioningZeroOut"
+        }
+    },
+    "28": {
+        "inputs": {
+            "noise_seed": 77203551801046
+        },
+        "class_type": "RandomNoise",
+        "_meta": {
+            "title": "RandomNoise"
+        }
+    },
+    "29": {
+        "inputs": {
+            "sampler_name": "euler"
+        },
+        "class_type": "KSamplerSelect",
+        "_meta": {
+            "title": "KSamplerSelect"
+        }
+    },
+    "46": {
+        "inputs": {
+            "global_prompt": "",
+            "duration_frames": 480,
+            "duration_seconds": 20,
+            "timeline_data": "{\"segments\":[{\"id\":\"1781083120093l9xm4\",\"start\":0,\"length\":46.509368828198944,\"prompt\":\"The woman gently uses her hands to slide white white bikini-tops down a little bit revealing her large breast. No music.\\nwet slapping and squelching. Natural water flowing movement. heavy breathing from the female. \\n\",\"type\":\"image\",\"imageFile\":\"1-s01 (1).jpeg\",\"imageB64\":\"/api/view?filename=1-s01%20(1).jpeg&type=input&subfolder=\"},{\"id\":\"1781083152108gdi5l\",\"start\":46.509368828198944,\"length\":34,\"prompt\":\"Her soft breast pops out and bouncing naturally as her bikini down. breast jiggling. \\nwet slapping and squelching. Natural water flowing movement. heavy breathing from the female. \\n\",\"type\":\"image\",\"imageFile\":\"20260610_110200_qwen_00001_.png\",\"imageB64\":\"/api/view?filename=20260610_110200_qwen_00001_.png&type=input&subfolder=\"},{\"id\":\"1781083224406nugm3\",\"start\":80.50936882819894,\"length\":40,\"prompt\":\"Her bikini falls completely down on the pools side. She is now fully naked, maintaining an elegant posture. wet slapping and squelching. Natural water flowing movement. heavy breathing from the female. \\n\",\"type\":\"image\",\"imageFile\":\"20260610_104005_qwen_00001_.png\",\"imageB64\":\"/api/view?filename=20260610_104005_qwen_00001_.png&type=input&subfolder=\"},{\"id\":\"1781083296379g9y65\",\"start\":120.50936882819894,\"length\":96.51416469433914,\"prompt\":\"She gently shifts her pose to spread M-legs lying on the pools in very smooth motion, exposed sher saved pussy. Natural water flowing movement.wet slapping and squelching.\\n\",\"type\":\"image\",\"imageFile\":\"20260610_105717_qwen_00001_.png\",\"imageB64\":\"/api/view?filename=20260610_105717_qwen_00001_.png&type=input&subfolder=\"},{\"id\":\"1781235575615kgnin\",\"start\":217.0235335225381,\"length\":44.53709320479888,\"prompt\":\"she looks directly at the camera with seductive, lust-filled eyes and a naughty little smile.\\nRich detailed wet pussy squelching, fingering thrusting sounds, pool water splashing and dripping.\",\"type\":\"image\",\"imageFile\":\"20260612_113808_qwen_00001_.png\",\"imageB64\":\"/api/view?filename=20260612_113808_qwen_00001_.png&type=input&subfolder=\"},{\"id\":\"17811425624178hq5y\",\"start\":263,\"length\":96,\"prompt\":\"Fixed steady camera shot. She is sliding two fingers deep inside her wet pussy, thrusting rhythmically. Her large breasts jiggle and bounce heavily with each stroke, nipples erect.\\nShe stares into the lens with soft, glazed eyes, She speaks breathily in seductive cute Japanese: “…お兄ちゃん.…もっと見たいですか？. Starts gentle and sweet, becomes faster, needier, and more desperate as the pace increases. pool water splashing and dripping.\",\"type\":\"text\"},{\"id\":\"1781143828822lkjnh\",\"start\":359,\"length\":121,\"prompt\":\"Fixed steady camera shot. She keeps one hand holding her thighs. Another hand continuously slides in and out of her dripping wet vagina in very fast, fluid motions. Her large, heavy breasts bounce and jiggle naturally with each movement. Her thighs tremble slightly as she gets lost in the pleasure. \\n\\nProminent wet skin slaps, loud finger-slide squish, continuous fluid drips, layered with breathy Japanese moans:\\\" うーん……あぁ…あぁ…あぁ…あぁ'\\\" . Ultra-realistic, cinematic lighting, glossy sweat sheen, moisture details, smooth 60fps, high-motion dynamics, masterpiece.\",\"type\":\"text\"}],\"audioSegments\":[]}",
+            "local_prompts": "The woman gently uses her hands to slide white white bikini-tops down a little bit revealing her large breast. No music.\nwet slapping and squelching. Natural water flowing movement. heavy breathing from the female. \n | Her soft breast pops out and bouncing naturally as her bikini down. breast jiggling. \nwet slapping and squelching. Natural water flowing movement. heavy breathing from the female. \n | Her bikini falls completely down on the pools side. She is now fully naked, maintaining an elegant posture. wet slapping and squelching. Natural water flowing movement. heavy breathing from the female. \n | She gently shifts her pose to spread M-legs lying on the pools in very smooth motion, exposed sher saved pussy. Natural water flowing movement.wet slapping and squelching.\n | she looks directly at the camera with seductive, lust-filled eyes and a naughty little smile.\nRich detailed wet pussy squelching, fingering thrusting sounds, pool water splashing and dripping. | Fixed steady camera shot. She is sliding two fingers deep inside her wet pussy, thrusting rhythmically. Her large breasts jiggle and bounce heavily with each stroke, nipples erect.\nShe stares into the lens with soft, glazed eyes, She speaks breathily in seductive cute Japanese: “…お兄ちゃん.…もっと見たいですか？. Starts gentle and sweet, becomes faster, needier, and more desperate as the pace increases. pool water splashing and dripping. | Fixed steady camera shot. She keeps one hand holding her thighs. Another hand continuously slides in and out of her dripping wet vagina in very fast, fluid motions. Her large, heavy breasts bounce and jiggle naturally with each movement. Her thighs tremble slightly as she gets lost in the pleasure. \n\nProminent wet skin slaps, loud finger-slide squish, continuous fluid drips, layered with breathy Japanese moans:\" うーん……あぁ…あぁ…あぁ…あぁ'\" . Ultra-realistic, cinematic lighting, glossy sweat sheen, moisture details, smooth 60fps, high-motion dynamics, masterpiece.",
+            "segment_lengths": "46.509368828198944,34,40,96.51416469433914,45.97646647746191,96,121",
+            "epsilon": 0.001,
+            "guide_strength": "1.00,1.00,1.00,1.00,1.00",
+            "use_custom_audio": false,
+            "frame_rate": 24,
+            "display_mode": "seconds",
+            "custom_width": 720,
+            "custom_height": 1280,
+            "resize_method": "maintain aspect ratio",
+            "divisible_by": 32,
+            "img_compression": 18,
+            "timeline_ui": "",
+            "model": [
+                "182",
+                0
+            ],
+            "clip": [
+                "84",
+                0
+            ],
+            "audio_vae": [
+                "4",
+                0
+            ]
+        },
+        "class_type": "LTXDirector",
+        "_meta": {
+            "title": "LTX Director"
+        }
+    },
+    "47": {
+        "inputs": {
+            "noise": [
+                "166",
+                0
+            ],
+            "guider": [
+                "49",
+                0
+            ],
+            "sampler": [
+                "53",
+                0
+            ],
+            "sigmas": [
+                "96",
+                0
+            ],
+            "latent_image": [
+                "50",
+                0
+            ]
+        },
+        "class_type": "SamplerCustomAdvanced",
+        "_meta": {
+            "title": "SamplerCustomAdvanced"
+        }
+    },
+    "48": {
+        "inputs": {
+            "av_latent": [
+                "47",
+                0
+            ]
+        },
+        "class_type": "LTXVSeparateAVLatent",
+        "_meta": {
+            "title": "LTXVSeparateAVLatent"
+        }
+    },
+    "49": {
+        "inputs": {
+            "cfg": 1,
+            "model": [
+                "46",
+                0
+            ],
+            "positive": [
+                "58",
+                0
+            ],
+            "negative": [
+                "58",
+                1
+            ]
+        },
+        "class_type": "CFGGuider",
+        "_meta": {
+            "title": "CFGGuider"
+        }
+    },
+    "50": {
+        "inputs": {
+            "video_latent": [
+                "58",
+                2
+            ],
+            "audio_latent": [
+                "13",
+                1
+            ]
+        },
+        "class_type": "LTXVConcatAVLatent",
+        "_meta": {
+            "title": "LTXVConcatAVLatent"
+        }
+    },
+    "52": {
+        "inputs": {
+            "samples": [
+                "55",
+                2
+            ],
+            "upscale_model": [
+                "57",
+                0
+            ],
+            "vae": [
+                "3",
+                0
+            ]
+        },
+        "class_type": "LTXVLatentUpsampler",
+        "_meta": {
+            "title": "LTXVLatentUpsampler"
+        }
+    },
+    "53": {
+        "inputs": {
+            "sampler_name": "euler_ancestral"
+        },
+        "class_type": "KSamplerSelect",
+        "_meta": {
+            "title": "KSamplerSelect"
+        }
+    },
+    "55": {
+        "inputs": {
+            "positive": [
+                "8",
+                0
+            ],
+            "negative": [
+                "8",
+                1
+            ],
+            "latent": [
+                "13",
+                0
+            ]
+        },
+        "class_type": "LTXVCropGuides",
+        "_meta": {
+            "title": "LTXVCropGuides"
+        }
+    },
+    "57": {
+        "inputs": {
+            "model_name": "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+        },
+        "class_type": "LatentUpscaleModelLoader",
+        "_meta": {
+            "title": "Load Latent Upscale Model"
+        }
+    },
+    "58": {
+        "inputs": {
+            "scale_by": 1,
+            "upscale_method": "bicubic",
+            "positive": [
+                "55",
+                0
+            ],
+            "negative": [
+                "55",
+                1
+            ],
+            "vae": [
+                "3",
+                0
+            ],
+            "latent": [
+                "52",
+                0
+            ],
+            "guide_data": [
+                "46",
+                4
+            ]
+        },
+        "class_type": "LTXDirectorGuide",
+        "_meta": {
+            "title": "LTX Director Guide"
+        }
+    },
+    "84": {
+        "inputs": {
+            "clip_name1": "gemma_3_12B_it_fp8_e4m3fn.safetensors",
+            "clip_name2": "ltx-2.3_text_projection_bf16.safetensors",
+            "type": "ltxv",
+            "device": "default"
+        },
+        "class_type": "DualCLIPLoader",
+        "_meta": {
+            "title": "DualCLIPLoader"
+        }
+    },
+    "94": {
+        "inputs": {
+            "frame_rate": [
+                "46",
+                5
+            ],
+            "loop_count": 0,
+            "filename_prefix": "ltxdirector",
+            "format": "video/h264-mp4",
+            "pix_fmt": "yuv420p",
+            "crf": 15,
+            "save_metadata": true,
+            "trim_to_audio": false,
+            "pingpong": false,
+            "save_output": false,
+            "images": [
+                "142",
+                0
+            ],
+            "audio": [
+                "16",
+                0
+            ]
+        },
+        "class_type": "VHS_VideoCombine",
+        "_meta": {
+            "title": "Video Combine 🎥🅥🅗🅢"
+        }
+    },
+    "95": {
+        "inputs": {
+            "unet_name": "sulphur_distill_fp8.safetensors",
+            "weight_dtype": "default"
+        },
+        "class_type": "UNETLoader",
+        "_meta": {
+            "title": "Load Diffusion Model"
+        }
+    },
+    "96": {
+        "inputs": {
+            "sigmas": "0.85, 0.7250, 0.4219, 0.0"
+        },
+        "class_type": "ManualSigmas",
+        "_meta": {
+            "title": "ManualSigmas"
+        }
+    },
+    "142": {
+        "inputs": {
+            "tile_size": 512,
+            "overlap": 64,
+            "temporal_size": 512,
+            "temporal_overlap": 4,
+            "samples": [
+                "14",
+                2
+            ],
+            "vae": [
+                "3",
+                0
+            ]
+        },
+        "class_type": "VAEDecodeTiled",
+        "_meta": {
+            "title": "VAE Decode (Tiled)"
+        }
+    },
+    "143": {
+        "inputs": {
+            "mode": "always",
+            "volume": 0.5,
+            "file": "notify.mp3",
+            "any": [
+                "94",
+                0
+            ]
+        },
+        "class_type": "PlaySound|pysssss",
+        "_meta": {
+            "title": "PlaySound 🐍"
+        }
+    },
+    "166": {
+        "inputs": {
+            "noise_seed": 42
+        },
+        "class_type": "RandomNoise",
+        "_meta": {
+            "title": "RandomNoise"
+        }
+    },
+    "182": {
+        "inputs": {
+            "PowerLoraLoaderHeaderWidget": {
+                "type": "PowerLoraLoaderHeaderWidget"
+            },
+            "lora_1": {
+                "on": false,
+                "lora": "LTX2.3_Soft_Enhance.safetensors",
+                "strength": 1
+            },
+            "lora_2": {
+                "on": false,
+                "lora": "LTX-2 better NSFW motion g@n.safetensors",
+                "strength": 0.4
+            },
+            "lora_3": {
+                "on": false,
+                "lora": "LTX2-i2v-SexyMove.safetensors",
+                "strength": 0.4
+            },
+            "lora_4": {
+                "on": false,
+                "lora": "LTX-2.3-Licon-VBVR-I2V-96000-R32.safetensors",
+                "strength": 0.4
+            },
+            "lora_5": {
+                "on": false,
+                "lora": "Ltx2.3_DR34ML4Y_LTXXX_V2.safetensors",
+                "strength": 0.3
+            },
+            "lora_6": {
+                "on": false,
+                "lora": "LTX2.3_reasoning_I2V_V3.safetensors",
+                "strength": 0.2
+            },
+            "lora_7": {
+                "on": false,
+                "lora": "LTX-2-3fingering-step00005000_comfy.safetensors",
+                "strength": 0.2
+            },
+            "lora_8": {
+                "on": false,
+                "lora": "LTX-2_doggystyle_.safetensors",
+                "strength": 0.5
+            },
+            "lora_9": {
+                "on": false,
+                "lora": "LTX2-i2v-SexThrust.safetensors",
+                "strength": 0.2
+            },
+            "lora_10": {
+                "on": false,
+                "lora": "LTX-23-clapping-cheeks-audio-v001-alpha.safetensors",
+                "strength": 0.5
+            },
+            "lora_11": {
+                "on": false,
+                "lora": "LTX2.3_liquid_wet_dr1pp_scaled.safetensors",
+                "strength": 0.5
+            },
+            "lora_12": {
+                "on": false,
+                "lora": "LTX-2.3_Singularity-OmniCine_V1.safetensors",
+                "strength": 0.3
+            },
+            "lora_13": {
+                "on": false,
+                "lora": "LTX-2.3-transition.safetensors",
+                "strength": 0.5
+            },
+            "➕ Add Lora": "",
+            "model": [
+                "95",
+                0
+            ]
+        },
+        "class_type": "Power Lora Loader (rgthree)",
+        "_meta": {
+            "title": "Power Lora Loader (rgthree)"
+        }
+    },
+    "183": {
+        "inputs": {
+            "text": "The scene is set in a Japanese hot spring natural lights.  A beautiful young East Asian woman with long dark brown hair, bangs, and earrings is bent over the rocks, completely naked. A muscular man is fucking her hard from behind, his thick cock pounding deep into her pussy.her skin glistening with moisture, with realistic water droplets and sweat trailing down her chest and torso just like in the reference image. She holds the camera at arm's length, guiding the viewer forward through the tranquil hot spring water.\nTimeline (fixed camera, eye-level angle, fast & intense):\n0-5 seconds (fast build-up):\nThe man thrusts rapidly and aggressively right from the start — fast, deep, powerful strokes slamming into her. Her plump round ass ripples and claps intensely with every hard impact. Her full breasts swing and bounce heavily with strong natural physics. She keeps her head turned toward the camera, staring directly at the lens with a flushed, shy, aroused expression. Soft, breathy, embarrassed moans escape her lips: quiet “mmh… ah… hah…” as she tries to stay quiet.\n5-13 seconds (high-intensity pounding):\nThe pace becomes even faster and more brutal. Hard, rapid piston-like thrusting — his cock driving in and out visibly, stretching her pussy with each aggressive stroke. Her ass jiggles wildly, cheeks bouncing and shaking from the force. Her breasts slap and swing heavily. Sweat glistens on her skin as her body rocks forward with each thrust. She maintains eye contact with the camera, biting her lip, face full of pleasure and shyness, letting out continuous soft, high-pitched whimpers: “ahh… mmn… hah… ah…!”\n13-20 seconds (climax & finish):\nThe man fucks her at maximum speed and depth for several seconds, then slowlly pulled out his entire penis and cums hard on woman's pussy. The woman reaches a powerful orgasm at the same time — her body tenses, then suddenly goes limp. She slowly cling weakly onto the rocks, upper body resting on the rocks, ass still raised slightly. While looking directly at the camera with dazed, teary, post-orgasm eyes, she lets out soft, shaky, embarrassed moans. Thick white semen slowly drips and flows out from her pussy, running down her inner thighs. Her breasts and ass continue to tremble slightly from the aftershocks. The scene ends with her lying limply on the rocks, cum leaking visibly, eyes still locked on the camera.\nStyle notes:\n\nOverall much faster and more intense than the first version.\nStrong natural physics: realistic thrusting, heavy breast & ass jiggle, Maximum intensity wet slapping and squelching,cum splattering sounds on skin. Natural water flowing movement.\nFixed single shot, no cuts.\n"
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "184": {
+        "inputs": {
+            "text": "A cinematic 10-second transformation sequence in a dark post-apocalyptic ruined city with burning buildings, flying embers and wet reflective ground. \n\nStart frame: Beautiful East Asian woman with long flowing black hair, wearing a spiked crown, completely nude, perfect body, detailed skin texture, standing confidently in the center, wind blowing her hair dramatically. \n\nOver 10 seconds she undergoes a dramatic, highly detailed metamorphosis into a powerful cyber-fantasy warrior:\n\n0-2s: Her naked skin begins to glow with golden and cyan energy lines. Metallic fragments and liquid-like nanotech armor pieces emerge from her spine, shoulders and thighs, spreading across her body. Her breasts and intimate areas are still fully visible as the armor forms around them.\n\n2-5s: The transformation intensifies. Intricate gold and dark silver biomechanical armor plates rapidly assemble over her torso, arms and legs. Glowing cyan energy cores light up on her chest, shoulders and gauntlets. Her hair continues flowing wildly in the wind.\n\n5-8s: Final armor pieces lock into place with mechanical sounds (visualized), forming full coverage except seductive cutouts on chest and hips. She now wears complete spiked cyber-armor with high heels, glowing blue accents, extremely detailed metallic reflections.\n\n8-10s: Transformation completes, she stands powerfully in full armored form, same pose and expression as the end image, wind still blowing her hair.\n\nUltra realistic, 8k, cinematic lighting, dramatic rim lighting, fire and sparks in background, wet ground reflections, highly detailed textures, smooth morphing transition, dynamic particle effects, nanotech assembly.\n\nCamera movement timeline:\n- 0-3s: Slow push-in from medium full shot to closer upper body focus, slight low angle\n- 3-7s: Orbiting around her body clockwise while she transforms, dynamic circling shot showcasing the armor forming\n- 7-10s: Pull back to original full shot position with slight upward tilt, ending in powerful hero angle\n\nStyle: hyper realistic, cinematic, dramatic, dark fantasy sci-fi"
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "185": {
+        "inputs": {
+            "text": "zhuanchang, The transformation intensifies. Intricate gold and dark silver biomechanical armor plates rapidly assemble over her torso, arms and legs. Glowing cyan energy cores light up on her chest, shoulders and gauntlets. Her naked skin begins to glow with golden and cyan energy lines. Final armor pieces lock into place with mechanical sounds (visualized), forming full coverage except seductive cutouts on chest and hips. She now wears complete spiked cyber-armor with high heels, glowing blue accents, extremely detailed metallic reflections. Her hair continues flowing wildly in the wind. Her long hair flowing strongly in the wind. \n\nzhuanchang. As the camera pushes slightly closer, she turns toward the lens, brushing her hair back and giving a soft playful wink. Transformation completes, she stands powerfully in full armored form, same pose and expression as the end image"
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "187": {
+        "inputs": {
+            "text": "Fixed low-angle close-up shot, no camera movement or cuts for the entire 15 seconds. A stunning young East Asian woman with long dark hair, flawless skin, and heavy pink blush is passionately riding a muscular man in reverse cowgirl position inside a luxury hotel room. She is fully in control, performing smooth, natural, and continuous riding motions.\nShe moves her hips in a fluid, rhythmic up-and-down motion combined with sensual circular grinding, her round, plump ass cheeks jiggling and rippling realistically with every thrust. Her large breasts bounce and sway naturally and heavily in sync with her body's movements, following the realistic physics of her riding. Her long hair flows and sways across her back as she rides.\nHer face shows building pleasure — eyes half-closed in ecstasy, cheeks flushed, mouth slightly open with soft, breathy moans. She occasionally reaches back with one hand to spread her ass cheek or grip his thigh for deeper penetration. Her wet pussy grips his thick cock tightly, creamy juices coating his shaft and dripping continuously down his balls.\nTowards the end, her riding becomes faster and more intense as she approaches climax. Her body suddenly trembles and shakes strongly, thighs quivering, pussy clenching and pulsing visibly around his cock as she orgasms hard. At the same moment, the man groans and ejaculates deep inside her. Thick, white semen overflows from her stretched pussy and slowly drips down in heavy, viscous streams along his cock and balls, creating shiny wet trails over her ass and skin. Her final expression is pure overwhelmed bliss — eyes rolling slightly, mouth open in silent gasping pleasure, face deeply flushed.\nUltra-realistic skin texture, glistening sweat, detailed fluid dynamics, natural breast and ass physics, smooth continuous motion throughout the entire 15 seconds"
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "188": {
+        "inputs": {
+            "text": "She is completely naked except for the sheer floral silk robe hanging loosely off her arms. She sits in a wide M-shaped leg position, her legs fully spread and hooked over the edges of the purple cushion on the gondola, exposing her swollen, glistening pussy completely.\nActions & Expression Progression:\n\nAt the beginning, she looks directly at the camera with seductive, lust-filled eyes and a naughty little smile.\nWith one hand, she gently but firmly squeezes and massages her large, soft breasts, pinching and rolling her hard nipples between her fingers.\nHer other hand is between her widely spread legs, fingers rubbing her clit in slow, sensual circles before sliding two fingers deep inside her wet pussy, thrusting rhythmically.\n0-5s starts with fingers parting the labia wide and sliding deeply inside with increased frequency; \n\n5-10s she shits her pose to squatting with spreading legs on the seats, Her other hand continuously slides in and out of her dripping wet vagina in fast, fluid motions. Her large, heavy breasts bounce and jiggle naturally with each movement, secondary motion visible. Her thighs tremble slightly as she gets lost in the pleasure.\n\n10-15s: keep squatting position with spreading legs, maintains continuously slides her fingers in and out of her dripping wet vagina in fast, fluid motions., triggering smooth pelvic shudders and light hip lifts. She breathes heavily, thighs quiver slightly, hips buck naturally synced to the faster strokes. She stares into the lens with soft, glazed eyes, biting her lower lip. Audio: Fast wet squishes, rapid stretching sounds, finger pumping, rising breathy moans, subtle pelvic tremors. She stares into the lens with soft, glazed eyes, slightly parted lips shaping Japanese whispers in sync with the strokes: 'うん…もっと深く…指が震える…あぁ…開いてく…'. Natural mouth movement, subtle jaw relaxation, breath condenses slightly in cold air. She breathes heavily, thighs quiver, hips buck naturally.\n\nUltra-realistic, cinematic lighting, glossy sheen, sharp finger definition, clear knuckle lines, macro moisture details, smooth 60fps, high-motion dynamics, masterpiece.\nThe entire sequence is highly erotic, smooth, natural, and intensely arousing, with perfect lighting from the golden Venetian sunlight caressing her body."
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "189": {
+        "inputs": {
+            "text": "A beautiful young Asian woman with long flowing brown hair, seductive almond eyes, and large natural breasts is riding cowgirl style on a man's thick erect cock inside a classic black Venetian gondola floating gently on the Grand Canal in Venice. The iconic Rialto Bridge and historic buildings glow under warm golden sunlight in the background, creating a romantic yet highly erotic atmosphere. The woman is wearing a partially pulled-down ornate lace and patterned dress around her waist, her smooth skin glistening with sweat.\nFor a dynamic 15-second video clip (realistic physics, natural motion, not too slow, 24fps cinematic style):\nThe woman passionately rides the man's cock with steady, rhythmic up-and-down movements, her hips grinding and bouncing naturally. Her large breasts sway and jiggle heavily with each thrust, nipples hard and bouncing in realistic motion. Clear, viscous pussy juices (淫水) drip and flow slowly down the man's thick shaft and her inner thighs, creating shiny wet trails that catch the sunlight. The gondola rocks slightly in sync with their intense fucking.The woman keeps looking at viewer in pleasure, mouth open as she lets out loud, natural female moaning sounds — breathy \"Ahh... ahh... oh fuck... yes...\" mixed with soft gasps and increasing moans that grow louder and more desperate. The man's strong hands grip her thighs firmly, fingers digging into her soft skin as he thrusts upward to meet her movements. Natural skin slapping sounds, wet squelching pussy sounds, and the gentle lapping of canal water against the gondola mix with her erotic moans. The entire scene is highly detailed, realistic body physics, glistening fluids, and sensual facial expressions throughout the 15 seconds.\nCamera slowly orbits around them at medium distance, capturing the explicit penetration, bouncing breasts, dripping juices, and Venice backdrop in smooth cinematic motion."
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "190": {
+        "inputs": {
+            "text": "A stunning young Asian woman with long silky brown hair, seductive eyes, and large bouncy breasts is riding cowgirl position on a man's thick, veiny cock inside a classic black Venetian gondola on the Grand Canal in Venice. The famous Rialto Bridge and beautiful historic buildings are visible in the sunny background. She wears an ornate lace and patterned dress pulled down around her waist, exposing her full breasts and dripping pussy.\n15-second dynamic video, realistic physics, natural movements, not too slow, cinematic 60fps:\nThe woman looks directly at the camera with her head slightly left-side in lustful, seductive eyes most of the time, occasionally shifting her gaze slightly with pleasure while keeping her head mostly level (no head tilting back). She rides the thick cock with fast steady, rhythmic bouncing and grinding motions — hips moving up and down sensually. At the same time she slides her fingers fast around the pussy in circular rhymth motions. Her large breasts jiggle and bounce heavily with each thrust, nipples erect. Clear, glossy pussy juices continuously drip and flow slowly down the man's glistening shaft and her inner thighs, creating shiny wet streaks.\n\nat 10s: Her natural, erotic female moaning — breathy \" あぁ…Nante sugoku kimochīi…!…あぁ…あぁ..あぁ…あぁ.\" and increasingly soft whispers, realistic pleasure moans mixed with soft gasps.\n\nThe gondola rocks gently and subtly in sync with their fucking, but the rocking is mild and stable. Camera remains steady with a fixed medium shot angle (no orbiting or circling), focused on her upper body, face, breasts, and explicit penetration.\nAudio:  Wet squelching sounds from her soaked pussy, skin slapping, and gentle water sounds from the canal.\nHighly detailed, realistic skin texture, natural body physics, glistening sweat and juices, seductive facial expressions while maintaining eye contact with the camera. Warm golden sunlight lighting."
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "191": {
+        "inputs": {
+            "text": "A stunning young Asian woman with long silky brown hair, seductive eyes, and large bouncy breasts is riding cowgirl position on a man's thick, veiny cock inside a classic black Venetian gondola on the Grand Canal in Venice. The famous Rialto Bridge and beautiful historic buildings are visible in the sunny background. She wears an ornate lace and patterned dress pulled down around her waist, exposing her full breasts and dripping pussy.\n15-second dynamic video, realistic physics, natural movements, not too slow, cinematic 60fps:\nThe woman looks directly with her head slightly left-side in lustful, seductive eyes most of the time, occasionally shifting her gaze slightly with pleasure. She rides the thick cock with fast steady, rhythmic bouncing and grinding motions — hips moving up and down sensually. At the same time she slides her fingers fast around the pussy in circular rhymth motions. Her large breasts jiggle and bounce heavily with each thrust, nipples erect. Clear, glossy pussy juices continuously drip and flow slowly down the man's glistening shaft and her inner thighs, creating shiny wet streaks.\n\nat 10s: Her natural, erotic female moaning — breathy \" あぁ…Nante sugoku kimochīi…!…あぁ…あぁ..あぁ…あぁ….\" and increasingly soft whispers, realistic pleasure moans mixed with soft gasps.\n\nThe gondola rocks gently and subtly in sync with their fucking, but the rocking is mild and stable. Camera remains steady with a fixed medium shot angle (no orbiting or circling), focused on her upper body, face, breasts, and explicit penetration.\n\nAudio:  Wet squelching sounds from her soaked pussy, skin slapping, and gentle water sounds from the canal.\nHighly detailed, realistic skin texture, natural body physics, glistening sweat and juices, seductive facial expressions while maintaining eye contact with the camera. Warm golden sunlight lighting."
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "192": {
+        "inputs": {
+            "text": "0-2s: Steady camera, the woman uses her hand to pulled down the straps of swimmingsuit. No background music. heavy breast & ass jiggle, wet slapping and squelching. Natural water flowing movement. heavy breathing from the female. \n\n2-6s: Her large breast pops out from the suit and revealing her nake bare breast, her soft breast is jiggling up and down naturally with her motion. No background music. heavy breast jiggle, water slapping and squelching, splattering sounds. Natural water flowing movement.heavy breathing from the female.\n\n6-9s: Steady camera, The soft swimmingsuit smoothly and slowly falls completely, and lets it softly resting by her side. She is now fully naked. Her soft breast is jiggling up and down naturally with her motion. No background music. heavy breast jiggle, wet slapping and squelching,splattering. Natural water flowing movement. Heavy breathing from the female.\n\n9-12s:She slides her finger in and out of vagina in fast, fluid, hypnotic motions,the pussy juice dripping down from her vagina to the pool, breasts bounces naturally as the same rhymth with her motion . Rhythm continues smoothly, clear juices drip steadily, skin glistens with sweat and moisture. She stares into the lens with soft, glazed eyes, biting her lower lip, whispering in Japanese: 'うん…指で弄る感覚…Totemo…ki-mo-chi i-i…'. \n\n12-20s:Steady fixed camera, maintains a quick pumping rhythm with fingers sliding in and out of her vagina, triggering smooth pelvic shudders and light hip lifts. She breathes heavily, thighs quiver slightly, hips buck naturally synced to the faster strokes. \nAudio: Fast wet squishes, rapid stretching sounds, finger pumping, rising breathy moans, subtle pelvic tremors. Her soft breast is jiggling up and down naturally with her motion. She stares into the lens with soft, glazed eyes, biting her lower lip while whispering: '.うん…指の動きで…段々深くなる…あぁ…kimochīi…'. She breathes heavily, thighs quiver, hips buck naturally.\n"
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "193": {
+        "inputs": {
+            "text": "A stunning young Japanese woman with long, slightly messy dark brown hair in a sexy high ponytail, flawless tanned skin covered in glistening water droplets, seductive almond-shaped eyes, and a flushed, aroused expression. She is fully nude, sitting on the edge of a luxurious tropical infinity pool. Her large, perky breasts with erect pink nipples bounce gently with her movements. She holds a thick, realistic green cucumber with a yellow tip in one hand, slowly inserting and thrusting it deep into her visibly wet, glistening pussy. Background: swaying palm trees, turquoise ocean, lounge chairs, and a luxury resort villa under bright sunlight. Hot, sensual, teasing atmosphere with realistic water reflections.\nVideo Style: 4K ultra-realistic, cinematic golden-hour lighting, shallow depth of field, smooth 60fps, erotic slow-motion on key moments, detailed skin texture, water droplets, and intimate close-ups.\nTimeline Script (15 seconds):\n0-4 seconds:\nThe woman leans back seductively against the pool edge, legs spread, looking at the camera with a soft, teasing smile. She gently rubs the cucumber tip along her wet folds and clit in slow circles, then slowly pushes it inside her pussy. Her hips move subtly, breasts rising and falling with her breathing. Expression: coy smile turning into soft pleasure. Gentle Japanese娇喘 and breathy moans: soft “Mmm… haa… ♡” and light panting, with subtle water splashing sounds.\n4-8 seconds:\nShe begins slow, deep thrusting motions with the cucumber, pushing it further in and pulling it out rhythmically. Her body rocks gently, fully immersed in the sensation. One hand rests on her thigh, occasionally caressing her skin. Her eyes half-close, lips part, cheeks flush deeper. Moans grow slightly more urgent but still soft and breathy: “Ahh… nngh… haaa…” with increasing wet squelching sounds from her pussy and gentle pool water ripples.\n8-12 seconds:\nPace gradually accelerates. She thrusts the cucumber faster and deeper into herself, hips moving more eagerly to meet each insertion. Breasts jiggle noticeably with the rhythm. Her expression becomes lost in pleasure — eyes fluttering, head tilting slightly back, biting her lip. Moans turn more intense and rapid: breathy, urgent Japanese panting “Haa… haa… ahh… mmmph… ♡” getting quicker and needier, mixed with louder wet thrusting and splashing sounds. She is completely immersed in the self-pleasure.\n12-15 seconds:\nThrusting speed reaches peak intensity — fast, deep, desperate strokes with the cucumber. Her whole body trembles, toes curl, hips buck involuntarily as she chases the pleasure. Expression fully ahegao-lite: eyes rolling back slightly, mouth open with heavy breathing. Moans become gentle, Japanese: continuous urgent “Ahh! Haaah… nnghh… haaa… ♡” without any words,, synchronized with intense wet squelching and water splashing. Ends with her slowing slightly while still gently pumping the cucumber, giving a satisfied, seductive half-smile to the camera with visible juices.\nAudio:\n\nAuthentic soft-to-urgent Japanese female erotic voice: only breathy moans, gasps, and  (no spoken words or loud screams). Starts gentle and sweet, becomes faster, needier, and more desperate as the pace increases.\nRich detailed wet pussy squelching, cucumber thrusting sounds, pool water splashing and dripping.\nSubtle background: ocean waves and palm leaves rustling. No music."
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt)"
+        }
+    },
+    "194": {
+        "inputs": {
+            "text": "A stunning young Japanese woman with long, slightly messy dark brown hair in a sexy high ponytail, flawless tanned skin covered in glistening water droplets, seductive almond-shaped eyes, and a flushed, aroused expression. She is fully nude, sitting on the edge of a luxurious tropical infinity pool. Her large, perky breasts with erect pink nipples bounce gently with her movements. She holds a thick, realistic green cucumber with a yellow tip in one hand, slowly inserting and thrusting it deep into her visibly wet, glistening pussy. Background: swaying palm trees, turquoise ocean, lounge chairs, and a luxury resort villa under bright sunlight. Hot, sensual, teasing atmosphere with realistic water reflections.\nVideo Style: 4K ultra-realistic, cinematic golden-hour lighting, shallow depth of field, smooth 60fps, erotic slow-motion on key moments, detailed skin texture, water droplets, and intimate close-ups.\nTimeline Script (15 seconds):\n0-4 seconds:\nThe woman leans back seductively against the pool edge, legs spread, looking at the camera with a soft, teasing smile. She gently rubs the cucumber tip along her wet folds and clit in slow circles, then slowly pushes it inside her pussy. Her hips move subtly, breasts rising and falling with her breathing. Expression: coy smile turning into soft pleasure. Gentle Japanese娇喘 and breathy moans: soft “Mmm… haa… ♡” and light panting, with subtle water splashing sounds.\n4-8 seconds:\nShe begins slow, deep thrusting motions with the cucumber, pushing it further in and pulling it out rhythmically. Her body rocks gently, fully immersed in the sensation. One hand rests on her thigh, occasionally caressing her skin. Her eyes half-close, lips part, cheeks flush deeper. Moans grow slightly more urgent but still soft and breathy: “Ahh… nngh… haaa…” with increasing wet squelching sounds from her pussy and gentle pool water ripples.\n8-12 seconds:\nPace gradually accelerates. She thrusts the cucumber faster and deeper into herself, hips moving more eagerly to meet each insertion. Breasts jiggle noticeably with the rhythm. Her expression becomes lost in pleasure — eyes fluttering, head tilting slightly back, biting her lip. Moans turn more intense and rapid: breathy, urgent Japanese panting “Haa… haa… ahh… mmmph… ♡” getting quicker and needier, mixed with louder wet thrusting and splashing sounds. She is completely immersed in the self-pleasure.\n12-15 seconds:\nThrusting speed reaches peak intensity — fast, deep, desperate strokes with the cucumber. Her whole body trembles, toes curl, hips buck involuntarily as she chases the pleasure. Expression fully ahegao-lite: eyes rolling back slightly, mouth open with heavy breathing. Her natural, erotic female moaning — breathy \" あぁ…Nante sugoku kimochīi…!…あぁ…あぁ..あぁ…あぁ.\" and increasingly soft whispers, realistic pleasure moans mixed with soft gasps. synchronized with intense wet squelching and water splashing. Ends with her slowing slightly while still gently pumping the cucumber, giving a satisfied, seductive half-smile to the camera with visible juices.\nAudio:\n\nAuthentic soft-to-urgent Japanese female erotic voice: only breathy moans, gasps, and  (no spoken words or loud screams). Starts gentle and sweet, becomes faster, needier, and more desperate as the pace increases.\nRich detailed wet pussy squelching, cucumber thrusting sounds, pool water splashing and dripping.\nSubtle background: ocean waves and palm leaves rustling. No music."
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt) Dildo"
+        }
+    },
+    "195": {
+        "inputs": {
+            "text": "A stunning young Japanese woman with long dark brown hair in a sexy high ponytail, flawless tanned skin glistening with water droplets, seductive almond eyes, and a cute flushed face. She is completely nude, sitting on the edge of a luxurious tropical infinity pool with her legs spread. Her large perky breasts with pink nipples bounce heavily with every movement. She holds a thick realistic green cucumber with a yellow tip in her right hand, smoothly and continuously thrusting it in and out of her visibly wet, glistening pussy at a steady medium speed.\nScene & Style:\nUltra-realistic 4K, cinematic golden sunlight, shallow depth of field, smooth 60fps fluid motion, detailed skin texture, water droplets rolling down her body, realistic pussy wetness and reflections on the pool water. Background features swaying palm trees, turquoise ocean, and luxury resort atmosphere. Hot, sensual, teasing vibe with intimate focus on her body and the cucumber action.\nMotion Description (Seamless 15s Loop):\nThe woman leans back slightly against the pool edge, looking at the camera with a cute seductive smile and playful gaze. She rhythmically fast pumps the thick cucumber in and out of her tight pussy at a consistent fast speed — smooth, deep, and continuous strokes that create a hypnotic self-pleasure rhythm. Her hips rock gently in sync with each thrust, making her full breasts jiggle heavily. Her free hand rests on her thigh, occasionally caressing her skin teasingly. Throughout the loop, her expression stays cute and seductive: soft biting of her lip, half-lidded eyes filled with pleasure, gentle head tilts, and a constant light blush. The motion is very fluid and natural, perfectly loopable without any abrupt starts or stops.Pace gradually accelerates. She thrusts the cucumber faster and deeper into herself, hips moving more eagerly to meet each insertion. Breasts jiggle noticeably with the rhythm. Her expression becomes lost in pleasure — eyes fluttering, head tilting slightly back, biting her lip. Moans turn more intense and rapid: breathy, urgent Japanese panting “Haa… haa… Kimochii… mmmph… ♡” getting quicker and needier, mixed with louder wet thrusting and splashing sounds. She is completely immersed in the self-pleasure.\n\n\nAudio:\nAuthentic soft-to-urgent Japanese female erotic voice: only breathy moans, gasps, and  (no spoken words or loud screams). Starts gentle and sweet, becomes faster, needier, and more desperate as the pace increases.\nRich detailed wet pussy squelching, cucumber thrusting sounds, pool water splashing and dripping.\nSubtle background: ocean waves and palm leaves rustling. No music."
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt) Dildo"
+        }
+    },
+    "196": {
+        "inputs": {
+            "text": "0-3s: The woman gently uses her hands to oepn her shirt then slide down off shoulders revealing her naked bare large breast\n3-6s: Her soft breast pops out and bouncing naturally as her shirt down. breast jiggling\n6-10s: The dress falls completely down on the pillow. She is now fully naked, maintaining an elegant posture. \nShe leans forward slightly, her large soft breast is jiggling natural as she rubs on it, maintains direct eye contact with the camera, lips part into a soft teasing smile, and gently bites her lower lip. She speaks breathily in seductive cute Japanese: “…お兄ちゃん.…もっと見たいですか？\n\n\nAudio:\nAuthentic soft-to-urgent Japanese female erotic voice: only breathy moans, gasps, and  (no spoken words or loud screams). Starts gentle and sweet, becomes faster, needier, and more desperate as the pace increases.\nRich detailed wet pussy squelching, cucumber thrusting sounds, pool water splashing and dripping.\nSubtle background: ocean waves and palm leaves rustling. No music."
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt) Dildo"
+        }
+    },
+    "197": {
+        "inputs": {
+            "text": "0-2s: The woman gently uses her left hand to slide white tank tops down a little bit revealing her large breast. No music.\n2-5s: she let go her hand. No music.\n5-10s: POV side tracking shot As her pace quickens, the loose neckline of the top gradually slips down, revealing her side perky-breasts with very small areola and erected nipples. Her hair flows naturally back with the wind, and her chest jiggles realistically with each step.\nUltra smooth motion. No music.\n"
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Prompt) Dildo"
+        }
+    }
+}
