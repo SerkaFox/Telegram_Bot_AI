@@ -661,31 +661,21 @@ def build_director_timeline_one_image(
     prompt: str,
     seconds: int,
 ) -> tuple[str, str, str]:
-    anchor_seconds = max(1, DIRECTOR_ANCHOR_SECONDS)
-    segments = []
-    prompts = []
-    lengths = []
-
-    start = 0.0
-    remaining = float(seconds)
-    while remaining > 0:
-        length = min(float(anchor_seconds), remaining)
-        segment_prompt = f"{prompt}\n\n{DIRECTOR_FACELOCK_PROMPT}\n\nAvoid: {DIRECTOR_NEGATIVE_PROMPT}"
-        segments.append(
-            {
-                "id": f"tg_{uuid.uuid4().hex[:12]}",
-                "start": start,
-                "length": length,
-                "prompt": segment_prompt,
-                "type": "image",
-                "imageFile": image_name,
-                "imageB64": f"/api/view?filename={quote(image_name)}&type=input&subfolder=",
-            }
-        )
-        prompts.append(segment_prompt)
-        lengths.append(length)
-        start += length
-        remaining -= length
+    length = float(seconds)
+    segment_prompt = f"{prompt}\n\n{DIRECTOR_FACELOCK_PROMPT}\n\nAvoid: {DIRECTOR_NEGATIVE_PROMPT}"
+    segments = [
+        {
+            "id": f"tg_{uuid.uuid4().hex[:12]}",
+            "start": 0.0,
+            "length": length,
+            "prompt": segment_prompt,
+            "type": "image",
+            "imageFile": image_name,
+            "imageB64": f"/api/view?filename={quote(image_name)}&type=input&subfolder=",
+        }
+    ]
+    prompts = [segment_prompt]
+    lengths = [length]
 
     timeline = {
         "segments": segments,
