@@ -92,16 +92,23 @@ DIRECTOR_LORA_OPTIONS = [
 ]
 
 DIRECTOR_FACELOCK_PROMPT = (
-    "Continuity lock: keep exactly the same identity as the reference image, same face, facial proportions, eye shape, "
-    "nose, mouth, jawline, hair, body shape, skin tone, outfit state, lighting, camera angle, and background. "
-    "The face must stay stable between frames with no morphing or identity drift. Preserve natural anatomy, stable body "
-    "physics, coherent hands, five fingers per hand, and consistent limb count."
+    "Strict continuity lock: use the reference image as the only identity source for the entire video. Keep exactly the "
+    "same woman, same face, same facial proportions, eye shape, nose, mouth, jawline, skin tone, body shape, and age in "
+    "every frame. Lock the reference hairstyle completely: same hair color, same hair length, same haircut, same bangs/parting, "
+    "same hair volume, no hairstyle drift, no color drift, no longer hair, no darker hair, no new hairstyle after camera movement. "
+    "Treat the video as one continuous take with temporal consistency; if the story changes pose or location, the same people "
+    "must remain visible and recognizable. Do not recast characters, do not replace actors, do not introduce a new woman, and "
+    "do not reset appearance after a scene transition. Preserve natural anatomy, stable body physics, coherent hands, five "
+    "fingers per hand, and consistent limb count."
 )
 DIRECTOR_NEGATIVE_PROMPT = (
-    "face morphing, face shifting, face changing, identity drift, different face, inconsistent identity, deformed face, "
-    "asymmetric facial features, blurry face, flickering face, unnatural blinking, frozen face, plastic skin, over-smoothed "
-    "skin, body morphing, deformed body, broken anatomy, extra limbs, missing limbs, extra fingers, fused fingers, bad hands, "
-    "warped hands, distorted torso, broken joints, unstable body proportions"
+    "face morphing, face shifting, face changing, identity drift, different face, inconsistent identity, new actor, new woman, "
+    "recast character, appearance reset, hairstyle change, hair color change, longer hair, darker hair, black hair if the "
+    "reference hair is not black, short hair becoming long hair, haircut changing, wig-like hair, scene cut identity reset, "
+    "hard cut to different person, inconsistent outfit, deformed face, asymmetric facial features, blurry face, flickering face, "
+    "unnatural blinking, frozen face, plastic skin, over-smoothed skin, body morphing, deformed body, broken anatomy, extra "
+    "limbs, missing limbs, extra fingers, fused fingers, bad hands, warped hands, distorted torso, broken joints, unstable "
+    "body proportions"
 )
 
 logging.basicConfig(
