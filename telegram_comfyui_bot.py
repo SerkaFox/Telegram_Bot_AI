@@ -73,6 +73,23 @@ DIRECTOR_FACE_SWAP_MODEL = os.getenv("DIRECTOR_FACE_SWAP_MODEL", "inswapper_128.
 DIRECTOR_FACE_ANALYSIS_MODEL = os.getenv("DIRECTOR_FACE_ANALYSIS_MODEL", "buffalo_l")
 DIRECTOR_FACE_SWAP_INDICES = os.getenv("DIRECTOR_FACE_SWAP_INDICES", "0")
 DIRECTOR_FACE_SWAP_TIMEOUT = int(os.getenv("DIRECTOR_FACE_SWAP_TIMEOUT", "900"))
+DIRECTOR_MAX_LORAS = int(os.getenv("DIRECTOR_MAX_LORAS", "13"))
+DIRECTOR_LORA_STRENGTH_DEFAULT = float(os.getenv("DIRECTOR_LORA_STRENGTH_DEFAULT", "0.35"))
+DIRECTOR_LORA_OPTIONS = [
+    {"label": "LTX 2.3 Distill 384", "file": "ltx-2.3-22b-distilled-lora-384.safetensors", "strength": 0.25},
+    {"label": "LTX 2.3 Dynamic", "file": "ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors", "strength": 0.25},
+    {"label": "Dreamlay LTX V2", "file": "DR34ML4Y_LTXXX_V2.safetensors", "strength": 0.30},
+    {"label": "Sex Thrust", "file": "LTX2-i2v-SexThrust.safetensors", "strength": 0.25},
+    {"label": "Orgasm", "file": "LTX-2.3 - Orgasm.safetensors", "strength": 0.30},
+    {"label": "Passionate Kissing", "file": "LTX-2 - Passionate Kissing.safetensors", "strength": 0.30},
+    {"label": "Motion 7K", "file": "LTX2_SS_Motion_7K.safetensors", "strength": 0.25},
+    {"label": "Best Breasts", "file": "LTX2_BestBreasts_lora_V2_step_06000.safetensors", "strength": 0.25},
+    {"label": "Animation", "file": "cr3ampi3_animation_i2v_ltx2_v1.0.safetensors", "strength": 0.25},
+    {"label": "Doggy Mission", "file": "doggy_mission_3d_ltx2_v1.0.safetensors", "strength": 0.25},
+    {"label": "NSFW Merge", "file": "ltx2-phr00tmerge-nsfw-v62.safetensors", "strength": 0.25},
+    {"label": "Riding Backshot", "file": "nsfw_riding_backshot_frontshot_ltx23_v1.0.safetensors", "strength": 0.25},
+    {"label": "Jiggle", "file": "LTX-2 - Jiggle Tits.safetensors", "strength": 0.20},
+]
 
 DIRECTOR_FACELOCK_PROMPT = (
     "Continuity lock: keep exactly the same identity as the reference image, same face, facial proportions, eye shape, "
@@ -113,6 +130,7 @@ class Job:
     seed: int
     video_source: dict | None
     image_refs: list[dict]
+    director_loras: list[str]
 
 
 # ============================================================
@@ -230,6 +248,7 @@ def initial_state() -> dict[str, Any]:
         "max_side": QUALITY_PRESETS.get(DEFAULT_QUALITY, 768),
         "video_source": blank_media(),
         "image_refs": [blank_media(), blank_media(), blank_media()],
+        "director_loras": [],
     }
 
 
@@ -377,6 +396,9 @@ def main_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("📋 Status", callback_data="show:status"),
                 InlineKeyboardButton("📷 Recent photos", callback_data="media:list"),
+                InlineKeyboardButton("🎚 LoRA", callback_data="lora:list"),
+            ],
+            [
                 InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
             ],
             [
@@ -412,6 +434,49 @@ def media_preview_keyboard(index: int, total: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("↩️ Back", callback_data="show:status")],
         ]
     )
+
+
+def director_lora_by_file(filename: str) -> dict[str, Any] | None:
+    for opt in DIRECTOR_LORA_OPTIONS:
+        if opt["file"] == filename:
+            return opt
+    return None
+
+
+def selected_lora_labels(st: dict[str, Any], limit: int = 4) -> str:
+    selected = st.get("director_loras") or []
+    if not selected:
+        return "none"
+    labels = [(director_lora_by_file(name) or {"label": name})["label"] for name in selected]
+    if len(labels) > limit:
+        return ", ".join(labels[:limit]) + f" +{len(labels) - limit}"
+    return ", ".join(labels)
+
+
+def lora_keyboard(st: dict[str, Any]) -> InlineKeyboardMarkup:
+    selected = set(st.get("director_loras") or [])
+    rows = []
+    for i, opt in enumerate(DIRECTOR_LORA_OPTIONS):
+        mark = "✓" if opt["file"] in selected else "○"
+        rows.append([InlineKeyboardButton(f"{mark} {opt['label']}", callback_data=f"lora:toggle:{i}")])
+    rows.append([InlineKeyboardButton("Clear", callback_data="lora:clear"), InlineKeyboardButton("↩️ Back", callback_data="show:status")])
+    return InlineKeyboardMarkup(rows)
+
+
+def lora_text(st: dict[str, Any]) -> str:
+    selected = st.get("director_loras") or []
+    lines = [
+        "LoRA для LTX Director",
+        "",
+        f"Выбрано: {len(selected)}/{DIRECTOR_MAX_LORAS}",
+    ]
+    if selected:
+        for name in selected:
+            opt = director_lora_by_file(name) or {"label": name, "strength": DIRECTOR_LORA_STRENGTH_DEFAULT}
+            lines.append(f"• {opt['label']} ({opt.get('strength', DIRECTOR_LORA_STRENGTH_DEFAULT):.2f})")
+    else:
+        lines.append("• none")
+    return "\n".join(lines)
 
 
 async def send_media_preview_message(target_message, context: ContextTypes.DEFAULT_TYPE, index: int = 0) -> None:
@@ -497,6 +562,7 @@ def help_text(st: dict[str, Any]) -> str:
         f"/seconds 8 — video до {MAX_SECONDS} сек, director до {MAX_DIRECTOR_SECONDS} сек\n"
         "/quality low|medium|high\n"
         "/repeat 1\n"
+        "/loras — выбрать LoRA для Director\n"
         "/photos — выбрать базовое фото из последних загруженных\n"
         "/go — генерация\n"
         "/reset\n\n"
@@ -511,6 +577,7 @@ def help_text(st: dict[str, Any]) -> str:
         f"• quality: {quality_label(st['max_side'])} ({st['max_side']} px)\n"
         f"• seconds: {st['seconds']}\n"
         f"• repeat: {st.get('repeat', 1)}\n"
+        f"• director LoRA: {selected_lora_labels(st)}\n"
         f"• video/director source: {media_line(st['video_source'])}\n"
         f"• image ref #1: {media_line(refs[0])}\n"
         f"• image ref #2: {media_line(refs[1])}\n"
@@ -699,6 +766,31 @@ def build_director_timeline_one_image(
     )
 
 
+def apply_director_loras(wf: dict[str, Any], selected_loras: list[str]) -> None:
+    node = wf.get("182")
+    if not node:
+        return
+
+    inputs = node.setdefault("inputs", {})
+    slots = [f"lora_{i}" for i in range(1, DIRECTOR_MAX_LORAS + 1)]
+    for slot in slots:
+        entry = inputs.setdefault(slot, {})
+        entry["on"] = False
+
+    valid_files = []
+    for filename in selected_loras:
+        opt = director_lora_by_file(filename)
+        if opt and filename not in valid_files:
+            valid_files.append(filename)
+
+    for slot, filename in zip(slots, valid_files[:DIRECTOR_MAX_LORAS]):
+        opt = director_lora_by_file(filename) or {}
+        entry = inputs.setdefault(slot, {})
+        entry["on"] = True
+        entry["lora"] = filename
+        entry["strength"] = float(opt.get("strength", DIRECTOR_LORA_STRENGTH_DEFAULT))
+
+
 def patch_director_workflow(
     wf: dict[str, Any],
     *,
@@ -708,6 +800,7 @@ def patch_director_workflow(
     height: int,
     seconds: int,
     seed: int,
+    selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
 
@@ -738,6 +831,8 @@ def patch_director_workflow(
         wf["28"]["inputs"]["noise_seed"] = int(seed)
     if "166" in wf and "noise_seed" in wf["166"]["inputs"]:
         wf["166"]["inputs"]["noise_seed"] = int(make_seed())
+
+    apply_director_loras(wf, selected_loras or [])
 
     # Final output node
     wf["94"]["inputs"]["filename_prefix"] = "tg_director"
@@ -1199,6 +1294,13 @@ async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_ui_message(update.message, context, "Режим: photo → image", reply_markup=main_keyboard())
 
 
+async def loras_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+    st = get_state(context)
+    await send_ui_message(update.message, context, lora_text(st), reply_markup=lora_keyboard(st))
+
+
 async def photos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update):
         return
@@ -1444,6 +1546,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data == "lora:list":
+        await replace_ui_message_from_callback(query, context, lora_text(st), reply_markup=lora_keyboard(st))
+        return
+
+    if data.startswith("lora:toggle:"):
+        try:
+            idx = int(data.rsplit(":", 1)[1])
+        except Exception:
+            idx = -1
+        if 0 <= idx < len(DIRECTOR_LORA_OPTIONS):
+            filename = DIRECTOR_LORA_OPTIONS[idx]["file"]
+            selected = list(st.get("director_loras") or [])
+            if filename in selected:
+                selected.remove(filename)
+            elif len(selected) < DIRECTOR_MAX_LORAS:
+                selected.append(filename)
+            st["director_loras"] = selected
+        await replace_ui_message_from_callback(query, context, lora_text(st), reply_markup=lora_keyboard(st))
+        return
+
+    if data == "lora:clear":
+        st["director_loras"] = []
+        await replace_ui_message_from_callback(query, context, lora_text(st), reply_markup=lora_keyboard(st))
+        return
+
     if data == "media:list":
         user_id = update.effective_user.id if update.effective_user else 0
         library = rebuild_media_library_from_disk(context, user_id, st["max_side"])
@@ -1586,6 +1713,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             seed=make_seed(),
             video_source=copy.deepcopy(st["video_source"]),
             image_refs=copy.deepcopy(st["image_refs"]),
+            director_loras=list(st.get("director_loras") or []),
         )
         await GEN_QUEUE.put(job)
 
@@ -1687,6 +1815,7 @@ async def submit_director_job(app: Application, job: Job) -> None:
         height=src["fit_height"],
         seconds=job.seconds,
         seed=job.seed,
+        selected_loras=job.director_loras,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
@@ -1702,6 +1831,7 @@ async def submit_director_job(app: Application, job: Job) -> None:
         "height": src["fit_height"],
         "prompt": job.prompt,
         "source_image_name": uploaded_name,
+        "director_loras": job.director_loras,
     }
 
 
@@ -1747,6 +1877,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("image", image_cmd))
     app.add_handler(CommandHandler("photos", photos_cmd))
+    app.add_handler(CommandHandler("loras", loras_cmd))
     app.add_handler(CommandHandler("prompt", prompt_cmd))
     app.add_handler(CommandHandler("seconds", seconds_cmd))
     app.add_handler(CommandHandler("quality", quality_cmd))
