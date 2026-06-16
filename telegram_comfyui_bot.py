@@ -68,6 +68,11 @@ MAX_REFS_FOR_IMAGE = 3
 DIRECTOR_FPS = int(os.getenv("DIRECTOR_FPS", "24"))
 DIRECTOR_ANCHOR_SECONDS = int(os.getenv("DIRECTOR_ANCHOR_SECONDS", "8"))
 MEDIA_LIBRARY_LIMIT = int(os.getenv("MEDIA_LIBRARY_LIMIT", "10"))
+DIRECTOR_FACE_SWAP = os.getenv("DIRECTOR_FACE_SWAP", "0").strip().lower() not in {"0", "false", "no", "off"}
+DIRECTOR_FACE_SWAP_MODEL = os.getenv("DIRECTOR_FACE_SWAP_MODEL", "inswapper_128.onnx")
+DIRECTOR_FACE_ANALYSIS_MODEL = os.getenv("DIRECTOR_FACE_ANALYSIS_MODEL", "buffalo_l")
+DIRECTOR_FACE_SWAP_INDICES = os.getenv("DIRECTOR_FACE_SWAP_INDICES", "0")
+DIRECTOR_FACE_SWAP_TIMEOUT = int(os.getenv("DIRECTOR_FACE_SWAP_TIMEOUT", "900"))
 
 DIRECTOR_FACELOCK_PROMPT = (
     "Continuity lock: keep exactly the same identity as the reference image, same face, facial proportions, eye shape, "
@@ -363,6 +368,11 @@ def main_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("➖2s", callback_data="sec:-2"),
                 InlineKeyboardButton("➕2s", callback_data="sec:+2"),
+            ],
+            [
+                InlineKeyboardButton("1x", callback_data="repeat:1"),
+                InlineKeyboardButton("10x", callback_data="repeat:10"),
+                InlineKeyboardButton("30x", callback_data="repeat:30"),
             ],
             [
                 InlineKeyboardButton("📋 Status", callback_data="show:status"),
@@ -815,6 +825,132 @@ def is_system_idle() -> bool:
     return GEN_QUEUE.qsize() == 0 and len(ACTIVE_PROMPTS) == 0
 
 
+
+def build_director_faceswap_workflow(
+    *,
+    video_name: str,
+    reference_image_name: str,
+    fps: int,
+) -> dict[str, Any]:
+    return {
+        "1": {
+            "class_type": "VHS_LoadVideo",
+            "inputs": {
+                "video": video_name,
+                "force_rate": int(fps),
+                "custom_width": 0,
+                "custom_height": 0,
+                "frame_load_cap": 0,
+                "skip_first_frames": 0,
+                "select_every_nth": 1,
+                "format": "None",
+            },
+        },
+        "2": {
+            "class_type": "LoadImage",
+            "inputs": {
+                "image": reference_image_name,
+            },
+        },
+        "3": {
+            "class_type": "Load Face Analysis Model (mtb)",
+            "inputs": {
+                "faceswap_model": DIRECTOR_FACE_ANALYSIS_MODEL,
+            },
+        },
+        "4": {
+            "class_type": "Load Face Swap Model (mtb)",
+            "inputs": {
+                "faceswap_model": DIRECTOR_FACE_SWAP_MODEL,
+            },
+        },
+        "5": {
+            "class_type": "Face Swap (mtb)",
+            "inputs": {
+                "image": ["1", 0],
+                "reference": ["2", 0],
+                "faces_index": DIRECTOR_FACE_SWAP_INDICES,
+                "faceanalysis_model": ["3", 0],
+                "faceswap_model": ["4", 0],
+                "preserve_alpha": True,
+            },
+        },
+        "6": {
+            "class_type": "VHS_VideoCombine",
+            "inputs": {
+                "images": ["5", 0],
+                "audio": ["1", 2],
+                "frame_rate": int(fps),
+                "loop_count": 0,
+                "filename_prefix": "tg_director_faceswap",
+                "format": "video/h264-mp4",
+                "pix_fmt": "yuv420p",
+                "crf": 15,
+                "save_metadata": True,
+                "trim_to_audio": False,
+                "pingpong": False,
+                "save_output": True,
+            },
+        },
+    }
+
+
+async def wait_for_result_from_prompt(
+    prompt_id: str,
+    *,
+    preferred_node: str,
+    timeout: int,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        history = await asyncio.to_thread(get_history, prompt_id)
+        item = history.get(prompt_id)
+        if item and item.get("outputs"):
+            return pick_first_result_from_outputs(item["outputs"], preferred_node=preferred_node)
+        await asyncio.sleep(POLL_SECONDS)
+    raise TimeoutError(f"Timed out waiting for prompt_id={prompt_id}")
+
+
+async def run_director_faceswap_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
+    reference_image_name = meta.get("source_image_name")
+    if not reference_image_name:
+        return None
+
+    input_name = f"tg_faceswap_{uuid.uuid4().hex}.mp4"
+    input_path = COMFY_INPUT_DIR / input_name
+    save_bytes(input_path, blob)
+
+    try:
+        wf = build_director_faceswap_workflow(
+            video_name=input_name,
+            reference_image_name=reference_image_name,
+            fps=int(meta.get("fps") or DIRECTOR_FPS),
+        )
+        prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+        result = await wait_for_result_from_prompt(
+            prompt_id,
+            preferred_node="6",
+            timeout=DIRECTOR_FACE_SWAP_TIMEOUT,
+        )
+        swapped_blob = await asyncio.to_thread(
+            fetch_file,
+            result["filename"],
+            result.get("subfolder", ""),
+            result.get("type", "output"),
+        )
+        await asyncio.to_thread(
+            delete_comfy_result_file,
+            result["filename"],
+            result.get("subfolder", ""),
+        )
+        return swapped_blob, result.get("filename") or filename
+    finally:
+        try:
+            input_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 async def send_result(app: Application, meta: dict[str, Any], result: dict[str, Any]) -> None:
     blob = await asyncio.to_thread(
         fetch_file,
@@ -824,6 +960,20 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
     )
 
     filename = result.get("filename", "result.bin")
+
+    if (
+        DIRECTOR_FACE_SWAP
+        and meta.get("mode") == "director"
+        and filename.lower().endswith((".mp4", ".mov", ".webm"))
+    ):
+        try:
+            processed = await run_director_faceswap_postprocess(blob, meta, filename)
+            if processed:
+                blob, filename = processed
+                log.info("Director face swap postprocess applied for job #%s", meta.get("job_id"))
+        except Exception:
+            log.exception("Director face swap postprocess failed; sending original result")
+
     prompt_text = (meta.get("prompt") or "").strip()
 
     caption = "Готово."
@@ -1280,6 +1430,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data.startswith("repeat:"):
+        try:
+            repeat = int(data.split(":", 1)[1])
+        except Exception:
+            repeat = 1
+        st["repeat"] = max(1, min(200, repeat))
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            "Количество запусков: {}".format(st["repeat"]),
+            reply_markup=main_keyboard(),
+        )
+        return
+
     if data == "media:list":
         user_id = update.effective_user.id if update.effective_user else 0
         library = rebuild_media_library_from_disk(context, user_id, st["max_side"])
@@ -1537,6 +1701,7 @@ async def submit_director_job(app: Application, job: Job) -> None:
         "width": src["fit_width"],
         "height": src["fit_height"],
         "prompt": job.prompt,
+        "source_image_name": uploaded_name,
     }
 
 
