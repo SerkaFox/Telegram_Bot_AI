@@ -1843,8 +1843,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def post_init(app: Application) -> None:
-    app.create_task(submit_worker_loop(app))
-    app.create_task(monitor_loop(app))
+    asyncio.create_task(submit_worker_loop(app))
+    asyncio.create_task(monitor_loop(app))
     log.info("Bot initialized")
 
 
