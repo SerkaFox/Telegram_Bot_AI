@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
-from PIL import Image
+from PIL import Image, ImageOps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import (
     Application,
@@ -38,6 +38,9 @@ WORKFLOW_DIRECTOR = os.getenv("COMFY_WORKFLOW_DIRECTOR", "./New.json")
 
 TMP_DIR = Path(os.getenv("BOT_TMP_DIR", "./tmp_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+DATASET_DIR = Path(os.getenv("BOT_DATASET_DIR", "./character_datasets"))
+DATASET_DIR.mkdir(parents=True, exist_ok=True)
 
 COMFY_INPUT_DIR = Path(os.getenv("COMFY_INPUT_DIR", "/home/iaadmin/ComfyUI/input"))
 COMFY_OUTPUT_DIR = Path(os.getenv("COMFY_OUTPUT_DIR", "/home/iaadmin/ComfyUI/output"))
@@ -68,6 +71,8 @@ MAX_REFS_FOR_IMAGE = 3
 DIRECTOR_FPS = int(os.getenv("DIRECTOR_FPS", "24"))
 DIRECTOR_ANCHOR_SECONDS = int(os.getenv("DIRECTOR_ANCHOR_SECONDS", "8"))
 MEDIA_LIBRARY_LIMIT = int(os.getenv("MEDIA_LIBRARY_LIMIT", "10"))
+DATASET_DEFAULT_NAME = os.getenv("DATASET_DEFAULT_NAME", "main_character")
+DATASET_DEFAULT_TRIGGER = os.getenv("DATASET_DEFAULT_TRIGGER", "sfoxgirl")
 DIRECTOR_FACE_SWAP = os.getenv("DIRECTOR_FACE_SWAP", "0").strip().lower() not in {"0", "false", "no", "off"}
 DIRECTOR_FACE_SWAP_MODEL = os.getenv("DIRECTOR_FACE_SWAP_MODEL", "inswapper_128.onnx")
 DIRECTOR_FACE_ANALYSIS_MODEL = os.getenv("DIRECTOR_FACE_ANALYSIS_MODEL", "buffalo_l")
@@ -288,6 +293,54 @@ def get_media_library(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, Any]
     return context.user_data["media_library"]
 
 
+def get_dataset_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+    if "dataset_state" not in context.user_data:
+        context.user_data["dataset_state"] = {
+            "collecting": False,
+            "name": DATASET_DEFAULT_NAME,
+            "trigger": DATASET_DEFAULT_TRIGGER,
+        }
+    return context.user_data["dataset_state"]
+
+
+def sanitize_dataset_name(name: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (name or "").strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or DATASET_DEFAULT_NAME
+
+
+def dataset_paths(ds: dict[str, Any]) -> tuple[Path, Path]:
+    root = DATASET_DIR / sanitize_dataset_name(ds.get("name") or DATASET_DEFAULT_NAME)
+    images = root / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    return root, images
+
+
+def count_dataset_images(ds: dict[str, Any]) -> int:
+    _, images = dataset_paths(ds)
+    return len([p for p in images.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}])
+
+
+def dataset_caption(ds: dict[str, Any]) -> str:
+    trigger = (ds.get("trigger") or DATASET_DEFAULT_TRIGGER).strip() or DATASET_DEFAULT_TRIGGER
+    return f"{trigger}, same character, consistent face, same hairstyle, consistent body shape"
+
+
+def save_dataset_photo(src_path: Path, ds: dict[str, Any]) -> tuple[Path, Path, int]:
+    root, images = dataset_paths(ds)
+    idx = count_dataset_images(ds) + 1
+    stem = f"{sanitize_dataset_name(ds.get('name') or DATASET_DEFAULT_NAME)}_{idx:04d}"
+    image_path = images / f"{stem}.jpg"
+    caption_path = images / f"{stem}.txt"
+
+    with Image.open(src_path) as img:
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        img.save(image_path, quality=95)
+
+    caption_path.write_text(dataset_caption(ds) + "\n", encoding="utf-8")
+    return image_path, caption_path, idx
+
+
 def remember_media(context: ContextTypes.DEFAULT_TYPE, media: dict[str, Any]) -> None:
     library = get_media_library(context)
     path = media.get("path")
@@ -418,6 +471,9 @@ def main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🎚 LoRA", callback_data="lora:list"),
             ],
             [
+                InlineKeyboardButton("🧬 Dataset", callback_data="dataset:status"),
+            ],
+            [
                 InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
             ],
             [
@@ -480,6 +536,30 @@ def lora_keyboard(st: dict[str, Any]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(f"{mark} {opt['label']}", callback_data=f"lora:toggle:{i}")])
     rows.append([InlineKeyboardButton("Clear", callback_data="lora:clear"), InlineKeyboardButton("↩️ Back", callback_data="show:status")])
     return InlineKeyboardMarkup(rows)
+
+
+def dataset_keyboard(ds: dict[str, Any]) -> InlineKeyboardMarkup:
+    collecting = bool(ds.get("collecting"))
+    action = InlineKeyboardButton("Stop collecting" if collecting else "Start collecting", callback_data="dataset:stop" if collecting else "dataset:start")
+    return InlineKeyboardMarkup(
+        [
+            [action],
+            [InlineKeyboardButton("↩️ Back", callback_data="show:status")],
+        ]
+    )
+
+
+def dataset_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    ds = get_dataset_state(context)
+    root, images = dataset_paths(ds)
+    return (
+        "Character LoRA dataset\n\n"
+        f"Status: {'collecting' if ds.get('collecting') else 'paused'}\n"
+        f"Name: {sanitize_dataset_name(ds.get('name') or DATASET_DEFAULT_NAME)}\n"
+        f"Trigger: {(ds.get('trigger') or DATASET_DEFAULT_TRIGGER).strip()}\n"
+        f"Images: {count_dataset_images(ds)}\n"
+        f"Path: {images}"
+    )
 
 
 def lora_text(st: dict[str, Any]) -> str:
@@ -583,6 +663,8 @@ def help_text(st: dict[str, Any]) -> str:
         "/repeat 1\n"
         "/loras — выбрать LoRA для Director\n"
         "/photos — выбрать базовое фото из последних загруженных\n"
+        "/dataset — сбор картинок персонажа для LoRA\n"
+        "/dataset_trigger sfoxgirl — trigger word для LoRA captions\n"
         "/go — генерация\n"
         "/reset\n\n"
         "Как тестировать Director:\n"
@@ -1366,6 +1448,48 @@ async def loras_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_ui_message(update.message, context, lora_text(st), reply_markup=lora_keyboard(st))
 
 
+async def dataset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+
+    ds = get_dataset_state(context)
+    args = [a.strip() for a in context.args if a.strip()]
+    if args:
+        action = args[0].lower()
+        if action in {"on", "start"}:
+            ds["collecting"] = True
+            if len(args) > 1:
+                ds["name"] = sanitize_dataset_name(args[1])
+        elif action in {"off", "stop", "pause"}:
+            ds["collecting"] = False
+        else:
+            ds["name"] = sanitize_dataset_name(args[0])
+            ds["collecting"] = True
+
+    await send_ui_message(update.message, context, dataset_text(context), reply_markup=dataset_keyboard(ds))
+
+
+async def dataset_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+    ds = get_dataset_state(context)
+    await send_ui_message(update.message, context, dataset_text(context), reply_markup=dataset_keyboard(ds))
+
+
+async def dataset_trigger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+
+    ds = get_dataset_state(context)
+    if not context.args:
+        await send_ui_message(update.message, context, f"Сейчас trigger: {ds.get('trigger') or DATASET_DEFAULT_TRIGGER}", reply_markup=dataset_keyboard(ds))
+        return
+
+    trigger = sanitize_dataset_name(context.args[0])
+    ds["trigger"] = trigger
+    await send_ui_message(update.message, context, f"Trigger сохранён: {trigger}", reply_markup=dataset_keyboard(ds))
+
+
 async def photos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update):
         return
@@ -1497,6 +1621,17 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     with Image.open(path) as img:
         width, height = img.size
+
+    ds = get_dataset_state(context)
+    if ds.get("collecting"):
+        image_path, caption_path, idx = save_dataset_photo(path, ds)
+        await send_ui_message(
+            update.message,
+            context,
+            f"Dataset image #{idx} сохранён.\nФото: {image_path.name}\nCaption: {caption_path.name}\nВсего: {count_dataset_images(ds)}",
+            reply_markup=dataset_keyboard(ds),
+        )
+        return
 
     fit_w, fit_h = fit_size_keep_aspect(width, height, st["max_side"])
     media = {
@@ -1634,6 +1769,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "lora:clear":
         st["director_loras"] = []
         await replace_ui_message_from_callback(query, context, lora_text(st), reply_markup=lora_keyboard(st))
+        return
+
+    if data.startswith("dataset:"):
+        ds = get_dataset_state(context)
+        action = data.split(":", 1)[1]
+        if action == "start":
+            ds["collecting"] = True
+        elif action == "stop":
+            ds["collecting"] = False
+        await replace_ui_message_from_callback(query, context, dataset_text(context), reply_markup=dataset_keyboard(ds))
         return
 
     if data == "media:list":
@@ -1943,6 +2088,9 @@ def main() -> None:
     app.add_handler(CommandHandler("image", image_cmd))
     app.add_handler(CommandHandler("photos", photos_cmd))
     app.add_handler(CommandHandler("loras", loras_cmd))
+    app.add_handler(CommandHandler("dataset", dataset_cmd))
+    app.add_handler(CommandHandler("dataset_status", dataset_status_cmd))
+    app.add_handler(CommandHandler("dataset_trigger", dataset_trigger_cmd))
     app.add_handler(CommandHandler("prompt", prompt_cmd))
     app.add_handler(CommandHandler("seconds", seconds_cmd))
     app.add_handler(CommandHandler("quality", quality_cmd))
