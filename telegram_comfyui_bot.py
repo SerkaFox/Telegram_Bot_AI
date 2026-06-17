@@ -73,6 +73,9 @@ DIRECTOR_FACE_SWAP_MODEL = os.getenv("DIRECTOR_FACE_SWAP_MODEL", "inswapper_128.
 DIRECTOR_FACE_ANALYSIS_MODEL = os.getenv("DIRECTOR_FACE_ANALYSIS_MODEL", "buffalo_l")
 DIRECTOR_FACE_SWAP_INDICES = os.getenv("DIRECTOR_FACE_SWAP_INDICES", "0")
 DIRECTOR_FACE_SWAP_TIMEOUT = int(os.getenv("DIRECTOR_FACE_SWAP_TIMEOUT", "900"))
+DIRECTOR_ROPE_SIMILARITY = float(os.getenv("DIRECTOR_ROPE_SIMILARITY", "65"))
+DIRECTOR_ROPE_DETECTION = float(os.getenv("DIRECTOR_ROPE_DETECTION", "0.5"))
+DIRECTOR_ROPE_MATCHING = os.getenv("DIRECTOR_ROPE_MATCHING", "0").strip() or "0"
 DIRECTOR_MAX_LORAS = int(os.getenv("DIRECTOR_MAX_LORAS", "13"))
 DIRECTOR_LORA_STRENGTH_DEFAULT = float(os.getenv("DIRECTOR_LORA_STRENGTH_DEFAULT", "0.35"))
 DIRECTOR_LORA_OPTIONS = [
@@ -191,6 +194,22 @@ def gif_to_mp4(input_path: Path, output_path: Path) -> None:
         "-i", str(input_path),
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
+        str(output_path),
+    ])
+
+
+def mux_video_with_audio(video_path: Path, audio_source_path: Path, output_path: Path) -> None:
+    run_cmd([
+        "ffmpeg",
+        "-y",
+        "-i", str(video_path),
+        "-i", str(audio_source_path),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-shortest",
+        "-movflags", "+faststart",
         str(output_path),
     ])
 
@@ -948,43 +967,73 @@ def build_director_faceswap_workflow(
             },
         },
         "3": {
-            "class_type": "Load Face Analysis Model (mtb)",
+            "class_type": "RopeWrapper_LoadModels",
             "inputs": {
-                "faceswap_model": DIRECTOR_FACE_ANALYSIS_MODEL,
+                "inswap_type": "Original",
             },
         },
         "4": {
-            "class_type": "Load Face Swap Model (mtb)",
+            "class_type": "RopeWrapper_DetectNode",
             "inputs": {
-                "faceswap_model": DIRECTOR_FACE_SWAP_MODEL,
+                "models": ["3", 0],
+                "input_image": ["1", 0],
+                "SimilarityThreshold": float(DIRECTOR_ROPE_SIMILARITY),
+                "detection_threshold": float(DIRECTOR_ROPE_DETECTION),
             },
         },
         "5": {
-            "class_type": "Face Swap (mtb)",
+            "class_type": "RopeWrapper_OptionNode",
             "inputs": {
-                "image": ["1", 0],
-                "reference": ["2", 0],
-                "faces_index": DIRECTOR_FACE_SWAP_INDICES,
-                "faceanalysis_model": ["3", 0],
-                "faceswap_model": ["4", 0],
-                "preserve_alpha": True,
+                "RestorerSwitch": False,
+                "RestorerTypeTextSel": "CF",
+                "RestorerDetTypeTextSel": "Blend",
+                "RestorerSlider": 100,
+                "OrientSwitch": False,
+                "OrientSlider": 180,
+                "StrengthSwitch": False,
+                "StrengthSlider": 200,
+                "BorderTopSlider": 10,
+                "BorderSidesSlider": 10,
+                "BorderBottomSlider": 10,
+                "BorderBlurSlider": 10,
+                "DiffSwitch": False,
+                "DiffSlider": 4,
+                "OccluderSwitch": False,
+                "OccluderSlider": 0,
+                "FaceParserSwitch": False,
+                "FaceParserSlider": 0,
+                "MouthParserSlider": 0,
+                "CLIPSwitch": False,
+                "CLIPTextEntry": " ",
+                "CLIPSlider": 50,
+                "BlendSlider": 5,
+                "ColorSwitch": False,
+                "ColorRedSlider": 0,
+                "ColorGreenSlider": 0,
+                "ColorBlueSlider": 0,
+                "ColorGammaSlider": 0.0,
+                "FaceAdjSwitch": False,
+                "KPSXSlider": 0,
+                "KPSYSlider": 0,
+                "KPSScaleSlider": 0,
+                "SwapperTypeTextSel": "128",
             },
         },
         "6": {
-            "class_type": "VHS_VideoCombine",
+            "class_type": "RopeWrapper_SwapNode",
             "inputs": {
-                "images": ["5", 0],
-                "audio": ["1", 2],
+                "models": ["3", 0],
+                "vm": ["3", 1],
+                "input_image": ["1", 0],
+                "source_face": ["2", 0],
+                "detectResult": ["4", 1],
+                "combineVideo": True,
                 "frame_rate": int(fps),
-                "loop_count": 0,
-                "filename_prefix": "tg_director_faceswap",
-                "format": "video/h264-mp4",
-                "pix_fmt": "yuv420p",
-                "crf": 15,
-                "save_metadata": True,
-                "trim_to_audio": False,
-                "pingpong": False,
-                "save_output": True,
+                "filenamePrefix": "tg_director_rope",
+                "saveOutput": True,
+                "outputFrameIndex": 0,
+                "ROPE_Options": ["5", 0],
+                "source_target_matching": DIRECTOR_ROPE_MATCHING,
             },
         },
     }
@@ -1033,12 +1082,28 @@ async def run_director_faceswap_postprocess(blob: bytes, meta: dict[str, Any], f
             result.get("subfolder", ""),
             result.get("type", "output"),
         )
+        swapped_name = result.get("filename") or filename
+        swapped_path = TMP_DIR / f"tg_rope_swapped_{uuid.uuid4().hex}.mp4"
+        muxed_path = TMP_DIR / f"tg_rope_muxed_{uuid.uuid4().hex}.mp4"
+        try:
+            save_bytes(swapped_path, swapped_blob)
+            await asyncio.to_thread(mux_video_with_audio, swapped_path, input_path, muxed_path)
+            swapped_blob = muxed_path.read_bytes()
+            swapped_name = muxed_path.name
+        except Exception:
+            log.exception("Director Rope audio mux failed; sending swapped video without remux")
+        finally:
+            try:
+                swapped_path.unlink(missing_ok=True)
+                muxed_path.unlink(missing_ok=True)
+            except Exception:
+                pass
         await asyncio.to_thread(
             delete_comfy_result_file,
             result["filename"],
             result.get("subfolder", ""),
         )
-        return swapped_blob, result.get("filename") or filename
+        return swapped_blob, swapped_name
     finally:
         try:
             input_path.unlink(missing_ok=True)
