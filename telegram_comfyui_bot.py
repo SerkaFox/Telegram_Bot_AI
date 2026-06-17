@@ -72,9 +72,6 @@ DIRECTOR_FACE_SWAP = os.getenv("DIRECTOR_FACE_SWAP", "0").strip().lower() not in
 DIRECTOR_FACE_SWAP_MODEL = os.getenv("DIRECTOR_FACE_SWAP_MODEL", "inswapper_128.onnx")
 DIRECTOR_FACE_ANALYSIS_MODEL = os.getenv("DIRECTOR_FACE_ANALYSIS_MODEL", "buffalo_l")
 DIRECTOR_FACE_SWAP_INDICES = os.getenv("DIRECTOR_FACE_SWAP_INDICES", "0")
-DIRECTOR_FACE_SWAP_INPUT_ORDER = os.getenv("DIRECTOR_FACE_SWAP_INPUT_ORDER", "left-right")
-DIRECTOR_FACE_SWAP_SOURCE_ORDER = os.getenv("DIRECTOR_FACE_SWAP_SOURCE_ORDER", "large-small")
-DIRECTOR_FACE_SWAP_MIN_DURATION_RATIO = float(os.getenv("DIRECTOR_FACE_SWAP_MIN_DURATION_RATIO", "0.8"))
 DIRECTOR_FACE_SWAP_TIMEOUT = int(os.getenv("DIRECTOR_FACE_SWAP_TIMEOUT", "900"))
 DIRECTOR_MAX_LORAS = int(os.getenv("DIRECTOR_MAX_LORAS", "13"))
 DIRECTOR_LORA_STRENGTH_DEFAULT = float(os.getenv("DIRECTOR_LORA_STRENGTH_DEFAULT", "0.35"))
@@ -196,27 +193,6 @@ def gif_to_mp4(input_path: Path, output_path: Path) -> None:
         "-pix_fmt", "yuv420p",
         str(output_path),
     ])
-
-
-def media_duration_seconds(path: Path) -> float | None:
-    p = subprocess.run(
-        [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if p.returncode != 0:
-        return None
-    try:
-        return float((p.stdout or "").strip())
-    except Exception:
-        return None
 
 
 # ============================================================
@@ -971,31 +947,22 @@ def build_director_faceswap_workflow(
                 "image": reference_image_name,
             },
         },
-        "3": {
-            "class_type": "ReActorOptions",
-            "inputs": {
-                "input_faces_order": DIRECTOR_FACE_SWAP_INPUT_ORDER,
-                "input_faces_index": DIRECTOR_FACE_SWAP_INDICES,
-                "detect_gender_input": "no",
-                "source_faces_order": DIRECTOR_FACE_SWAP_SOURCE_ORDER,
-                "source_faces_index": "0",
-                "detect_gender_source": "no",
-                "console_log_level": 1,
-                "restore_swapped_only": True,
-            },
-        },
         "5": {
-            "class_type": "ReActorFaceSwapOpt",
+            "class_type": "ReActorFaceSwap",
             "inputs": {
                 "enabled": True,
                 "input_image": ["1", 0],
                 "source_image": ["2", 0],
-                "options": ["3", 0],
                 "swap_model": DIRECTOR_FACE_SWAP_MODEL,
                 "facedetection": "retinaface_resnet50",
                 "face_restore_model": "none",
                 "face_restore_visibility": 1,
                 "codeformer_weight": 0.5,
+                "detect_gender_input": "no",
+                "detect_gender_source": "no",
+                "input_faces_index": DIRECTOR_FACE_SWAP_INDICES,
+                "source_faces_index": "0",
+                "console_log_level": 1,
             },
         },
         "6": {
@@ -1061,30 +1028,6 @@ async def run_director_faceswap_postprocess(blob: bytes, meta: dict[str, Any], f
             result.get("subfolder", ""),
             result.get("type", "output"),
         )
-
-        original_duration = await asyncio.to_thread(media_duration_seconds, input_path)
-        swapped_probe_path = TMP_DIR / f"tg_faceswap_probe_{uuid.uuid4().hex}.mp4"
-        save_bytes(swapped_probe_path, swapped_blob)
-        try:
-            swapped_duration = await asyncio.to_thread(media_duration_seconds, swapped_probe_path)
-        finally:
-            try:
-                swapped_probe_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        if (
-            original_duration
-            and swapped_duration
-            and swapped_duration < original_duration * DIRECTOR_FACE_SWAP_MIN_DURATION_RATIO
-        ):
-            log.warning(
-                "Director face swap result is too short; sending original. original=%.2fs swapped=%.2fs",
-                original_duration,
-                swapped_duration,
-            )
-            return None
-
         await asyncio.to_thread(
             delete_comfy_result_file,
             result["filename"],
