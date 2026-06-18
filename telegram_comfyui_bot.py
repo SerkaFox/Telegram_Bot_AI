@@ -81,6 +81,15 @@ DIRECTOR_FACE_SWAP_TIMEOUT = int(os.getenv("DIRECTOR_FACE_SWAP_TIMEOUT", "900"))
 DIRECTOR_ROPE_SIMILARITY = float(os.getenv("DIRECTOR_ROPE_SIMILARITY", "65"))
 DIRECTOR_ROPE_DETECTION = float(os.getenv("DIRECTOR_ROPE_DETECTION", "0.5"))
 DIRECTOR_ROPE_MATCHING = os.getenv("DIRECTOR_ROPE_MATCHING", "0").strip() or "0"
+VIDEO_AUDIO = os.getenv("VIDEO_AUDIO", "1").strip().lower() not in {"0", "false", "no", "off"}
+VIDEO_AUDIO_MODEL = os.getenv("VIDEO_AUDIO_MODEL", "mmaudio_large_44k_nsfw_gold_8.5k_final_fp16.safetensors")
+VIDEO_AUDIO_VAE = os.getenv("VIDEO_AUDIO_VAE", "mmaudio_vae_44k_fp16.safetensors")
+VIDEO_AUDIO_SYNCHFORMER = os.getenv("VIDEO_AUDIO_SYNCHFORMER", "mmaudio_synchformer_fp16.safetensors")
+VIDEO_AUDIO_CLIP = os.getenv("VIDEO_AUDIO_CLIP", "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors")
+VIDEO_AUDIO_STEPS = int(os.getenv("VIDEO_AUDIO_STEPS", "25"))
+VIDEO_AUDIO_CFG = float(os.getenv("VIDEO_AUDIO_CFG", "4.5"))
+VIDEO_AUDIO_TIMEOUT = int(os.getenv("VIDEO_AUDIO_TIMEOUT", "900"))
+VIDEO_AUDIO_NEGATIVE_PROMPT = os.getenv("VIDEO_AUDIO_NEGATIVE_PROMPT", "")
 DIRECTOR_MAX_LORAS = int(os.getenv("DIRECTOR_MAX_LORAS", "13"))
 DIRECTOR_LORA_STRENGTH_DEFAULT = float(os.getenv("DIRECTOR_LORA_STRENGTH_DEFAULT", "0.35"))
 DIRECTOR_LORA_OPTIONS = [
@@ -650,7 +659,7 @@ def help_text(st: dict[str, Any]) -> str:
     return (
         "Бот готов.\n\n"
         "Режимы:\n"
-        "• video: 1 фото + промт + секунды\n"
+        "• video: 1 фото + промт + секунды + звук MMAudio\n"
         "• director: New.json / LTX Director, 1 фото + промт + звук\n"
         "• image: до 3 фото + промт\n\n"
         "Команды:\n"
@@ -679,6 +688,7 @@ def help_text(st: dict[str, Any]) -> str:
         f"• seconds: {st['seconds']}\n"
         f"• repeat: {st.get('repeat', 1)}\n"
         f"• director LoRA: {selected_lora_labels(st)}\n"
+        f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
         f"• video/director source: {media_line(st['video_source'])}\n"
         f"• image ref #1: {media_line(refs[0])}\n"
         f"• image ref #2: {media_line(refs[1])}\n"
@@ -1022,6 +1032,85 @@ def is_system_idle() -> bool:
 
 
 
+def build_video_audio_workflow(
+    *,
+    video_name: str,
+    prompt: str,
+    seed: int,
+) -> dict[str, Any]:
+    return {
+        "1": {
+            "class_type": "VHS_LoadVideo",
+            "inputs": {
+                "video": video_name,
+                "force_rate": 0,
+                "custom_width": 0,
+                "custom_height": 0,
+                "frame_load_cap": 0,
+                "skip_first_frames": 0,
+                "select_every_nth": 1,
+                "format": "None",
+            },
+        },
+        "2": {
+            "class_type": "VHS_VideoInfo",
+            "inputs": {
+                "video_info": ["1", 3],
+            },
+        },
+        "3": {
+            "class_type": "MMAudioModelLoader",
+            "inputs": {
+                "mmaudio_model": VIDEO_AUDIO_MODEL,
+                "base_precision": "fp16",
+            },
+        },
+        "4": {
+            "class_type": "MMAudioFeatureUtilsLoader",
+            "inputs": {
+                "vae_model": VIDEO_AUDIO_VAE,
+                "synchformer_model": VIDEO_AUDIO_SYNCHFORMER,
+                "clip_model": VIDEO_AUDIO_CLIP,
+                "mode": "44k",
+                "precision": "fp16",
+            },
+        },
+        "5": {
+            "class_type": "MMAudioSampler",
+            "inputs": {
+                "mmaudio_model": ["3", 0],
+                "feature_utils": ["4", 0],
+                "images": ["1", 0],
+                "duration": ["2", 7],
+                "steps": VIDEO_AUDIO_STEPS,
+                "cfg": VIDEO_AUDIO_CFG,
+                "seed": int(seed),
+                "prompt": prompt,
+                "negative_prompt": VIDEO_AUDIO_NEGATIVE_PROMPT,
+                "mask_away_clip": False,
+                "force_offload": True,
+            },
+        },
+        "6": {
+            "class_type": "VHS_VideoCombine",
+            "inputs": {
+                "images": ["1", 0],
+                "audio": ["5", 0],
+                "frame_rate": ["2", 5],
+                "loop_count": 0,
+                "filename_prefix": "tg_video_audio",
+                "format": "video/h264-mp4",
+                "pix_fmt": "yuv420p",
+                "crf": 19,
+                "save_metadata": True,
+                "trim_to_audio": False,
+                "pingpong": False,
+                "save_output": True,
+            },
+        },
+    }
+
+
 def build_director_faceswap_workflow(
     *,
     video_name: str,
@@ -1137,6 +1226,43 @@ async def wait_for_result_from_prompt(
     raise TimeoutError(f"Timed out waiting for prompt_id={prompt_id}")
 
 
+async def run_video_audio_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
+    input_name = f"tg_mmaudio_{uuid.uuid4().hex}.mp4"
+    input_path = COMFY_INPUT_DIR / input_name
+    save_bytes(input_path, blob)
+
+    try:
+        wf = build_video_audio_workflow(
+            video_name=input_name,
+            prompt=meta.get("prompt") or "",
+            seed=make_seed(),
+        )
+        prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+        result = await wait_for_result_from_prompt(
+            prompt_id,
+            preferred_node="6",
+            timeout=VIDEO_AUDIO_TIMEOUT,
+        )
+        audio_blob = await asyncio.to_thread(
+            fetch_file,
+            result["filename"],
+            result.get("subfolder", ""),
+            result.get("type", "output"),
+        )
+        audio_name = result.get("filename") or filename
+        await asyncio.to_thread(
+            delete_comfy_result_file,
+            result["filename"],
+            result.get("subfolder", ""),
+        )
+        return audio_blob, audio_name
+    finally:
+        try:
+            input_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 async def run_director_faceswap_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
     reference_image_name = meta.get("source_image_name")
     if not reference_image_name:
@@ -1215,6 +1341,19 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
                 log.info("Director face swap postprocess applied for job #%s", meta.get("job_id"))
         except Exception:
             log.exception("Director face swap postprocess failed; sending original result")
+
+    if (
+        VIDEO_AUDIO
+        and meta.get("mode") == "video"
+        and filename.lower().endswith((".mp4", ".mov", ".webm"))
+    ):
+        try:
+            processed = await run_video_audio_postprocess(blob, meta, filename)
+            if processed:
+                blob, filename = processed
+                log.info("MMAudio postprocess applied for video job #%s", meta.get("job_id"))
+        except Exception:
+            log.exception("MMAudio postprocess failed; sending original silent video")
 
     prompt_text = (meta.get("prompt") or "").strip()
 
