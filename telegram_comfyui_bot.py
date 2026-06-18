@@ -48,9 +48,9 @@ MIN_SECONDS = int(os.getenv("MIN_SECONDS", "2"))
 MAX_SECONDS = int(os.getenv("MAX_SECONDS", "12"))
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "medium").strip().lower()
 QUALITY_PRESETS = {
-    "low": 640,
-    "medium": 768,
-    "high": 1024,
+    "low": {"max_side": 480, "video_frames": 16},
+    "medium": {"max_side": 640, "video_frames": 64},
+    "high": {"max_side": 768, "video_frames": 128},
 }
 ROUND_TO = int(os.getenv("ROUND_TO", "64"))
 
@@ -113,6 +113,7 @@ class Job:
     prompt: str
     seconds: int
     max_side: int
+    video_frames: int
     seed: int
     video_source: dict | None
     image_refs: list[dict]
@@ -123,10 +124,32 @@ class Job:
 # HELPERS
 # ============================================================
 def quality_label(max_side: int) -> str:
-    for name, size in QUALITY_PRESETS.items():
-        if size == max_side:
+    for name, preset in QUALITY_PRESETS.items():
+        if preset["max_side"] == max_side:
             return name
     return f"custom-{max_side}"
+
+
+def quality_preset(name: str) -> dict[str, int] | None:
+    return QUALITY_PRESETS.get((name or "").strip().lower())
+
+
+def apply_quality(st: dict[str, Any], name: str) -> bool:
+    preset = quality_preset(name)
+    if not preset:
+        return False
+    st["quality"] = name
+    st["max_side"] = int(preset["max_side"])
+    st["video_frames"] = int(preset["video_frames"])
+    refresh_all_sizes(st)
+    return True
+
+
+def quality_status(st: dict[str, Any]) -> str:
+    label = quality_label(int(st.get("max_side") or 0))
+    frames = int(st.get("video_frames") or 0)
+    frame_text = f", {frames} frames" if frames else ""
+    return f"{label} ({st['max_side']} px{frame_text})"
 
 
 def make_seed() -> int:
@@ -134,7 +157,7 @@ def make_seed() -> int:
 
 
 def round_to_multiple(v: int, m: int) -> int:
-    return max(m, int(round(v / m) * m))
+    return max(m, int((v // m) * m))
 
 
 def short_preview(s: str, limit: int = 80) -> str:
@@ -245,7 +268,9 @@ def initial_state() -> dict[str, Any]:
         "prompt": "",
         "repeat": 1,
         "seconds": DEFAULT_SECONDS,
-        "max_side": QUALITY_PRESETS.get(DEFAULT_QUALITY, 768),
+        "quality": DEFAULT_QUALITY if DEFAULT_QUALITY in QUALITY_PRESETS else "medium",
+        "max_side": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["max_side"],
+        "video_frames": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["video_frames"],
         "video_source": blank_media(),
         "image_refs": [blank_media(), blank_media(), blank_media()],
         "video_loras": [],
@@ -260,6 +285,11 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["mode"] = "video"
     if "video_loras" not in st:
         st["video_loras"] = []
+    if "quality" not in st:
+        st["quality"] = quality_label(int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"]))
+    if "video_frames" not in st:
+        preset = quality_preset(st.get("quality")) or QUALITY_PRESETS["medium"]
+        st["video_frames"] = int(preset["video_frames"])
     st.pop("director_loras", None)
     return st
 
@@ -267,6 +297,29 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
 def reset_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     context.user_data["job_state"] = initial_state()
     return context.user_data["job_state"]
+
+
+def refresh_media_size(media: dict[str, Any], max_side: int) -> None:
+    if not media or not media.get("path"):
+        return
+    width = media.get("orig_width")
+    height = media.get("orig_height")
+    if not width or not height:
+        try:
+            with Image.open(media["path"]) as img:
+                width, height = img.size
+            media["orig_width"] = width
+            media["orig_height"] = height
+        except Exception:
+            return
+    media["fit_width"], media["fit_height"] = fit_size_keep_aspect(int(width), int(height), int(max_side))
+
+
+def refresh_all_sizes(st: dict[str, Any]) -> None:
+    max_side = int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"])
+    refresh_media_size(st.get("video_source") or {}, max_side)
+    for media in st.get("image_refs") or []:
+        refresh_media_size(media, max_side)
 
 
 def get_media_library(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, Any]]:
@@ -569,7 +622,7 @@ def help_text(st: dict[str, Any]) -> str:
         "/reset\n\n"
         "Текущее состояние:\n"
         f"• mode: {st['mode']}\n"
-        f"• quality: {quality_label(st['max_side'])} ({st['max_side']} px)\n"
+        f"• quality: {quality_status(st)}\n"
         f"• seconds: {st['seconds']}\n"
         f"• repeat: {st.get('repeat', 1)}\n"
         f"• video LoRA: {selected_lora_labels(st)}\n"
@@ -731,6 +784,7 @@ def patch_video_workflow(
     width: int,
     height: int,
     seconds: int,
+    frame_count: int,
     seed: int,
     selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -740,6 +794,7 @@ def patch_video_workflow(
     wf["164"]["inputs"]["value"] = int(width)
     wf["165"]["inputs"]["value"] = int(height)
     wf["243"]["inputs"]["value"] = int(seconds)
+    wf["373:359"]["inputs"]["value"] = str(max(1, int(frame_count)))
     wf["141"]["inputs"]["seed"] = int(seed)
     apply_video_loras(wf, selected_loras or [])
     return wf
@@ -1266,20 +1321,17 @@ async def quality_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await send_ui_message(
             update.message,
             context,
-            f"Сейчас качество: {quality_label(st['max_side'])}. Используй /quality low | medium | high",
+            f"Сейчас качество: {quality_status(st)}. Используй /quality low | medium | high",
             reply_markup=main_keyboard(),
         )
         return
 
     name = (context.args[0] or "").strip().lower()
-    if name not in QUALITY_PRESETS:
+    if not apply_quality(st, name):
         await send_ui_message(update.message, context, "Используй: /quality low | medium | high", reply_markup=main_keyboard())
         return
 
-    st["max_side"] = QUALITY_PRESETS[name]
-    refresh_all_sizes(st)
-
-    await send_ui_message(update.message, context, f"Качество: {name} ({st['max_side']} px).", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, f"Качество: {quality_status(st)}.", reply_markup=main_keyboard())
 
 
 async def repeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1408,10 +1460,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data.startswith("quality:"):
         name = data.split(":", 1)[1]
-        if name in QUALITY_PRESETS:
-            st["max_side"] = QUALITY_PRESETS[name]
-            refresh_all_sizes(st)
-            await replace_ui_message_from_callback(query, context, f"Качество: {name} ({st['max_side']} px).", reply_markup=main_keyboard())
+        if apply_quality(st, name):
+            await replace_ui_message_from_callback(query, context, f"Качество: {quality_status(st)}.", reply_markup=main_keyboard())
         return
 
     if data.startswith("sec:"):
@@ -1604,6 +1654,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             prompt=st["prompt"],
             seconds=int(st["seconds"]),
             max_side=int(st["max_side"]),
+            video_frames=int(st.get("video_frames") or QUALITY_PRESETS["medium"]["video_frames"]),
             seed=make_seed(),
             video_source=copy.deepcopy(st["video_source"]),
             image_refs=copy.deepcopy(st["image_refs"]),
@@ -1670,6 +1721,7 @@ async def submit_video_job(app: Application, job: Job) -> None:
         width=src["fit_width"],
         height=src["fit_height"],
         seconds=job.seconds,
+        frame_count=job.video_frames,
         seed=job.seed,
         selected_loras=job.video_loras,
     )
@@ -1684,6 +1736,7 @@ async def submit_video_job(app: Application, job: Job) -> None:
         "seconds": job.seconds,
         "width": src["fit_width"],
         "height": src["fit_height"],
+        "video_frames": job.video_frames,
         "prompt": job.prompt,
         "video_loras": job.video_loras,
     }
