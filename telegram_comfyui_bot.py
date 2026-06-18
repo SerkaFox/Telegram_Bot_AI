@@ -48,9 +48,9 @@ MIN_SECONDS = int(os.getenv("MIN_SECONDS", "2"))
 MAX_SECONDS = int(os.getenv("MAX_SECONDS", "12"))
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "medium").strip().lower()
 QUALITY_PRESETS = {
-    "low": {"max_side": 480, "video_frames": 16},
-    "medium": {"max_side": 640, "video_frames": 64},
-    "high": {"max_side": 768, "video_frames": 128},
+    "low": {"max_side": 480, "video_fps": 16},
+    "medium": {"max_side": 640, "video_fps": 16},
+    "high": {"max_side": 768, "video_fps": 16},
 }
 ROUND_TO = int(os.getenv("ROUND_TO", "64"))
 
@@ -113,7 +113,7 @@ class Job:
     prompt: str
     seconds: int
     max_side: int
-    video_frames: int
+    video_fps: int
     seed: int
     video_source: dict | None
     image_refs: list[dict]
@@ -140,16 +140,16 @@ def apply_quality(st: dict[str, Any], name: str) -> bool:
         return False
     st["quality"] = name
     st["max_side"] = int(preset["max_side"])
-    st["video_frames"] = int(preset["video_frames"])
+    st["video_fps"] = int(preset["video_fps"])
     refresh_all_sizes(st)
     return True
 
 
 def quality_status(st: dict[str, Any]) -> str:
     label = quality_label(int(st.get("max_side") or 0))
-    frames = int(st.get("video_frames") or 0)
-    frame_text = f", {frames} frames" if frames else ""
-    return f"{label} ({st['max_side']} px{frame_text})"
+    fps = int(st.get("video_fps") or 0)
+    fps_text = f", {fps} fps" if fps else ""
+    return f"{label} ({st['max_side']} px{fps_text})"
 
 
 def make_seed() -> int:
@@ -270,7 +270,7 @@ def initial_state() -> dict[str, Any]:
         "seconds": DEFAULT_SECONDS,
         "quality": DEFAULT_QUALITY if DEFAULT_QUALITY in QUALITY_PRESETS else "medium",
         "max_side": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["max_side"],
-        "video_frames": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["video_frames"],
+        "video_fps": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["video_fps"],
         "video_source": blank_media(),
         "image_refs": [blank_media(), blank_media(), blank_media()],
         "video_loras": [],
@@ -287,9 +287,9 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["video_loras"] = []
     if "quality" not in st:
         st["quality"] = quality_label(int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"]))
-    if "video_frames" not in st:
-        preset = quality_preset(st.get("quality")) or QUALITY_PRESETS["medium"]
-        st["video_frames"] = int(preset["video_frames"])
+    preset = quality_preset(st.get("quality")) or QUALITY_PRESETS["medium"]
+    if "video_fps" not in st or int(st.get("video_fps") or 0) > 60:
+        st["video_fps"] = int(preset["video_fps"])
     st.pop("director_loras", None)
     return st
 
@@ -784,7 +784,7 @@ def patch_video_workflow(
     width: int,
     height: int,
     seconds: int,
-    frame_count: int,
+    video_fps: int,
     seed: int,
     selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -793,8 +793,11 @@ def patch_video_workflow(
     wf["385"]["inputs"]["image"] = image_name
     wf["164"]["inputs"]["value"] = int(width)
     wf["165"]["inputs"]["value"] = int(height)
+    fps = max(1, int(video_fps))
+    frame_count = max(1, int(seconds) * fps + 1)
     wf["243"]["inputs"]["value"] = int(seconds)
-    wf["373:359"]["inputs"]["value"] = str(max(1, int(frame_count)))
+    wf["373:359"]["inputs"]["value"] = str(frame_count)
+    wf["314"]["inputs"]["frame_rate"] = fps
     wf["141"]["inputs"]["seed"] = int(seed)
     apply_video_loras(wf, selected_loras or [])
     return wf
@@ -1654,7 +1657,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             prompt=st["prompt"],
             seconds=int(st["seconds"]),
             max_side=int(st["max_side"]),
-            video_frames=int(st.get("video_frames") or QUALITY_PRESETS["medium"]["video_frames"]),
+            video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
             seed=make_seed(),
             video_source=copy.deepcopy(st["video_source"]),
             image_refs=copy.deepcopy(st["image_refs"]),
@@ -1721,7 +1724,7 @@ async def submit_video_job(app: Application, job: Job) -> None:
         width=src["fit_width"],
         height=src["fit_height"],
         seconds=job.seconds,
-        frame_count=job.video_frames,
+        video_fps=job.video_fps,
         seed=job.seed,
         selected_loras=job.video_loras,
     )
@@ -1736,7 +1739,7 @@ async def submit_video_job(app: Application, job: Job) -> None:
         "seconds": job.seconds,
         "width": src["fit_width"],
         "height": src["fit_height"],
-        "video_frames": job.video_frames,
+        "video_fps": job.video_fps,
         "prompt": job.prompt,
         "video_loras": job.video_loras,
     }
