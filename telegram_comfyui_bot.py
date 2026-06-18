@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 import copy
 import subprocess
 import time
@@ -69,6 +70,17 @@ VIDEO_AUDIO_CFG = float(os.getenv("VIDEO_AUDIO_CFG", "4.5"))
 VIDEO_AUDIO_TIMEOUT = int(os.getenv("VIDEO_AUDIO_TIMEOUT", "900"))
 VIDEO_AUDIO_NEGATIVE_PROMPT = os.getenv("VIDEO_AUDIO_NEGATIVE_PROMPT", "")
 VIDEO_AUDIO_LOAD_FPS = int(os.getenv("VIDEO_AUDIO_LOAD_FPS", "25"))
+VIDEO_NO_TEXT_PROMPT = "No subtitles, no captions, no on-screen text, no speech bubbles, no written words, no labels."
+VIDEO_NO_TEXT_NEGATIVE = "subtitles, captions, on-screen text, text overlay, speech bubbles, written words, labels, watermark"
+VIDEO_TTS = os.getenv("VIDEO_TTS", "1").strip().lower() not in {"0", "false", "no", "off"}
+EDGE_TTS_BIN = os.getenv("EDGE_TTS_BIN", "/home/iaadmin/miniconda3/bin/edge-tts")
+VIDEO_TTS_VOICE_RU = os.getenv("VIDEO_TTS_VOICE_RU", "ru-RU-SvetlanaNeural")
+VIDEO_TTS_VOICE_EN = os.getenv("VIDEO_TTS_VOICE_EN", "en-US-AvaNeural")
+VIDEO_TTS_RATE = os.getenv("VIDEO_TTS_RATE", "+0%")
+VIDEO_TTS_VOLUME = os.getenv("VIDEO_TTS_VOLUME", "+20%")
+VIDEO_TTS_DELAY_MS = int(os.getenv("VIDEO_TTS_DELAY_MS", "500"))
+VIDEO_TTS_BG_VOLUME = float(os.getenv("VIDEO_TTS_BG_VOLUME", "0.65"))
+VIDEO_TTS_SPEECH_VOLUME = float(os.getenv("VIDEO_TTS_SPEECH_VOLUME", "1.25"))
 VIDEO_MAX_LORAS = int(os.getenv("VIDEO_MAX_LORAS", "8"))
 VIDEO_LORA_STRENGTH_DEFAULT = float(os.getenv("VIDEO_LORA_STRENGTH_DEFAULT", "0.35"))
 VIDEO_LORA_OPTIONS = [
@@ -215,6 +227,92 @@ def mux_video_with_audio(video_path: Path, audio_source_path: Path, output_path:
         "-c:v", "copy",
         "-c:a", "aac",
         "-shortest",
+        "-movflags", "+faststart",
+        str(output_path),
+    ])
+
+
+def extract_speech_text(prompt: str) -> str:
+    text = (prompt or "").strip()
+    if not text:
+        return ""
+
+    quoted_after_speech = re.findall(
+        r"(?:говорит|говоря|сказала|скажет|произносит|шепчет|says|said|speaks|whispers)[^\n\"«”]{0,40}[\"«“](.{1,220}?)[\"»”]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if quoted_after_speech:
+        return clean_speech_text(". ".join(quoted_after_speech))
+
+    quoted = re.findall(r"[\"«“](.{1,180}?)[\"»”]", text)
+    if quoted:
+        return clean_speech_text(". ".join(quoted[:2]))
+
+    match = re.search(
+        r"(?:говорит|говоря|сказала|скажет|произносит|шепчет|says|said|speaks|whispers)\s*[:\-—]?\s*(.{1,180}?)(?=$|[.!?;\n])",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return clean_speech_text(match.group(1))
+    return ""
+
+
+def clean_speech_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip(" \t\r\n'\"«»“”.,;:-—")
+    text = re.sub(r"\b(и|and)\s+(улыбается|смотрит|looks|smiles).*$", "", text, flags=re.IGNORECASE).strip()
+    return text[:220]
+
+
+def tts_voice_for_text(text: str) -> str:
+    if re.search(r"[А-Яа-яЁё]", text or ""):
+        return VIDEO_TTS_VOICE_RU
+    return VIDEO_TTS_VOICE_EN
+
+
+def synthesize_speech(text: str, output_path: Path) -> None:
+    run_cmd([
+        EDGE_TTS_BIN,
+        "--voice", tts_voice_for_text(text),
+        "--text", text,
+        "--rate", VIDEO_TTS_RATE,
+        "--volume", VIDEO_TTS_VOLUME,
+        "--write-media", str(output_path),
+    ])
+
+
+def video_has_audio(video_path: Path) -> bool:
+    p = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", str(video_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return p.returncode == 0 and bool(p.stdout.strip())
+
+
+def mix_video_with_tts(video_path: Path, speech_path: Path, output_path: Path) -> None:
+    delay = max(0, int(VIDEO_TTS_DELAY_MS))
+    if video_has_audio(video_path):
+        filter_complex = (
+            f"[0:a]volume={VIDEO_TTS_BG_VOLUME}[a0];"
+            f"[1:a]adelay={delay}|{delay},volume={VIDEO_TTS_SPEECH_VOLUME}[a1];"
+            "[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[a]"
+        )
+    else:
+        filter_complex = f"[1:a]adelay={delay}|{delay},volume={VIDEO_TTS_SPEECH_VOLUME}[a]"
+
+    run_cmd([
+        "ffmpeg",
+        "-y",
+        "-i", str(video_path),
+        "-i", str(speech_path),
+        "-filter_complex", filter_complex,
+        "-map", "0:v:0",
+        "-map", "[a]",
+        "-c:v", "copy",
+        "-c:a", "aac",
         "-movflags", "+faststart",
         str(output_path),
     ])
@@ -627,6 +725,7 @@ def help_text(st: dict[str, Any]) -> str:
         f"• repeat: {st.get('repeat', 1)}\n"
         f"• video LoRA: {selected_lora_labels(st)}\n"
         f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
+        f"• video TTS: {'on' if VIDEO_TTS else 'off'}\n"
         f"• video source: {media_line(st['video_source'])}\n"
         f"• image ref #1: {media_line(refs[0])}\n"
         f"• image ref #2: {media_line(refs[1])}\n"
@@ -789,7 +888,10 @@ def patch_video_workflow(
     selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
-    wf["93"]["inputs"]["text"] = prompt
+    wf["93"]["inputs"]["text"] = f"{prompt}\n\n{VIDEO_NO_TEXT_PROMPT}"
+    negative_text = wf["373:360"]["inputs"].get("text", "")
+    if VIDEO_NO_TEXT_NEGATIVE not in negative_text:
+        wf["373:360"]["inputs"]["text"] = f"{negative_text}, {VIDEO_NO_TEXT_NEGATIVE}"
     wf["385"]["inputs"]["image"] = image_name
     wf["164"]["inputs"]["value"] = int(width)
     wf["165"]["inputs"]["value"] = int(height)
@@ -1014,6 +1116,27 @@ async def run_video_audio_postprocess(blob: bytes, meta: dict[str, Any], filenam
             pass
 
 
+async def run_video_tts_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
+    speech_text = extract_speech_text(meta.get("prompt") or "")
+    if not speech_text:
+        return None
+
+    video_path = TMP_DIR / f"tg_tts_video_{uuid.uuid4().hex}.mp4"
+    speech_path = TMP_DIR / f"tg_tts_speech_{uuid.uuid4().hex}.mp3"
+    mixed_path = TMP_DIR / f"tg_tts_mixed_{uuid.uuid4().hex}.mp4"
+    try:
+        save_bytes(video_path, blob)
+        await asyncio.to_thread(synthesize_speech, speech_text, speech_path)
+        await asyncio.to_thread(mix_video_with_tts, video_path, speech_path, mixed_path)
+        return mixed_path.read_bytes(), mixed_path.name
+    finally:
+        for path in (video_path, speech_path, mixed_path):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 async def send_result(app: Application, meta: dict[str, Any], result: dict[str, Any]) -> None:
     blob = await asyncio.to_thread(
         fetch_file,
@@ -1036,6 +1159,19 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
                 log.info("MMAudio postprocess applied for video job #%s", meta.get("job_id"))
         except Exception:
             log.exception("MMAudio postprocess failed; sending original silent video")
+
+    if (
+        VIDEO_TTS
+        and meta.get("mode") == "video"
+        and filename.lower().endswith((".mp4", ".mov", ".webm"))
+    ):
+        try:
+            processed = await run_video_tts_postprocess(blob, meta, filename)
+            if processed:
+                blob, filename = processed
+                log.info("TTS speech postprocess applied for video job #%s", meta.get("job_id"))
+        except Exception:
+            log.exception("TTS speech postprocess failed; sending video without TTS speech")
 
     prompt_text = (meta.get("prompt") or "").strip()
 
