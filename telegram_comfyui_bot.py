@@ -10,8 +10,6 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
-
 import requests
 from PIL import Image, ImageOps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
@@ -33,14 +31,8 @@ COMFY_BASE = os.getenv("COMFY_BASE", "http://127.0.0.1:8188").rstrip("/")
 WORKFLOW_VIDEO = os.getenv("COMFY_WORKFLOW_VIDEO", "./workflow_video.json")
 WORKFLOW_IMAGE = os.getenv("COMFY_WORKFLOW_IMAGE", "./workflow_image.json")
 
-# Новый workflow LTX Director
-WORKFLOW_DIRECTOR = os.getenv("COMFY_WORKFLOW_DIRECTOR", "./New.json")
-
 TMP_DIR = Path(os.getenv("BOT_TMP_DIR", "./tmp_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
-
-DATASET_DIR = Path(os.getenv("BOT_DATASET_DIR", "./character_datasets"))
-DATASET_DIR.mkdir(parents=True, exist_ok=True)
 
 COMFY_INPUT_DIR = Path(os.getenv("COMFY_INPUT_DIR", "/home/iaadmin/ComfyUI/input"))
 COMFY_OUTPUT_DIR = Path(os.getenv("COMFY_OUTPUT_DIR", "/home/iaadmin/ComfyUI/output"))
@@ -54,8 +46,6 @@ ALLOWED_USER_IDS = {
 DEFAULT_SECONDS = int(os.getenv("DEFAULT_SECONDS", "8"))
 MIN_SECONDS = int(os.getenv("MIN_SECONDS", "2"))
 MAX_SECONDS = int(os.getenv("MAX_SECONDS", "12"))
-MAX_DIRECTOR_SECONDS = int(os.getenv("MAX_DIRECTOR_SECONDS", "60"))
-
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "medium").strip().lower()
 QUALITY_PRESETS = {
     "low": 640,
@@ -68,19 +58,7 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 POLL_SECONDS = float(os.getenv("POLL_SECONDS", "2"))
 
 MAX_REFS_FOR_IMAGE = 3
-DIRECTOR_FPS = int(os.getenv("DIRECTOR_FPS", "24"))
-DIRECTOR_ANCHOR_SECONDS = int(os.getenv("DIRECTOR_ANCHOR_SECONDS", "8"))
 MEDIA_LIBRARY_LIMIT = int(os.getenv("MEDIA_LIBRARY_LIMIT", "10"))
-DATASET_DEFAULT_NAME = os.getenv("DATASET_DEFAULT_NAME", "main_character")
-DATASET_DEFAULT_TRIGGER = os.getenv("DATASET_DEFAULT_TRIGGER", "sfoxgirl")
-DIRECTOR_FACE_SWAP = os.getenv("DIRECTOR_FACE_SWAP", "0").strip().lower() not in {"0", "false", "no", "off"}
-DIRECTOR_FACE_SWAP_MODEL = os.getenv("DIRECTOR_FACE_SWAP_MODEL", "inswapper_128.onnx")
-DIRECTOR_FACE_ANALYSIS_MODEL = os.getenv("DIRECTOR_FACE_ANALYSIS_MODEL", "buffalo_l")
-DIRECTOR_FACE_SWAP_INDICES = os.getenv("DIRECTOR_FACE_SWAP_INDICES", "0")
-DIRECTOR_FACE_SWAP_TIMEOUT = int(os.getenv("DIRECTOR_FACE_SWAP_TIMEOUT", "900"))
-DIRECTOR_ROPE_SIMILARITY = float(os.getenv("DIRECTOR_ROPE_SIMILARITY", "65"))
-DIRECTOR_ROPE_DETECTION = float(os.getenv("DIRECTOR_ROPE_DETECTION", "0.5"))
-DIRECTOR_ROPE_MATCHING = os.getenv("DIRECTOR_ROPE_MATCHING", "0").strip() or "0"
 VIDEO_AUDIO = os.getenv("VIDEO_AUDIO", "1").strip().lower() not in {"0", "false", "no", "off"}
 VIDEO_AUDIO_MODEL = os.getenv("VIDEO_AUDIO_MODEL", "mmaudio_large_44k_nsfw_gold_8.5k_final_fp16.safetensors")
 VIDEO_AUDIO_VAE = os.getenv("VIDEO_AUDIO_VAE", "mmaudio_vae_44k_fp16.safetensors")
@@ -90,36 +68,27 @@ VIDEO_AUDIO_STEPS = int(os.getenv("VIDEO_AUDIO_STEPS", "25"))
 VIDEO_AUDIO_CFG = float(os.getenv("VIDEO_AUDIO_CFG", "4.5"))
 VIDEO_AUDIO_TIMEOUT = int(os.getenv("VIDEO_AUDIO_TIMEOUT", "900"))
 VIDEO_AUDIO_NEGATIVE_PROMPT = os.getenv("VIDEO_AUDIO_NEGATIVE_PROMPT", "")
-DIRECTOR_MAX_LORAS = int(os.getenv("DIRECTOR_MAX_LORAS", "13"))
-DIRECTOR_LORA_STRENGTH_DEFAULT = float(os.getenv("DIRECTOR_LORA_STRENGTH_DEFAULT", "0.35"))
-DIRECTOR_LORA_OPTIONS = [
-    {"label": "LTX 2.3 Distill 384", "file": "ltx-2.3-22b-distilled-lora-384.safetensors", "strength": 0.25},
-    {"label": "LTX 2.3 Dynamic", "file": "ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors", "strength": 0.25},
-    {"label": "Dreamlay LTX V2", "file": "DR34ML4Y_LTXXX_V2.safetensors", "strength": 0.30},
-    {"label": "Sex Thrust", "file": "LTX2-i2v-SexThrust.safetensors", "strength": 0.25},
-    {"label": "Orgasm", "file": "LTX-2.3 - Orgasm.safetensors", "strength": 0.30},
-    {"label": "Passionate Kissing", "file": "LTX-2 - Passionate Kissing.safetensors", "strength": 0.30},
-    {"label": "Motion 7K", "file": "LTX2_SS_Motion_7K.safetensors", "strength": 0.25},
-    {"label": "Best Breasts", "file": "LTX2_BestBreasts_lora_V2_step_06000.safetensors", "strength": 0.25},
-    {"label": "Animation", "file": "cr3ampi3_animation_i2v_ltx2_v1.0.safetensors", "strength": 0.25},
-    {"label": "Doggy Mission", "file": "doggy_mission_3d_ltx2_v1.0.safetensors", "strength": 0.25},
-    {"label": "NSFW Merge", "file": "ltx2-phr00tmerge-nsfw-v62.safetensors", "strength": 0.25},
-    {"label": "Riding Backshot", "file": "nsfw_riding_backshot_frontshot_ltx23_v1.0.safetensors", "strength": 0.25},
-    {"label": "Jiggle", "file": "LTX-2 - Jiggle Tits.safetensors", "strength": 0.20},
+VIDEO_AUDIO_LOAD_FPS = int(os.getenv("VIDEO_AUDIO_LOAD_FPS", "25"))
+VIDEO_MAX_LORAS = int(os.getenv("VIDEO_MAX_LORAS", "8"))
+VIDEO_LORA_STRENGTH_DEFAULT = float(os.getenv("VIDEO_LORA_STRENGTH_DEFAULT", "0.35"))
+VIDEO_LORA_OPTIONS = [
+    {"key": "lightx2v", "label": "LightX2V", "high": "Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_high.safetensors", "low": "Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_low.safetensors", "strength": 0.25},
+    {"key": "bounce", "label": "Bounce", "high": "BounceHighWan2_2.safetensors", "low": "BounceLowWan2_2.safetensors", "strength": 0.35},
+    {"key": "dr34m", "label": "DR34M I2V", "high": "DR34MJOB_I2V_14b_HighNoise.safetensors", "low": "DR34MJOB_I2V_14b_LowNoise.safetensors", "strength": 0.35},
+    {"key": "dreamlay", "label": "Dreamlay I2V", "high": "DR34ML4Y_I2V_14B_HIGH_V2.safetensors", "low": "DR34ML4Y_I2V_14B_LOW_V2.safetensors", "strength": 0.35},
+    {"key": "hands_body", "label": "Hands/Body", "high": "HIGH_hands_trace_body.safetensors", "low": "LOW_hands_trace_body.safetensors", "strength": 0.30},
+    {"key": "pen_insert", "label": "Pen Insert", "high": "PenInsert_high_noise.safetensors", "low": "PenInsert_low_noise.safetensors", "strength": 0.35},
+    {"key": "pubic_hair", "label": "Pubic Hair", "high": "PubicHair_wan22_high_e40.safetensors", "low": "PubicHair_wan22_low_e50.safetensors", "strength": 0.30},
+    {"key": "smooth_anim", "label": "Smooth Animation", "high": "SmoothXXXAnimation_High.safetensors", "low": "SmoothXXXAnimation_Low.safetensors", "strength": 0.25},
+    {"key": "handjob", "label": "Handjob", "high": "WAN-2.2-I2V-Handjob-HIGH-v1.safetensors", "low": "WAN-2.2-I2V-Handjob-LOW-v1.safetensors", "strength": 0.35},
+    {"key": "handjob_combo", "label": "Handjob+Blowjob", "high": "WAN-2.2-I2V-HandjobBlowjobCombo-HIGH-v1.safetensors", "low": "WAN-2.2-I2V-HandjobBlowjobCombo-LOW-v1.safetensors", "strength": 0.35},
+    {"key": "teasing", "label": "Sensual Teasing", "high": "WAN-2.2-I2V-SensualTeasingBlowjob-HIGH-v1.safetensors", "low": "WAN-2.2-I2V-SensualTeasingBlowjob-LOW-v1.safetensors", "strength": 0.35},
+    {"key": "breast_play", "label": "Breast Play", "high": "Wan2.2_BreastPlay-v1-HighNoise-I2V_T2V.safetensors", "low": "Wan2.2_BreastPlay-v1-LowNoise-I2V_T2V.safetensors", "strength": 0.35},
+    {"key": "cum_v2", "label": "Cum V2", "high": "Wan22_CumV2_High.safetensors", "low": "Wan22_CumV2_Low.safetensors", "strength": 0.35},
+    {"key": "ffgo", "label": "FFGO", "high": "Wan22_FFGO-LoRA-HIGH_bf16.safetensors", "low": "Wan22_FFGO-LoRA-LOW_bf16.safetensors", "strength": 0.35},
+    {"key": "deepthroat", "label": "Deepthroat", "high": "jfj-deepthroat-W22-I2V-HN.safetensors", "low": "jfj-deepthroat-W22-I2V-LN.safetensors", "strength": 0.35},
+    {"key": "pov_contact", "label": "POV Contact", "high": "povintimatecontact_WAN22_I2V_high_noise.safetensors", "low": "povintimatecontact_WAN22_I2V_low_noise.safetensors", "strength": 0.35},
 ]
-
-DIRECTOR_FACELOCK_PROMPT = (
-    "Continuity lock: keep exactly the same identity as the reference image, same face, facial proportions, eye shape, "
-    "nose, mouth, jawline, hair, body shape, skin tone, outfit state, lighting, camera angle, and background. "
-    "The face must stay stable between frames with no morphing or identity drift. Preserve natural anatomy, stable body "
-    "physics, coherent hands, five fingers per hand, and consistent limb count."
-)
-DIRECTOR_NEGATIVE_PROMPT = (
-    "face morphing, face shifting, face changing, identity drift, different face, inconsistent identity, deformed face, "
-    "asymmetric facial features, blurry face, flickering face, unnatural blinking, frozen face, plastic skin, over-smoothed "
-    "skin, body morphing, deformed body, broken anatomy, extra limbs, missing limbs, extra fingers, fused fingers, bad hands, "
-    "warped hands, distorted torso, broken joints, unstable body proportions"
-)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -147,7 +116,7 @@ class Job:
     seed: int
     video_source: dict | None
     image_refs: list[dict]
-    director_loras: list[str]
+    video_loras: list[str]
 
 
 # ============================================================
@@ -263,8 +232,6 @@ def blank_media() -> dict[str, Any]:
 
 
 def mode_max_seconds(mode: str) -> int:
-    if mode == "director":
-        return MAX_DIRECTOR_SECONDS
     return MAX_SECONDS
 
 
@@ -281,14 +248,20 @@ def initial_state() -> dict[str, Any]:
         "max_side": QUALITY_PRESETS.get(DEFAULT_QUALITY, 768),
         "video_source": blank_media(),
         "image_refs": [blank_media(), blank_media(), blank_media()],
-        "director_loras": [],
+        "video_loras": [],
     }
 
 
 def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     if "job_state" not in context.user_data:
         context.user_data["job_state"] = initial_state()
-    return context.user_data["job_state"]
+    st = context.user_data["job_state"]
+    if st.get("mode") == "director":
+        st["mode"] = "video"
+    if "video_loras" not in st:
+        st["video_loras"] = []
+    st.pop("director_loras", None)
+    return st
 
 
 def reset_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
@@ -300,54 +273,6 @@ def get_media_library(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, Any]
     if "media_library" not in context.user_data:
         context.user_data["media_library"] = []
     return context.user_data["media_library"]
-
-
-def get_dataset_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
-    if "dataset_state" not in context.user_data:
-        context.user_data["dataset_state"] = {
-            "collecting": False,
-            "name": DATASET_DEFAULT_NAME,
-            "trigger": DATASET_DEFAULT_TRIGGER,
-        }
-    return context.user_data["dataset_state"]
-
-
-def sanitize_dataset_name(name: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (name or "").strip())
-    cleaned = cleaned.strip("._-")
-    return cleaned or DATASET_DEFAULT_NAME
-
-
-def dataset_paths(ds: dict[str, Any]) -> tuple[Path, Path]:
-    root = DATASET_DIR / sanitize_dataset_name(ds.get("name") or DATASET_DEFAULT_NAME)
-    images = root / "images"
-    images.mkdir(parents=True, exist_ok=True)
-    return root, images
-
-
-def count_dataset_images(ds: dict[str, Any]) -> int:
-    _, images = dataset_paths(ds)
-    return len([p for p in images.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}])
-
-
-def dataset_caption(ds: dict[str, Any]) -> str:
-    trigger = (ds.get("trigger") or DATASET_DEFAULT_TRIGGER).strip() or DATASET_DEFAULT_TRIGGER
-    return f"{trigger}, same character, consistent face, same hairstyle, consistent body shape"
-
-
-def save_dataset_photo(src_path: Path, ds: dict[str, Any]) -> tuple[Path, Path, int]:
-    root, images = dataset_paths(ds)
-    idx = count_dataset_images(ds) + 1
-    stem = f"{sanitize_dataset_name(ds.get('name') or DATASET_DEFAULT_NAME)}_{idx:04d}"
-    image_path = images / f"{stem}.jpg"
-    caption_path = images / f"{stem}.txt"
-
-    with Image.open(src_path) as img:
-        img = ImageOps.exif_transpose(img).convert("RGB")
-        img.save(image_path, quality=95)
-
-    caption_path.write_text(dataset_caption(ds) + "\n", encoding="utf-8")
-    return image_path, caption_path, idx
 
 
 def remember_media(context: ContextTypes.DEFAULT_TYPE, media: dict[str, Any]) -> None:
@@ -458,9 +383,6 @@ def main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🖼 Image", callback_data="mode:image"),
             ],
             [
-                InlineKeyboardButton("🎞 LTX Director", callback_data="mode:director"),
-            ],
-            [
                 InlineKeyboardButton("L", callback_data="quality:low"),
                 InlineKeyboardButton("M", callback_data="quality:medium"),
                 InlineKeyboardButton("H", callback_data="quality:high"),
@@ -478,9 +400,6 @@ def main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📋 Status", callback_data="show:status"),
                 InlineKeyboardButton("📷 Recent photos", callback_data="media:list"),
                 InlineKeyboardButton("🎚 LoRA", callback_data="lora:list"),
-            ],
-            [
-                InlineKeyboardButton("🧬 Dataset", callback_data="dataset:status"),
             ],
             [
                 InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
@@ -520,68 +439,44 @@ def media_preview_keyboard(index: int, total: int) -> InlineKeyboardMarkup:
     )
 
 
-def director_lora_by_file(filename: str) -> dict[str, Any] | None:
-    for opt in DIRECTOR_LORA_OPTIONS:
-        if opt["file"] == filename:
+def video_lora_by_key(key: str) -> dict[str, Any] | None:
+    for opt in VIDEO_LORA_OPTIONS:
+        if opt["key"] == key:
             return opt
     return None
 
 
 def selected_lora_labels(st: dict[str, Any], limit: int = 4) -> str:
-    selected = st.get("director_loras") or []
+    selected = st.get("video_loras") or []
     if not selected:
         return "none"
-    labels = [(director_lora_by_file(name) or {"label": name})["label"] for name in selected]
+    labels = [(video_lora_by_key(key) or {"label": key})["label"] for key in selected]
     if len(labels) > limit:
         return ", ".join(labels[:limit]) + f" +{len(labels) - limit}"
     return ", ".join(labels)
 
 
 def lora_keyboard(st: dict[str, Any]) -> InlineKeyboardMarkup:
-    selected = set(st.get("director_loras") or [])
+    selected = set(st.get("video_loras") or [])
     rows = []
-    for i, opt in enumerate(DIRECTOR_LORA_OPTIONS):
-        mark = "✓" if opt["file"] in selected else "○"
+    for i, opt in enumerate(VIDEO_LORA_OPTIONS):
+        mark = "✓" if opt["key"] in selected else "○"
         rows.append([InlineKeyboardButton(f"{mark} {opt['label']}", callback_data=f"lora:toggle:{i}")])
     rows.append([InlineKeyboardButton("Clear", callback_data="lora:clear"), InlineKeyboardButton("↩️ Back", callback_data="show:status")])
     return InlineKeyboardMarkup(rows)
 
 
-def dataset_keyboard(ds: dict[str, Any]) -> InlineKeyboardMarkup:
-    collecting = bool(ds.get("collecting"))
-    action = InlineKeyboardButton("Stop collecting" if collecting else "Start collecting", callback_data="dataset:stop" if collecting else "dataset:start")
-    return InlineKeyboardMarkup(
-        [
-            [action],
-            [InlineKeyboardButton("↩️ Back", callback_data="show:status")],
-        ]
-    )
-
-
-def dataset_text(context: ContextTypes.DEFAULT_TYPE) -> str:
-    ds = get_dataset_state(context)
-    root, images = dataset_paths(ds)
-    return (
-        "Character LoRA dataset\n\n"
-        f"Status: {'collecting' if ds.get('collecting') else 'paused'}\n"
-        f"Name: {sanitize_dataset_name(ds.get('name') or DATASET_DEFAULT_NAME)}\n"
-        f"Trigger: {(ds.get('trigger') or DATASET_DEFAULT_TRIGGER).strip()}\n"
-        f"Images: {count_dataset_images(ds)}\n"
-        f"Path: {images}"
-    )
-
-
 def lora_text(st: dict[str, Any]) -> str:
-    selected = st.get("director_loras") or []
+    selected = st.get("video_loras") or []
     lines = [
-        "LoRA для LTX Director",
+        "LoRA для обычного video",
         "",
-        f"Выбрано: {len(selected)}/{DIRECTOR_MAX_LORAS}",
+        f"Выбрано: {len(selected)}/{VIDEO_MAX_LORAS}",
     ]
     if selected:
-        for name in selected:
-            opt = director_lora_by_file(name) or {"label": name, "strength": DIRECTOR_LORA_STRENGTH_DEFAULT}
-            lines.append(f"• {opt['label']} ({opt.get('strength', DIRECTOR_LORA_STRENGTH_DEFAULT):.2f})")
+        for key in selected:
+            opt = video_lora_by_key(key) or {"label": key, "strength": VIDEO_LORA_STRENGTH_DEFAULT}
+            lines.append(f"• {opt['label']} ({opt.get('strength', VIDEO_LORA_STRENGTH_DEFAULT):.2f})")
     else:
         lines.append("• none")
     return "\n".join(lines)
@@ -660,36 +555,26 @@ def help_text(st: dict[str, Any]) -> str:
         "Бот готов.\n\n"
         "Режимы:\n"
         "• video: 1 фото + промт + секунды + звук MMAudio\n"
-        "• director: New.json / LTX Director, 1 фото + промт + звук\n"
         "• image: до 3 фото + промт\n\n"
         "Команды:\n"
         "/video — обычный photo → video\n"
-        "/director — новый LTX Director / New.json\n"
         "/image — photo → image\n"
         "/prompt текст — сохранить промт\n"
-        f"/seconds 8 — video до {MAX_SECONDS} сек, director до {MAX_DIRECTOR_SECONDS} сек\n"
+        f"/seconds 8 — video до {MAX_SECONDS} сек\n"
         "/quality low|medium|high\n"
         "/repeat 1\n"
-        "/loras — выбрать LoRA для Director\n"
+        "/loras — выбрать LoRA для обычного video\n"
         "/photos — выбрать базовое фото из последних загруженных\n"
-        "/dataset — сбор картинок персонажа для LoRA\n"
-        "/dataset_trigger sfoxgirl — trigger word для LoRA captions\n"
         "/go — генерация\n"
         "/reset\n\n"
-        "Как тестировать Director:\n"
-        "1) /director\n"
-        "2) /seconds 8\n"
-        "3) пришли фото\n"
-        "4) отправь промт обычным текстом или через /prompt\n"
-        "5) /go\n\n"
         "Текущее состояние:\n"
         f"• mode: {st['mode']}\n"
         f"• quality: {quality_label(st['max_side'])} ({st['max_side']} px)\n"
         f"• seconds: {st['seconds']}\n"
         f"• repeat: {st.get('repeat', 1)}\n"
-        f"• director LoRA: {selected_lora_labels(st)}\n"
+        f"• video LoRA: {selected_lora_labels(st)}\n"
         f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
-        f"• video/director source: {media_line(st['video_source'])}\n"
+        f"• video source: {media_line(st['video_source'])}\n"
         f"• image ref #1: {media_line(refs[0])}\n"
         f"• image ref #2: {media_line(refs[1])}\n"
         f"• image ref #3: {media_line(refs[2])}\n"
@@ -801,6 +686,43 @@ def delete_comfy_result_file(filename: str, subfolder: str = "") -> None:
 # ============================================================
 # WORKFLOW PATCHERS
 # ============================================================
+def clear_power_lora_node(wf: dict[str, Any], node_id: str) -> dict[str, Any]:
+    node = wf.get(node_id)
+    if not node:
+        return {}
+    inputs = node.setdefault("inputs", {})
+    for key, value in list(inputs.items()):
+        if key.startswith("lora_") and isinstance(value, dict):
+            value["on"] = False
+    return inputs
+
+
+def apply_video_loras(wf: dict[str, Any], selected_loras: list[str]) -> None:
+    high_inputs = clear_power_lora_node(wf, "152")
+    low_inputs = clear_power_lora_node(wf, "155")
+    if not high_inputs or not low_inputs:
+        return
+
+    valid = []
+    for key in selected_loras:
+        opt = video_lora_by_key(key)
+        if opt and opt["key"] not in [x["key"] for x in valid]:
+            valid.append(opt)
+
+    for index, opt in enumerate(valid[:VIDEO_MAX_LORAS], start=1):
+        strength = float(opt.get("strength", VIDEO_LORA_STRENGTH_DEFAULT))
+        high_inputs[f"lora_{index}"] = {
+            "on": True,
+            "lora": opt["high"],
+            "strength": strength,
+        }
+        low_inputs[f"lora_{index}"] = {
+            "on": True,
+            "lora": opt["low"],
+            "strength": strength,
+        }
+
+
 def patch_video_workflow(
     wf: dict[str, Any],
     *,
@@ -810,6 +732,7 @@ def patch_video_workflow(
     height: int,
     seconds: int,
     seed: int,
+    selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
     wf["93"]["inputs"]["text"] = prompt
@@ -818,6 +741,7 @@ def patch_video_workflow(
     wf["165"]["inputs"]["value"] = int(height)
     wf["243"]["inputs"]["value"] = int(seconds)
     wf["141"]["inputs"]["seed"] = int(seed)
+    apply_video_loras(wf, selected_loras or [])
     return wf
 
 
@@ -843,137 +767,6 @@ def patch_image_workflow(
     return wf
 
 
-def build_director_timeline_one_image(
-    *,
-    image_name: str,
-    prompt: str,
-    seconds: int,
-) -> tuple[str, str, str]:
-    length = float(seconds)
-    segment_prompt = f"{prompt}\n\n{DIRECTOR_FACELOCK_PROMPT}\n\nAvoid: {DIRECTOR_NEGATIVE_PROMPT}"
-    segments = [
-        {
-            "id": f"tg_{uuid.uuid4().hex[:12]}",
-            "start": 0.0,
-            "length": length,
-            "prompt": segment_prompt,
-            "type": "image",
-            "imageFile": image_name,
-            "imageB64": f"/api/view?filename={quote(image_name)}&type=input&subfolder=",
-        }
-    ]
-    prompts = [segment_prompt]
-    lengths = [length]
-
-    timeline = {
-        "segments": segments,
-        "audioSegments": [],
-    }
-
-    return (
-        json.dumps(timeline, ensure_ascii=False),
-        " | ".join(prompts),
-        ",".join(str(x) for x in lengths),
-    )
-
-
-def apply_director_loras(wf: dict[str, Any], selected_loras: list[str]) -> None:
-    node = wf.get("182")
-    if not node:
-        return
-
-    inputs = node.setdefault("inputs", {})
-    slots = [f"lora_{i}" for i in range(1, DIRECTOR_MAX_LORAS + 1)]
-    for slot in slots:
-        entry = inputs.setdefault(slot, {})
-        entry["on"] = False
-
-    valid_files = []
-    for filename in selected_loras:
-        opt = director_lora_by_file(filename)
-        if opt and filename not in valid_files:
-            valid_files.append(filename)
-
-    for slot, filename in zip(slots, valid_files[:DIRECTOR_MAX_LORAS]):
-        opt = director_lora_by_file(filename) or {}
-        entry = inputs.setdefault(slot, {})
-        entry["on"] = True
-        entry["lora"] = filename
-        entry["strength"] = float(opt.get("strength", DIRECTOR_LORA_STRENGTH_DEFAULT))
-
-
-def patch_director_workflow(
-    wf: dict[str, Any],
-    *,
-    prompt: str,
-    image_name: str,
-    width: int,
-    height: int,
-    seconds: int,
-    seed: int,
-    selected_loras: list[str] | None = None,
-) -> dict[str, Any]:
-    wf = json.loads(json.dumps(wf))
-
-    frames = max(1, int(seconds) * DIRECTOR_FPS)
-
-    timeline_data, local_prompts, segment_lengths = build_director_timeline_one_image(
-        image_name=image_name,
-        prompt=prompt,
-        seconds=seconds,
-    )
-
-    director_prompt = f"{prompt}\n\n{DIRECTOR_FACELOCK_PROMPT}\n\nAvoid: {DIRECTOR_NEGATIVE_PROMPT}"
-
-    # LTXDirector node
-    wf["46"]["inputs"]["global_prompt"] = director_prompt
-    wf["46"]["inputs"]["duration_seconds"] = int(seconds)
-    wf["46"]["inputs"]["duration_frames"] = int(frames)
-    wf["46"]["inputs"]["timeline_data"] = timeline_data
-    wf["46"]["inputs"]["local_prompts"] = local_prompts
-    wf["46"]["inputs"]["segment_lengths"] = segment_lengths
-    wf["46"]["inputs"]["guide_strength"] = ",".join(["1.00"] * len(segment_lengths.split(",")))
-    wf["46"]["inputs"]["frame_rate"] = int(DIRECTOR_FPS)
-    wf["46"]["inputs"]["custom_width"] = int(width)
-    wf["46"]["inputs"]["custom_height"] = int(height)
-
-    # Seeds
-    if "28" in wf and "noise_seed" in wf["28"]["inputs"]:
-        wf["28"]["inputs"]["noise_seed"] = int(seed)
-    if "166" in wf and "noise_seed" in wf["166"]["inputs"]:
-        wf["166"]["inputs"]["noise_seed"] = int(make_seed())
-
-    apply_director_loras(wf, selected_loras or [])
-
-    # Final output node
-    wf["94"]["inputs"]["filename_prefix"] = "tg_director"
-    wf["94"]["inputs"]["format"] = "video/h264-mp4"
-    wf["94"]["inputs"]["pix_fmt"] = "yuv420p"
-    wf["94"]["inputs"]["save_output"] = True
-    wf["94"]["inputs"]["trim_to_audio"] = False
-
-    return wf
-
-
-# ============================================================
-# SIZE REFRESH
-# ============================================================
-def apply_size_to_media(st: dict[str, Any], media: dict[str, Any]) -> None:
-    if media.get("orig_width") and media.get("orig_height"):
-        fit_w, fit_h = fit_size_keep_aspect(media["orig_width"], media["orig_height"], st["max_side"])
-        media["fit_width"] = fit_w
-        media["fit_height"] = fit_h
-
-
-def refresh_all_sizes(st: dict[str, Any]) -> None:
-    apply_size_to_media(st, st["video_source"])
-    for media in st["image_refs"]:
-        apply_size_to_media(st, media)
-
-
-# ============================================================
-# RESULT HELPERS
-# ============================================================
 def pick_first_result_from_outputs(outputs, preferred_node=None):
     if preferred_node and preferred_node in outputs:
         node = outputs[preferred_node]
@@ -1000,7 +793,6 @@ async def pick_result_from_history(prompt_id: str, mode: str) -> dict[str, Any]:
     outputs = item["outputs"]
     preferred_nodes = {
         "video": "314",
-        "director": "94",
         "image": "60",
     }
     preferred_node = preferred_nodes.get(mode, "60")
@@ -1043,7 +835,7 @@ def build_video_audio_workflow(
             "class_type": "VHS_LoadVideo",
             "inputs": {
                 "video": video_name,
-                "force_rate": 0,
+                "force_rate": int(VIDEO_AUDIO_LOAD_FPS),
                 "custom_width": 0,
                 "custom_height": 0,
                 "frame_load_cap": 0,
@@ -1111,105 +903,6 @@ def build_video_audio_workflow(
     }
 
 
-def build_director_faceswap_workflow(
-    *,
-    video_name: str,
-    reference_image_name: str,
-    fps: int,
-) -> dict[str, Any]:
-    return {
-        "1": {
-            "class_type": "VHS_LoadVideo",
-            "inputs": {
-                "video": video_name,
-                "force_rate": int(fps),
-                "custom_width": 0,
-                "custom_height": 0,
-                "frame_load_cap": 0,
-                "skip_first_frames": 0,
-                "select_every_nth": 1,
-                "format": "None",
-            },
-        },
-        "2": {
-            "class_type": "LoadImage",
-            "inputs": {
-                "image": reference_image_name,
-            },
-        },
-        "3": {
-            "class_type": "RopeWrapper_LoadModels",
-            "inputs": {
-                "inswap_type": "Original",
-            },
-        },
-        "4": {
-            "class_type": "RopeWrapper_DetectNode",
-            "inputs": {
-                "models": ["3", 0],
-                "input_image": ["1", 0],
-                "SimilarityThreshold": float(DIRECTOR_ROPE_SIMILARITY),
-                "detection_threshold": float(DIRECTOR_ROPE_DETECTION),
-            },
-        },
-        "5": {
-            "class_type": "RopeWrapper_OptionNode",
-            "inputs": {
-                "RestorerSwitch": False,
-                "RestorerTypeTextSel": "CF",
-                "RestorerDetTypeTextSel": "Blend",
-                "RestorerSlider": 100,
-                "OrientSwitch": False,
-                "OrientSlider": 180,
-                "StrengthSwitch": False,
-                "StrengthSlider": 200,
-                "BorderTopSlider": 10,
-                "BorderSidesSlider": 10,
-                "BorderBottomSlider": 10,
-                "BorderBlurSlider": 10,
-                "DiffSwitch": False,
-                "DiffSlider": 4,
-                "OccluderSwitch": False,
-                "OccluderSlider": 0,
-                "FaceParserSwitch": False,
-                "FaceParserSlider": 0,
-                "MouthParserSlider": 0,
-                "CLIPSwitch": False,
-                "CLIPTextEntry": " ",
-                "CLIPSlider": 50,
-                "BlendSlider": 5,
-                "ColorSwitch": False,
-                "ColorRedSlider": 0,
-                "ColorGreenSlider": 0,
-                "ColorBlueSlider": 0,
-                "ColorGammaSlider": 0.0,
-                "FaceAdjSwitch": False,
-                "KPSXSlider": 0,
-                "KPSYSlider": 0,
-                "KPSScaleSlider": 0,
-                "SwapperTypeTextSel": "128",
-            },
-        },
-        "6": {
-            "class_type": "RopeWrapper_SwapNode",
-            "inputs": {
-                "models": ["3", 0],
-                "vm": ["3", 1],
-                "input_image": ["1", 0],
-                "source_face": ["2", 0],
-                "detectResult": ["4", 1],
-                "combineVideo": True,
-                "frame_rate": int(fps),
-                "filenamePrefix": "tg_director_rope",
-                "saveOutput": True,
-                "outputFrameIndex": 0,
-                "ROPE_Options": ["5", 0],
-                "source_target_matching": DIRECTOR_ROPE_MATCHING,
-            },
-        },
-    }
-
-
 async def wait_for_result_from_prompt(
     prompt_id: str,
     *,
@@ -1263,62 +956,6 @@ async def run_video_audio_postprocess(blob: bytes, meta: dict[str, Any], filenam
             pass
 
 
-async def run_director_faceswap_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
-    reference_image_name = meta.get("source_image_name")
-    if not reference_image_name:
-        return None
-
-    input_name = f"tg_faceswap_{uuid.uuid4().hex}.mp4"
-    input_path = COMFY_INPUT_DIR / input_name
-    save_bytes(input_path, blob)
-
-    try:
-        wf = build_director_faceswap_workflow(
-            video_name=input_name,
-            reference_image_name=reference_image_name,
-            fps=int(meta.get("fps") or DIRECTOR_FPS),
-        )
-        prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
-        result = await wait_for_result_from_prompt(
-            prompt_id,
-            preferred_node="6",
-            timeout=DIRECTOR_FACE_SWAP_TIMEOUT,
-        )
-        swapped_blob = await asyncio.to_thread(
-            fetch_file,
-            result["filename"],
-            result.get("subfolder", ""),
-            result.get("type", "output"),
-        )
-        swapped_name = result.get("filename") or filename
-        swapped_path = TMP_DIR / f"tg_rope_swapped_{uuid.uuid4().hex}.mp4"
-        muxed_path = TMP_DIR / f"tg_rope_muxed_{uuid.uuid4().hex}.mp4"
-        try:
-            save_bytes(swapped_path, swapped_blob)
-            await asyncio.to_thread(mux_video_with_audio, swapped_path, input_path, muxed_path)
-            swapped_blob = muxed_path.read_bytes()
-            swapped_name = muxed_path.name
-        except Exception:
-            log.exception("Director Rope audio mux failed; sending swapped video without remux")
-        finally:
-            try:
-                swapped_path.unlink(missing_ok=True)
-                muxed_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-        await asyncio.to_thread(
-            delete_comfy_result_file,
-            result["filename"],
-            result.get("subfolder", ""),
-        )
-        return swapped_blob, swapped_name
-    finally:
-        try:
-            input_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
 async def send_result(app: Application, meta: dict[str, Any], result: dict[str, Any]) -> None:
     blob = await asyncio.to_thread(
         fetch_file,
@@ -1328,19 +965,6 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
     )
 
     filename = result.get("filename", "result.bin")
-
-    if (
-        DIRECTOR_FACE_SWAP
-        and meta.get("mode") == "director"
-        and filename.lower().endswith((".mp4", ".mov", ".webm"))
-    ):
-        try:
-            processed = await run_director_faceswap_postprocess(blob, meta, filename)
-            if processed:
-                blob, filename = processed
-                log.info("Director face swap postprocess applied for job #%s", meta.get("job_id"))
-        except Exception:
-            log.exception("Director face swap postprocess failed; sending original result")
 
     if (
         VIDEO_AUDIO
@@ -1380,7 +1004,7 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
         await asyncio.to_thread(clear_directory_safe, COMFY_OUTPUT_DIR)
         return
 
-    if meta["mode"] in ("video", "director"):
+    if meta["mode"] == "video":
         if not filename.lower().endswith((".mp4", ".mov", ".webm", ".gif")):
             filename += ".mp4"
             bio.name = filename
@@ -1454,8 +1078,6 @@ async def submit_worker_loop(app: Application) -> None:
         try:
             if job.mode == "video":
                 await submit_video_job(app, job)
-            elif job.mode == "director":
-                await submit_director_job(app, job)
             elif job.mode == "image":
                 await submit_image_job(app, job)
             else:
@@ -1557,20 +1179,6 @@ async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_ui_message(update.message, context, "Режим: photo → video", reply_markup=main_keyboard())
 
 
-async def director_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
-        return
-    st = get_state(context)
-    st["mode"] = "director"
-    st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-    await send_ui_message(
-        update.message,
-        context,
-        "Режим: LTX Director / New.json — 1 фото + промт + звук",
-        reply_markup=main_keyboard(),
-    )
-
-
 async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update):
         return
@@ -1585,48 +1193,6 @@ async def loras_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     st = get_state(context)
     await send_ui_message(update.message, context, lora_text(st), reply_markup=lora_keyboard(st))
-
-
-async def dataset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
-        return
-
-    ds = get_dataset_state(context)
-    args = [a.strip() for a in context.args if a.strip()]
-    if args:
-        action = args[0].lower()
-        if action in {"on", "start"}:
-            ds["collecting"] = True
-            if len(args) > 1:
-                ds["name"] = sanitize_dataset_name(args[1])
-        elif action in {"off", "stop", "pause"}:
-            ds["collecting"] = False
-        else:
-            ds["name"] = sanitize_dataset_name(args[0])
-            ds["collecting"] = True
-
-    await send_ui_message(update.message, context, dataset_text(context), reply_markup=dataset_keyboard(ds))
-
-
-async def dataset_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
-        return
-    ds = get_dataset_state(context)
-    await send_ui_message(update.message, context, dataset_text(context), reply_markup=dataset_keyboard(ds))
-
-
-async def dataset_trigger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
-        return
-
-    ds = get_dataset_state(context)
-    if not context.args:
-        await send_ui_message(update.message, context, f"Сейчас trigger: {ds.get('trigger') or DATASET_DEFAULT_TRIGGER}", reply_markup=dataset_keyboard(ds))
-        return
-
-    trigger = sanitize_dataset_name(context.args[0])
-    ds["trigger"] = trigger
-    await send_ui_message(update.message, context, f"Trigger сохранён: {trigger}", reply_markup=dataset_keyboard(ds))
 
 
 async def photos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1761,17 +1327,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     with Image.open(path) as img:
         width, height = img.size
 
-    ds = get_dataset_state(context)
-    if ds.get("collecting"):
-        image_path, caption_path, idx = save_dataset_photo(path, ds)
-        await send_ui_message(
-            update.message,
-            context,
-            f"Dataset image #{idx} сохранён.\nФото: {image_path.name}\nCaption: {caption_path.name}\nВсего: {count_dataset_images(ds)}",
-            reply_markup=dataset_keyboard(ds),
-        )
-        return
-
     fit_w, fit_h = fit_size_keep_aspect(width, height, st["max_side"])
     media = {
         "path": str(path),
@@ -1783,7 +1338,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     }
     remember_media(context, media)
 
-    if st["mode"] in ("video", "director"):
+    if st["mode"] == "video":
         st["video_source"] = media
         await send_ui_message(
             update.message,
@@ -1894,30 +1449,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             idx = int(data.rsplit(":", 1)[1])
         except Exception:
             idx = -1
-        if 0 <= idx < len(DIRECTOR_LORA_OPTIONS):
-            filename = DIRECTOR_LORA_OPTIONS[idx]["file"]
-            selected = list(st.get("director_loras") or [])
-            if filename in selected:
-                selected.remove(filename)
-            elif len(selected) < DIRECTOR_MAX_LORAS:
-                selected.append(filename)
-            st["director_loras"] = selected
+        if 0 <= idx < len(VIDEO_LORA_OPTIONS):
+            key = VIDEO_LORA_OPTIONS[idx]["key"]
+            selected = list(st.get("video_loras") or [])
+            if key in selected:
+                selected.remove(key)
+            elif len(selected) < VIDEO_MAX_LORAS:
+                selected.append(key)
+            st["video_loras"] = selected
         await replace_ui_message_from_callback(query, context, lora_text(st), reply_markup=lora_keyboard(st))
         return
 
     if data == "lora:clear":
-        st["director_loras"] = []
+        st["video_loras"] = []
         await replace_ui_message_from_callback(query, context, lora_text(st), reply_markup=lora_keyboard(st))
-        return
-
-    if data.startswith("dataset:"):
-        ds = get_dataset_state(context)
-        action = data.split(":", 1)[1]
-        if action == "start":
-            ds["collecting"] = True
-        elif action == "stop":
-            ds["collecting"] = False
-        await replace_ui_message_from_callback(query, context, dataset_text(context), reply_markup=dataset_keyboard(ds))
         return
 
     if data == "media:list":
@@ -2035,7 +1580,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_ui_message(target, context, "Сначала задай промт.", reply_markup=main_keyboard())
         return
 
-    if st["mode"] in ("video", "director"):
+    if st["mode"] == "video":
         if not st["video_source"].get("path"):
             await send_ui_message(target, context, f"Для {st['mode']} сначала пришли фото.", reply_markup=main_keyboard())
             return
@@ -2062,7 +1607,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             seed=make_seed(),
             video_source=copy.deepcopy(st["video_source"]),
             image_refs=copy.deepcopy(st["image_refs"]),
-            director_loras=list(st.get("director_loras") or []),
+            video_loras=list(st.get("video_loras") or []),
         )
         await GEN_QUEUE.put(job)
 
@@ -2126,6 +1671,7 @@ async def submit_video_job(app: Application, job: Job) -> None:
         height=src["fit_height"],
         seconds=job.seconds,
         seed=job.seed,
+        selected_loras=job.video_loras,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
@@ -2139,48 +1685,7 @@ async def submit_video_job(app: Application, job: Job) -> None:
         "width": src["fit_width"],
         "height": src["fit_height"],
         "prompt": job.prompt,
-    }
-
-
-async def submit_director_job(app: Application, job: Job) -> None:
-    src = job.video_source
-    if not src or not src.get("path"):
-        raise RuntimeError("Для LTX Director сначала пришли фото.")
-
-    wf = await asyncio.to_thread(load_workflow, WORKFLOW_DIRECTOR)
-
-    uploaded_name = await asyncio.to_thread(
-        upload_image_to_comfy,
-        src["path"],
-        src["name"],
-    )
-
-    wf = await asyncio.to_thread(
-        patch_director_workflow,
-        wf,
-        prompt=job.prompt,
-        image_name=uploaded_name,
-        width=src["fit_width"],
-        height=src["fit_height"],
-        seconds=job.seconds,
-        seed=job.seed,
-        selected_loras=job.director_loras,
-    )
-
-    prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
-
-    ACTIVE_PROMPTS[prompt_id] = {
-        "job_id": job.job_id,
-        "chat_id": job.chat_id,
-        "mode": "director",
-        "preferred_node": "94",
-        "seconds": job.seconds,
-        "fps": DIRECTOR_FPS,
-        "width": src["fit_width"],
-        "height": src["fit_height"],
-        "prompt": job.prompt,
-        "source_image_name": uploaded_name,
-        "director_loras": job.director_loras,
+        "video_loras": job.video_loras,
     }
 
 
@@ -2208,9 +1713,6 @@ def main() -> None:
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_VIDEO}")
     if not Path(WORKFLOW_IMAGE).exists():
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_IMAGE}")
-    if not Path(WORKFLOW_DIRECTOR).exists():
-        raise RuntimeError(f"Workflow file not found: {WORKFLOW_DIRECTOR}")
-
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
@@ -2219,17 +1721,9 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status_cmd))
 
     app.add_handler(CommandHandler("video", video_cmd))
-    app.add_handler(CommandHandler("director", director_cmd))
-
-    # Чтобы старая привычная команда /sound тоже включала новый Director.
-    app.add_handler(CommandHandler("sound", director_cmd))
-
     app.add_handler(CommandHandler("image", image_cmd))
     app.add_handler(CommandHandler("photos", photos_cmd))
     app.add_handler(CommandHandler("loras", loras_cmd))
-    app.add_handler(CommandHandler("dataset", dataset_cmd))
-    app.add_handler(CommandHandler("dataset_status", dataset_status_cmd))
-    app.add_handler(CommandHandler("dataset_trigger", dataset_trigger_cmd))
     app.add_handler(CommandHandler("prompt", prompt_cmd))
     app.add_handler(CommandHandler("seconds", seconds_cmd))
     app.add_handler(CommandHandler("quality", quality_cmd))
