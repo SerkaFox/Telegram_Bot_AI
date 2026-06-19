@@ -454,7 +454,7 @@ def run_wav2lip(video_path: Path, audio_path: Path, output_path: Path) -> None:
         "--face", str(video_path.resolve()),
         "--audio", str(audio_path.resolve()),
         "--outfile", str(output_path.resolve()),
-        "--pads", "0", "20", "0", "0",
+        "--pads", "0", "10", "0", "0",
         "--face_det_batch_size", "1",
         "--wav2lip_batch_size", "16",
         "--resize_factor", "1",
