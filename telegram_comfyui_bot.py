@@ -88,6 +88,7 @@ VIDEO_TTS_DELAY_MS = int(os.getenv("VIDEO_TTS_DELAY_MS", "500"))
 VIDEO_TTS_BG_VOLUME = float(os.getenv("VIDEO_TTS_BG_VOLUME", "0.65"))
 VIDEO_TTS_SPEECH_VOLUME = float(os.getenv("VIDEO_TTS_SPEECH_VOLUME", "1.25"))
 TALK_LIPSYNC = os.getenv("TALK_LIPSYNC", "1").strip().lower() not in {"0", "false", "no", "off"}
+TALK_LIPSYNC_MIN_SIDE = int(os.getenv("TALK_LIPSYNC_MIN_SIDE", "640"))
 WAV2LIP_DIR = Path(os.getenv("WAV2LIP_DIR", "./third_party/Wav2Lip")).resolve()
 WAV2LIP_PYTHON = os.getenv("WAV2LIP_PYTHON", "/home/iaadmin/ComfyUI/venv/bin/python")
 WAV2LIP_CHECKPOINT = Path(os.getenv("WAV2LIP_CHECKPOINT", str(WAV2LIP_DIR / "checkpoints" / "wav2lip_gan.pth")))
@@ -102,6 +103,8 @@ MULTITALK_LORA = os.getenv("MULTITALK_LORA", "nsfw_wan_14b_sex.safetensors")
 MULTITALK_LORA_STRENGTH = float(os.getenv("MULTITALK_LORA_STRENGTH", "0.65"))
 VIDEO_MAX_LORAS = int(os.getenv("VIDEO_MAX_LORAS", "8"))
 VIDEO_LORA_STRENGTH_DEFAULT = float(os.getenv("VIDEO_LORA_STRENGTH_DEFAULT", "0.35"))
+VIDEO_LORA_STRENGTH_MULTIPLIER = float(os.getenv("VIDEO_LORA_STRENGTH_MULTIPLIER", "2.0"))
+VIDEO_LORA_STRENGTH_MAX = float(os.getenv("VIDEO_LORA_STRENGTH_MAX", "1.0"))
 VIDEO_LORA_OPTIONS = [
     {"key": "lightx2v", "label": "LightX2V", "high": "Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_high.safetensors", "low": "Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_low.safetensors", "strength": 0.25},
     {"key": "bounce", "label": "Bounce", "high": "BounceHighWan2_2.safetensors", "low": "BounceLowWan2_2.safetensors", "strength": 0.35},
@@ -337,6 +340,59 @@ def media_duration_seconds(path: Path) -> float:
     return max(0.0, float((p.stdout or "0").strip() or "0"))
 
 
+def media_video_size(path: Path) -> tuple[int, int]:
+    p = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json",
+            str(path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"ffprobe size failed for {path}: {p.stderr}")
+    data = json.loads(p.stdout or "{}")
+    stream = (data.get("streams") or [{}])[0]
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    return width, height
+
+
+def upscale_video_for_lipsync(input_path: Path, output_path: Path) -> Path:
+    min_side = max(0, int(TALK_LIPSYNC_MIN_SIDE))
+    if min_side <= 0:
+        return input_path
+
+    width, height = media_video_size(input_path)
+    if min(width, height) >= min_side:
+        return input_path
+
+    if width <= height:
+        scale_expr = f"{min_side}:-2"
+    else:
+        scale_expr = f"-2:{min_side}"
+
+    run_cmd([
+        "ffmpeg",
+        "-y",
+        "-i", str(input_path),
+        "-vf", f"scale={scale_expr}:flags=lanczos",
+        "-c:v", "libx264",
+        "-crf", "18",
+        "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        "-movflags", "+faststart",
+        str(output_path),
+    ])
+    return output_path
+
+
 def build_lipsync_audio_track(speech_path: Path, output_path: Path, duration: float) -> None:
     delay = max(0, int(VIDEO_TTS_DELAY_MS))
     duration = max(0.1, float(duration))
@@ -398,8 +454,8 @@ def run_wav2lip(video_path: Path, audio_path: Path, output_path: Path) -> None:
         "--face", str(video_path.resolve()),
         "--audio", str(audio_path.resolve()),
         "--outfile", str(output_path.resolve()),
-        "--pads", "0", "10", "0", "0",
-        "--face_det_batch_size", "4",
+        "--pads", "0", "20", "0", "0",
+        "--face_det_batch_size", "1",
         "--wav2lip_batch_size", "16",
         "--resize_factor", "1",
     ], cwd=WAV2LIP_DIR, timeout=WAV2LIP_TIMEOUT, env=env)
@@ -717,7 +773,7 @@ def lora_text(st: dict[str, Any]) -> str:
     if selected:
         for key in selected:
             opt = video_lora_by_key(key) or {"label": key, "strength": VIDEO_LORA_STRENGTH_DEFAULT}
-            lines.append(f"• {opt['label']} ({opt.get('strength', VIDEO_LORA_STRENGTH_DEFAULT):.2f})")
+            lines.append(f"• {opt['label']} ({effective_lora_strength(opt):.2f})")
     else:
         lines.append("• none")
     return "\n".join(lines)
@@ -941,11 +997,14 @@ def clear_power_lora_node(wf: dict[str, Any], node_id: str) -> dict[str, Any]:
     return inputs
 
 
+def effective_lora_strength(opt: dict[str, Any]) -> float:
+    base = float(opt.get("strength", VIDEO_LORA_STRENGTH_DEFAULT))
+    return min(VIDEO_LORA_STRENGTH_MAX, base * VIDEO_LORA_STRENGTH_MULTIPLIER)
+
+
 def apply_video_loras(wf: dict[str, Any], selected_loras: list[str]) -> None:
     high_inputs = clear_power_lora_node(wf, "152")
     low_inputs = clear_power_lora_node(wf, "155")
-    if not high_inputs or not low_inputs:
-        return
 
     valid = []
     for key in selected_loras:
@@ -953,18 +1012,41 @@ def apply_video_loras(wf: dict[str, Any], selected_loras: list[str]) -> None:
         if opt and opt["key"] not in [x["key"] for x in valid]:
             valid.append(opt)
 
+    if not valid:
+        return
+
+    high_prev: list[Any] = ["371", 0]
+    low_prev: list[Any] = ["372", 0]
     for index, opt in enumerate(valid[:VIDEO_MAX_LORAS], start=1):
-        strength = float(opt.get("strength", VIDEO_LORA_STRENGTH_DEFAULT))
-        high_inputs[f"lora_{index}"] = {
-            "on": True,
-            "lora": opt["high"],
-            "strength": strength,
+        strength = effective_lora_strength(opt)
+        high_id = f"tg_high_lora_{index}"
+        low_id = f"tg_low_lora_{index}"
+        wf[high_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": high_prev,
+                "lora_name": opt["high"],
+                "strength_model": strength,
+            },
         }
-        low_inputs[f"lora_{index}"] = {
-            "on": True,
-            "lora": opt["low"],
-            "strength": strength,
+        wf[low_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": low_prev,
+                "lora_name": opt["low"],
+                "strength_model": strength,
+            },
         }
+        high_prev = [high_id, 0]
+        low_prev = [low_id, 0]
+
+        if high_inputs:
+            high_inputs[f"lora_{index}"] = {"on": True, "lora": opt["high"], "strength": strength}
+        if low_inputs:
+            low_inputs[f"lora_{index}"] = {"on": True, "lora": opt["low"], "strength": strength}
+
+    wf["141"]["inputs"]["model_high_noise"] = high_prev
+    wf["141"]["inputs"]["model_low_noise"] = low_prev
 
 
 def patch_video_workflow(
@@ -1303,6 +1385,7 @@ async def run_talk_lipsync_postprocess(blob: bytes, meta: dict[str, Any], filena
     video_path = TMP_DIR / f"tg_talk_video_{uuid.uuid4().hex}.mp4"
     speech_path = TMP_DIR / f"tg_talk_speech_{uuid.uuid4().hex}.mp3"
     lipsync_audio_path = TMP_DIR / f"tg_talk_lipsync_audio_{uuid.uuid4().hex}.wav"
+    lipsync_video_path = TMP_DIR / f"tg_talk_lipsync_video_{uuid.uuid4().hex}.mp4"
     lipsync_path = TMP_DIR / f"tg_talk_lipsync_{uuid.uuid4().hex}.mp4"
     mixed_path = TMP_DIR / f"tg_talk_tts_{uuid.uuid4().hex}.mp4"
     try:
@@ -1312,13 +1395,14 @@ async def run_talk_lipsync_postprocess(blob: bytes, meta: dict[str, Any], filena
         if TALK_LIPSYNC:
             duration = await asyncio.to_thread(media_duration_seconds, video_path)
             await asyncio.to_thread(build_lipsync_audio_track, speech_path, lipsync_audio_path, duration)
-            await asyncio.to_thread(run_wav2lip, video_path, lipsync_audio_path, lipsync_path)
+            wav2lip_video_path = await asyncio.to_thread(upscale_video_for_lipsync, video_path, lipsync_video_path)
+            await asyncio.to_thread(run_wav2lip, wav2lip_video_path, lipsync_audio_path, lipsync_path)
             return lipsync_path.read_bytes(), lipsync_path.name
 
         await asyncio.to_thread(mix_video_with_tts, video_path, speech_path, mixed_path)
         return mixed_path.read_bytes(), mixed_path.name
     finally:
-        for path in (video_path, speech_path, lipsync_audio_path, lipsync_path, mixed_path):
+        for path in (video_path, speech_path, lipsync_audio_path, lipsync_video_path, lipsync_path, mixed_path):
             try:
                 path.unlink(missing_ok=True)
             except Exception:
