@@ -995,13 +995,29 @@ def pick_first_result_from_outputs(outputs, preferred_node=None):
     raise RuntimeError("No result files found")
 
 
-async def pick_result_from_history(prompt_id: str, mode: str) -> dict[str, Any]:
+def pick_required_result_from_outputs(outputs, preferred_node: str, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    node = outputs.get(preferred_node) or {}
+    for key in keys:
+        arr = node.get(key, [])
+        if arr:
+            return arr[0]
+    return None
+
+
+async def pick_result_from_history(prompt_id: str, mode: str) -> dict[str, Any] | None:
     history = await asyncio.to_thread(get_history, prompt_id)
     item = history.get(prompt_id)
     if not item or not item.get("outputs"):
-        raise RuntimeError(f"No outputs yet for prompt_id={prompt_id}")
+        return None
 
     outputs = item["outputs"]
+    required_outputs = {
+        "talk": ("17", ("videos", "gifs")),
+    }
+    if mode in required_outputs:
+        preferred_node, keys = required_outputs[mode]
+        return pick_required_result_from_outputs(outputs, preferred_node, keys)
+
     preferred_nodes = {
         "video": "314",
         "image": "60",
@@ -1256,7 +1272,7 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
         await asyncio.to_thread(clear_directory_safe, COMFY_OUTPUT_DIR)
         return
 
-    if meta["mode"] == "video":
+    if meta["mode"] in {"video", "talk"}:
         if not filename.lower().endswith((".mp4", ".mov", ".webm", ".gif")):
             filename += ".mp4"
             bio.name = filename
@@ -1305,6 +1321,8 @@ async def monitor_loop(app: Application) -> None:
                     continue
 
                 result = await pick_result_from_history(prompt_id, meta["mode"])
+                if result is None:
+                    continue
                 await send_result(app, meta, result)
                 done_ids.append(prompt_id)
 
@@ -1326,6 +1344,9 @@ async def submit_worker_loop(app: Application) -> None:
     log.info("Submit worker started")
 
     while True:
+        while ACTIVE_PROMPTS:
+            await asyncio.sleep(POLL_SECONDS)
+
         job = await GEN_QUEUE.get()
         try:
             if job.mode == "video":
