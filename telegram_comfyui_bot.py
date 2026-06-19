@@ -74,6 +74,8 @@ VIDEO_AUDIO_NEGATIVE_PROMPT = os.getenv("VIDEO_AUDIO_NEGATIVE_PROMPT", "")
 VIDEO_AUDIO_LOAD_FPS = int(os.getenv("VIDEO_AUDIO_LOAD_FPS", "25"))
 VIDEO_NO_TEXT_PROMPT = "No subtitles, no captions, no on-screen text, no speech bubbles, no written words, no labels."
 VIDEO_NO_TEXT_NEGATIVE = "subtitles, captions, on-screen text, text overlay, speech bubbles, written words, labels, watermark"
+VIDEO_NO_LOOP_PROMPT = "Continuous non-looping motion, no replay, no boomerang, no ping-pong motion, no reset to the first frame."
+VIDEO_NO_LOOP_NEGATIVE = "loop, looping, replay, boomerang, ping-pong motion, reverse playback, return to first frame, reset to starting pose"
 VIDEO_TTS = os.getenv("VIDEO_TTS", "0").strip().lower() not in {"0", "false", "no", "off"}
 EDGE_TTS_BIN = os.getenv("EDGE_TTS_BIN", "/home/iaadmin/miniconda3/bin/edge-tts")
 VIDEO_TTS_VOICE_RU = os.getenv("VIDEO_TTS_VOICE_RU", "ru-RU-SvetlanaNeural")
@@ -83,6 +85,11 @@ VIDEO_TTS_VOLUME = os.getenv("VIDEO_TTS_VOLUME", "+20%")
 VIDEO_TTS_DELAY_MS = int(os.getenv("VIDEO_TTS_DELAY_MS", "500"))
 VIDEO_TTS_BG_VOLUME = float(os.getenv("VIDEO_TTS_BG_VOLUME", "0.65"))
 VIDEO_TTS_SPEECH_VOLUME = float(os.getenv("VIDEO_TTS_SPEECH_VOLUME", "1.25"))
+TALK_LIPSYNC = os.getenv("TALK_LIPSYNC", "1").strip().lower() not in {"0", "false", "no", "off"}
+WAV2LIP_DIR = Path(os.getenv("WAV2LIP_DIR", "./third_party/Wav2Lip")).resolve()
+WAV2LIP_PYTHON = os.getenv("WAV2LIP_PYTHON", "/home/iaadmin/ComfyUI/venv/bin/python")
+WAV2LIP_CHECKPOINT = Path(os.getenv("WAV2LIP_CHECKPOINT", str(WAV2LIP_DIR / "checkpoints" / "wav2lip_gan.pth")))
+WAV2LIP_TIMEOUT = int(os.getenv("WAV2LIP_TIMEOUT", "900"))
 MULTITALK_FPS = int(os.getenv("MULTITALK_FPS", "25"))
 MULTITALK_STEPS = int(os.getenv("MULTITALK_STEPS", "4"))
 MULTITALK_CFG = float(os.getenv("MULTITALK_CFG", "1.0"))
@@ -207,8 +214,15 @@ def save_bytes(path: Path, blob: bytes) -> None:
     path.write_bytes(blob)
 
 
-def run_cmd(cmd: list[str]) -> None:
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def run_cmd(cmd: list[str], *, cwd: Path | None = None, timeout: int | None = None) -> None:
+    p = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        timeout=timeout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     if p.returncode != 0:
         raise RuntimeError(
             f"Command failed ({p.returncode}): {' '.join(cmd)}\n\nSTDERR:\n{p.stderr}"
@@ -302,6 +316,35 @@ def video_has_audio(video_path: Path) -> bool:
     return p.returncode == 0 and bool(p.stdout.strip())
 
 
+def media_duration_seconds(path: Path) -> float:
+    p = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"ffprobe duration failed for {path}: {p.stderr}")
+    return max(0.0, float((p.stdout or "0").strip() or "0"))
+
+
+def build_lipsync_audio_track(speech_path: Path, output_path: Path, duration: float) -> None:
+    delay = max(0, int(VIDEO_TTS_DELAY_MS))
+    duration = max(0.1, float(duration))
+    run_cmd([
+        "ffmpeg",
+        "-y",
+        "-i", str(speech_path),
+        "-filter_complex",
+        f"[0:a]adelay={delay}|{delay},volume={VIDEO_TTS_SPEECH_VOLUME},apad,atrim=0:{duration:.3f}[a]",
+        "-map", "[a]",
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        str(output_path),
+    ])
+
+
 def mix_video_with_tts(video_path: Path, speech_path: Path, output_path: Path) -> None:
     delay = max(0, int(VIDEO_TTS_DELAY_MS))
     if video_has_audio(video_path):
@@ -326,6 +369,27 @@ def mix_video_with_tts(video_path: Path, speech_path: Path, output_path: Path) -
         "-movflags", "+faststart",
         str(output_path),
     ])
+
+
+def run_wav2lip(video_path: Path, audio_path: Path, output_path: Path) -> None:
+    if not WAV2LIP_CHECKPOINT.exists():
+        raise FileNotFoundError(f"Wav2Lip checkpoint not found: {WAV2LIP_CHECKPOINT}")
+    if not (WAV2LIP_DIR / "inference.py").exists():
+        raise FileNotFoundError(f"Wav2Lip inference.py not found in {WAV2LIP_DIR}")
+
+    (WAV2LIP_DIR / "temp").mkdir(parents=True, exist_ok=True)
+    run_cmd([
+        WAV2LIP_PYTHON,
+        "inference.py",
+        "--checkpoint_path", str(WAV2LIP_CHECKPOINT),
+        "--face", str(video_path),
+        "--audio", str(audio_path),
+        "--outfile", str(output_path),
+        "--pads", "0", "10", "0", "0",
+        "--face_det_batch_size", "4",
+        "--wav2lip_batch_size", "16",
+        "--resize_factor", "1",
+    ], cwd=WAV2LIP_DIR, timeout=WAV2LIP_TIMEOUT)
 
 
 # ============================================================
@@ -903,10 +967,13 @@ def patch_video_workflow(
     selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
-    wf["93"]["inputs"]["text"] = f"{prompt}\n\n{VIDEO_NO_TEXT_PROMPT}"
+    wf["93"]["inputs"]["text"] = f"{prompt}\n\n{VIDEO_NO_TEXT_PROMPT}\n{VIDEO_NO_LOOP_PROMPT}"
     negative_text = wf["373:360"]["inputs"].get("text", "")
     if VIDEO_NO_TEXT_NEGATIVE not in negative_text:
         wf["373:360"]["inputs"]["text"] = f"{negative_text}, {VIDEO_NO_TEXT_NEGATIVE}"
+        negative_text = wf["373:360"]["inputs"]["text"]
+    if VIDEO_NO_LOOP_NEGATIVE not in negative_text:
+        wf["373:360"]["inputs"]["text"] = f"{negative_text}, {VIDEO_NO_LOOP_NEGATIVE}"
     wf["385"]["inputs"]["image"] = image_name
     wf["164"]["inputs"]["value"] = int(width)
     wf["165"]["inputs"]["value"] = int(height)
@@ -1207,6 +1274,36 @@ async def run_video_tts_postprocess(blob: bytes, meta: dict[str, Any], filename:
                 pass
 
 
+async def run_talk_lipsync_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
+    speech_text = meta.get("speech_text") or extract_speech_text(meta.get("prompt") or "")
+    if not speech_text:
+        return None
+
+    video_path = TMP_DIR / f"tg_talk_video_{uuid.uuid4().hex}.mp4"
+    speech_path = TMP_DIR / f"tg_talk_speech_{uuid.uuid4().hex}.mp3"
+    lipsync_audio_path = TMP_DIR / f"tg_talk_lipsync_audio_{uuid.uuid4().hex}.wav"
+    lipsync_path = TMP_DIR / f"tg_talk_lipsync_{uuid.uuid4().hex}.mp4"
+    mixed_path = TMP_DIR / f"tg_talk_tts_{uuid.uuid4().hex}.mp4"
+    try:
+        save_bytes(video_path, blob)
+        await asyncio.to_thread(synthesize_speech, speech_text, speech_path)
+
+        if TALK_LIPSYNC:
+            duration = await asyncio.to_thread(media_duration_seconds, video_path)
+            await asyncio.to_thread(build_lipsync_audio_track, speech_path, lipsync_audio_path, duration)
+            await asyncio.to_thread(run_wav2lip, video_path, lipsync_audio_path, lipsync_path)
+            return lipsync_path.read_bytes(), lipsync_path.name
+
+        await asyncio.to_thread(mix_video_with_tts, video_path, speech_path, mixed_path)
+        return mixed_path.read_bytes(), mixed_path.name
+    finally:
+        for path in (video_path, speech_path, lipsync_audio_path, lipsync_path, mixed_path):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 async def send_result(app: Application, meta: dict[str, Any], result: dict[str, Any]) -> None:
     blob = await asyncio.to_thread(
         fetch_file,
@@ -1231,6 +1328,24 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
             log.exception("MMAudio postprocess failed; sending original silent video")
 
     if (
+        meta.get("mode") == "talk"
+        and meta.get("speech_overlay")
+        and filename.lower().endswith((".mp4", ".mov", ".webm"))
+    ):
+        try:
+            processed = await run_talk_lipsync_postprocess(blob, meta, filename)
+            if processed:
+                blob, filename = processed
+                log.info("Talk lipsync postprocess applied for job #%s", meta.get("job_id"))
+        except Exception:
+            log.exception("Talk lipsync failed; falling back to TTS overlay")
+            try:
+                processed = await run_video_tts_postprocess(blob, meta, filename)
+                if processed:
+                    blob, filename = processed
+            except Exception:
+                log.exception("TTS fallback failed; sending original talk video")
+    elif (
         (VIDEO_TTS or meta.get("speech_overlay"))
         and meta.get("mode") in {"video", "talk"}
         and filename.lower().endswith((".mp4", ".mov", ".webm"))

@@ -6,3 +6,6 @@ __pycache__/
 .env.*
 *.log
 character_datasets/
+third_party/Wav2Lip/checkpoints/*.pth
+third_party/Wav2Lip/temp/
+third_party/Wav2Lip/results/
