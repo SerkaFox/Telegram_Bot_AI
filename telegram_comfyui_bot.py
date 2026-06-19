@@ -31,6 +31,7 @@ COMFY_BASE = os.getenv("COMFY_BASE", "http://127.0.0.1:8188").rstrip("/")
 
 WORKFLOW_VIDEO = os.getenv("COMFY_WORKFLOW_VIDEO", "./workflow_video.json")
 WORKFLOW_IMAGE = os.getenv("COMFY_WORKFLOW_IMAGE", "./workflow_image.json")
+WORKFLOW_MULTITALK = os.getenv("COMFY_WORKFLOW_MULTITALK", "./workflow_multitalk.json")
 
 TMP_DIR = Path(os.getenv("BOT_TMP_DIR", "./tmp_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -47,6 +48,7 @@ ALLOWED_USER_IDS = {
 DEFAULT_SECONDS = int(os.getenv("DEFAULT_SECONDS", "8"))
 MIN_SECONDS = int(os.getenv("MIN_SECONDS", "2"))
 MAX_SECONDS = int(os.getenv("MAX_SECONDS", "12"))
+TALK_MAX_SECONDS = int(os.getenv("TALK_MAX_SECONDS", "4"))
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "medium").strip().lower()
 QUALITY_PRESETS = {
     "low": {"max_side": 480, "video_fps": 16},
@@ -81,6 +83,12 @@ VIDEO_TTS_VOLUME = os.getenv("VIDEO_TTS_VOLUME", "+20%")
 VIDEO_TTS_DELAY_MS = int(os.getenv("VIDEO_TTS_DELAY_MS", "500"))
 VIDEO_TTS_BG_VOLUME = float(os.getenv("VIDEO_TTS_BG_VOLUME", "0.65"))
 VIDEO_TTS_SPEECH_VOLUME = float(os.getenv("VIDEO_TTS_SPEECH_VOLUME", "1.25"))
+MULTITALK_FPS = int(os.getenv("MULTITALK_FPS", "25"))
+MULTITALK_STEPS = int(os.getenv("MULTITALK_STEPS", "4"))
+MULTITALK_CFG = float(os.getenv("MULTITALK_CFG", "1.0"))
+MULTITALK_SHIFT = float(os.getenv("MULTITALK_SHIFT", "11.0"))
+MULTITALK_AUDIO_SCALE = float(os.getenv("MULTITALK_AUDIO_SCALE", "1.0"))
+MULTITALK_AUDIO_CFG_SCALE = float(os.getenv("MULTITALK_AUDIO_CFG_SCALE", "1.0"))
 VIDEO_MAX_LORAS = int(os.getenv("VIDEO_MAX_LORAS", "8"))
 VIDEO_LORA_STRENGTH_DEFAULT = float(os.getenv("VIDEO_LORA_STRENGTH_DEFAULT", "0.35"))
 VIDEO_LORA_OPTIONS = [
@@ -353,6 +361,8 @@ def blank_media() -> dict[str, Any]:
 
 
 def mode_max_seconds(mode: str) -> int:
+    if mode == "talk":
+        return TALK_MAX_SECONDS
     return MAX_SECONDS
 
 
@@ -531,6 +541,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("🎬 Video", callback_data="mode:video"),
+                InlineKeyboardButton("🗣 Talk", callback_data="mode:talk"),
                 InlineKeyboardButton("🖼 Image", callback_data="mode:image"),
             ],
             [
@@ -706,9 +717,11 @@ def help_text(st: dict[str, Any]) -> str:
         "Бот готов.\n\n"
         "Режимы:\n"
         "• video: 1 фото + промт + секунды + звук MMAudio\n"
+        "• talk: 1 фото + реплика из промта + lip-sync через InfiniteTalk\n"
         "• image: до 3 фото + промт\n\n"
         "Команды:\n"
         "/video — обычный photo → video\n"
+        "/talk — experimental photo → talking video\n"
         "/image — photo → image\n"
         "/prompt текст — сохранить промт\n"
         f"/seconds 8 — video до {MAX_SECONDS} сек\n"
@@ -924,6 +937,44 @@ def patch_image_workflow(
     if len(image_names) >= 3:
         wf["437"]["inputs"]["image"] = image_names[2]
 
+    return wf
+
+
+def patch_multitalk_workflow(
+    wf: dict[str, Any],
+    *,
+    prompt: str,
+    image_name: str,
+    audio_name: str,
+    width: int,
+    height: int,
+    seconds: int,
+    seed: int,
+) -> dict[str, Any]:
+    wf = json.loads(json.dumps(wf))
+    fps = max(1, int(MULTITALK_FPS))
+    frame_count = max(1, int(seconds) * fps + 1)
+
+    wf["1"]["inputs"]["image"] = image_name
+    wf["2"]["inputs"]["width"] = int(width)
+    wf["2"]["inputs"]["height"] = int(height)
+    wf["3"]["inputs"]["audio"] = audio_name
+    wf["5"]["inputs"]["num_frames"] = frame_count
+    wf["5"]["inputs"]["fps"] = float(fps)
+    wf["5"]["inputs"]["audio_scale"] = float(MULTITALK_AUDIO_SCALE)
+    wf["5"]["inputs"]["audio_cfg_scale"] = float(MULTITALK_AUDIO_CFG_SCALE)
+    wf["9"]["inputs"]["width"] = int(width)
+    wf["9"]["inputs"]["height"] = int(height)
+    wf["9"]["inputs"]["frame_window_size"] = min(81, max(17, ((frame_count - 1) // 4) * 4 + 1))
+    wf["14"]["inputs"]["positive_prompt"] = f"{prompt}\n\n{VIDEO_NO_TEXT_PROMPT}"
+    negative_text = wf["14"]["inputs"].get("negative_prompt", "")
+    if VIDEO_NO_TEXT_NEGATIVE not in negative_text:
+        wf["14"]["inputs"]["negative_prompt"] = f"{negative_text}, {VIDEO_NO_TEXT_NEGATIVE}"
+    wf["15"]["inputs"]["steps"] = int(MULTITALK_STEPS)
+    wf["15"]["inputs"]["cfg"] = float(MULTITALK_CFG)
+    wf["15"]["inputs"]["shift"] = float(MULTITALK_SHIFT)
+    wf["15"]["inputs"]["seed"] = int(seed)
+    wf["17"]["inputs"]["frame_rate"] = float(fps)
     return wf
 
 
@@ -1179,6 +1230,13 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
     if prompt_text:
         caption = f"Готово.\n\n{prompt_text}"[:MAX_CAPTION]
 
+    input_audio_name = meta.get("input_audio_name")
+    if input_audio_name:
+        try:
+            (COMFY_INPUT_DIR / input_audio_name).unlink(missing_ok=True)
+        except Exception:
+            pass
+
     bio = io.BytesIO(blob)
     bio.name = filename
 
@@ -1272,6 +1330,8 @@ async def submit_worker_loop(app: Application) -> None:
         try:
             if job.mode == "video":
                 await submit_video_job(app, job)
+            elif job.mode == "talk":
+                await submit_multitalk_job(app, job)
             elif job.mode == "image":
                 await submit_image_job(app, job)
             else:
@@ -1371,6 +1431,15 @@ async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     st["mode"] = "video"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
     await send_ui_message(update.message, context, "Режим: photo → video", reply_markup=main_keyboard())
+
+
+async def talk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+    st = get_state(context)
+    st["mode"] = "talk"
+    st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
+    await send_ui_message(update.message, context, "Режим: photo → talking video", reply_markup=main_keyboard())
 
 
 async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1529,7 +1598,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     }
     remember_media(context, media)
 
-    if st["mode"] == "video":
+    if st["mode"] in {"video", "talk"}:
         st["video_source"] = media
         await send_ui_message(
             update.message,
@@ -1769,9 +1838,12 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_ui_message(target, context, "Сначала задай промт.", reply_markup=main_keyboard())
         return
 
-    if st["mode"] == "video":
+    if st["mode"] in {"video", "talk"}:
         if not st["video_source"].get("path"):
             await send_ui_message(target, context, f"Для {st['mode']} сначала пришли фото.", reply_markup=main_keyboard())
+            return
+        if st["mode"] == "talk" and not extract_speech_text(st["prompt"]):
+            await send_ui_message(target, context, "Для talk нужна реплика в промте: например, говорит: привет", reply_markup=main_keyboard())
             return
     elif st["mode"] == "image":
         if not any(x.get("path") for x in st["image_refs"]):
@@ -1881,6 +1953,51 @@ async def submit_video_job(app: Application, job: Job) -> None:
     }
 
 
+async def submit_multitalk_job(app: Application, job: Job) -> None:
+    src = job.video_source
+    if not src or not src.get("path"):
+        raise RuntimeError("Для talk сначала пришли фото.")
+
+    speech_text = extract_speech_text(job.prompt)
+    if not speech_text:
+        raise RuntimeError("Для talk нужна реплика в промте: например, говорит: привет")
+
+    wf = await asyncio.to_thread(load_workflow, WORKFLOW_MULTITALK)
+    uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+
+    audio_name = f"tg_multitalk_{uuid.uuid4().hex}.mp3"
+    audio_path = COMFY_INPUT_DIR / audio_name
+    await asyncio.to_thread(synthesize_speech, speech_text, audio_path)
+
+    wf = await asyncio.to_thread(
+        patch_multitalk_workflow,
+        wf,
+        prompt=job.prompt,
+        image_name=uploaded_name,
+        audio_name=audio_name,
+        width=src["fit_width"],
+        height=src["fit_height"],
+        seconds=clamp_seconds(job.seconds, "talk"),
+        seed=job.seed,
+    )
+
+    prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+
+    ACTIVE_PROMPTS[prompt_id] = {
+        "job_id": job.job_id,
+        "chat_id": job.chat_id,
+        "mode": "talk",
+        "preferred_node": "17",
+        "seconds": clamp_seconds(job.seconds, "talk"),
+        "width": src["fit_width"],
+        "height": src["fit_height"],
+        "video_fps": MULTITALK_FPS,
+        "prompt": job.prompt,
+        "speech_text": speech_text,
+        "input_audio_name": audio_name,
+    }
+
+
 # ============================================================
 # ERROR HANDLER / STARTUP
 # ============================================================
@@ -1905,6 +2022,8 @@ def main() -> None:
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_VIDEO}")
     if not Path(WORKFLOW_IMAGE).exists():
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_IMAGE}")
+    if not Path(WORKFLOW_MULTITALK).exists():
+        raise RuntimeError(f"Workflow file not found: {WORKFLOW_MULTITALK}")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
@@ -1913,6 +2032,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status_cmd))
 
     app.add_handler(CommandHandler("video", video_cmd))
+    app.add_handler(CommandHandler("talk", talk_cmd))
     app.add_handler(CommandHandler("image", image_cmd))
     app.add_handler(CommandHandler("photos", photos_cmd))
     app.add_handler(CommandHandler("loras", loras_cmd))
