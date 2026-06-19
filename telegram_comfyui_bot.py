@@ -48,7 +48,7 @@ ALLOWED_USER_IDS = {
 DEFAULT_SECONDS = int(os.getenv("DEFAULT_SECONDS", "8"))
 MIN_SECONDS = int(os.getenv("MIN_SECONDS", "2"))
 MAX_SECONDS = int(os.getenv("MAX_SECONDS", "12"))
-TALK_MAX_SECONDS = int(os.getenv("TALK_MAX_SECONDS", "8"))
+TALK_MAX_SECONDS = int(os.getenv("TALK_MAX_SECONDS", str(MAX_SECONDS)))
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "medium").strip().lower()
 QUALITY_PRESETS = {
     "low": {"max_side": 480, "video_fps": 16},
@@ -719,11 +719,11 @@ def help_text(st: dict[str, Any]) -> str:
         "Бот готов.\n\n"
         "Режимы:\n"
         "• video: 1 фото + промт + секунды + звук MMAudio\n"
-        "• talk: 1 фото + реплика из промта + lip-sync через InfiniteTalk\n"
+        "• talk: обычное video + речевой аудиотрек из реплики\n"
         "• image: до 3 фото + промт\n\n"
         "Команды:\n"
         "/video — обычный photo → video\n"
-        "/talk — experimental photo → talking video\n"
+        "/talk — обычное video + speech audio\n"
         "/image — photo → image\n"
         "/prompt текст — сохранить промт\n"
         f"/seconds 8 — video до {MAX_SECONDS} сек, talk до {TALK_MAX_SECONDS} сек\n"
@@ -741,7 +741,6 @@ def help_text(st: dict[str, Any]) -> str:
         f"• video LoRA: {selected_lora_labels(st)}\n"
         f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
         f"• video TTS: {'on' if VIDEO_TTS else 'off'}\n"
-        f"• talk LoRA: {MULTITALK_LORA} ({MULTITALK_LORA_STRENGTH:.2f})\n"
         f"• video source: {media_line(st['video_source'])}\n"
         f"• image ref #1: {media_line(refs[0])}\n"
         f"• image ref #2: {media_line(refs[1])}\n"
@@ -1016,15 +1015,14 @@ async def pick_result_from_history(prompt_id: str, mode: str) -> dict[str, Any] 
         return None
 
     outputs = item["outputs"]
-    required_outputs = {
-        "talk": ("17", ("videos", "gifs")),
-    }
+    required_outputs = {}
     if mode in required_outputs:
         preferred_node, keys = required_outputs[mode]
         return pick_required_result_from_outputs(outputs, preferred_node, keys)
 
     preferred_nodes = {
         "video": "314",
+        "talk": "314",
         "image": "60",
     }
     preferred_node = preferred_nodes.get(mode, "60")
@@ -1233,8 +1231,8 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
             log.exception("MMAudio postprocess failed; sending original silent video")
 
     if (
-        VIDEO_TTS
-        and meta.get("mode") == "video"
+        (VIDEO_TTS or meta.get("speech_overlay"))
+        and meta.get("mode") in {"video", "talk"}
         and filename.lower().endswith((".mp4", ".mov", ".webm"))
     ):
         try:
@@ -1465,7 +1463,7 @@ async def talk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     st = get_state(context)
     st["mode"] = "talk"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-    await send_ui_message(update.message, context, "Режим: photo → talking video", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Режим: обычное video + speech audio", reply_markup=main_keyboard())
 
 
 async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1988,23 +1986,20 @@ async def submit_multitalk_job(app: Application, job: Job) -> None:
     if not speech_text:
         raise RuntimeError("Для talk нужна реплика в промте: например, говорит: привет")
 
-    wf = await asyncio.to_thread(load_workflow, WORKFLOW_MULTITALK)
+    wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
     uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
 
-    audio_name = f"tg_multitalk_{uuid.uuid4().hex}.mp3"
-    audio_path = COMFY_INPUT_DIR / audio_name
-    await asyncio.to_thread(synthesize_speech, speech_text, audio_path)
-
     wf = await asyncio.to_thread(
-        patch_multitalk_workflow,
+        patch_video_workflow,
         wf,
         prompt=job.prompt,
         image_name=uploaded_name,
-        audio_name=audio_name,
         width=src["fit_width"],
         height=src["fit_height"],
         seconds=clamp_seconds(job.seconds, "talk"),
+        video_fps=job.video_fps,
         seed=job.seed,
+        selected_loras=job.video_loras,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
@@ -2013,14 +2008,15 @@ async def submit_multitalk_job(app: Application, job: Job) -> None:
         "job_id": job.job_id,
         "chat_id": job.chat_id,
         "mode": "talk",
-        "preferred_node": "17",
+        "preferred_node": "314",
         "seconds": clamp_seconds(job.seconds, "talk"),
         "width": src["fit_width"],
         "height": src["fit_height"],
-        "video_fps": MULTITALK_FPS,
+        "video_fps": job.video_fps,
         "prompt": job.prompt,
         "speech_text": speech_text,
-        "input_audio_name": audio_name,
+        "speech_overlay": True,
+        "video_loras": job.video_loras,
     }
 
 
