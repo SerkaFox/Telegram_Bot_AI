@@ -76,6 +76,8 @@ VIDEO_NO_TEXT_PROMPT = "No subtitles, no captions, no on-screen text, no speech 
 VIDEO_NO_TEXT_NEGATIVE = "subtitles, captions, on-screen text, text overlay, speech bubbles, written words, labels, watermark"
 VIDEO_NO_LOOP_PROMPT = "Continuous non-looping motion, no replay, no boomerang, no ping-pong motion, no reset to the first frame."
 VIDEO_NO_LOOP_NEGATIVE = "loop, looping, replay, boomerang, ping-pong motion, reverse playback, return to first frame, reset to starting pose"
+TALK_CONTINUITY_PROMPT = "Keep one continuous shot progression. Do not return to the starting outfit, starting pose, or starting frame. Preserve the final changed appearance through the last frame."
+TALK_CONTINUITY_NEGATIVE = "starting outfit, starting clothes, original pose, original frame, dressed again, reset clothing, reset scene"
 VIDEO_TTS = os.getenv("VIDEO_TTS", "0").strip().lower() not in {"0", "false", "no", "off"}
 EDGE_TTS_BIN = os.getenv("EDGE_TTS_BIN", "/home/iaadmin/miniconda3/bin/edge-tts")
 VIDEO_TTS_VOICE_RU = os.getenv("VIDEO_TTS_VOICE_RU", "ru-RU-SvetlanaNeural")
@@ -214,11 +216,18 @@ def save_bytes(path: Path, blob: bytes) -> None:
     path.write_bytes(blob)
 
 
-def run_cmd(cmd: list[str], *, cwd: Path | None = None, timeout: int | None = None) -> None:
+def run_cmd(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
     p = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
         timeout=timeout,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -378,18 +387,22 @@ def run_wav2lip(video_path: Path, audio_path: Path, output_path: Path) -> None:
         raise FileNotFoundError(f"Wav2Lip inference.py not found in {WAV2LIP_DIR}")
 
     (WAV2LIP_DIR / "temp").mkdir(parents=True, exist_ok=True)
+    numba_cache_dir = TMP_DIR / "numba_cache"
+    numba_cache_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["NUMBA_CACHE_DIR"] = str(numba_cache_dir.resolve())
     run_cmd([
         WAV2LIP_PYTHON,
         "inference.py",
         "--checkpoint_path", str(WAV2LIP_CHECKPOINT),
-        "--face", str(video_path),
-        "--audio", str(audio_path),
-        "--outfile", str(output_path),
+        "--face", str(video_path.resolve()),
+        "--audio", str(audio_path.resolve()),
+        "--outfile", str(output_path.resolve()),
         "--pads", "0", "10", "0", "0",
         "--face_det_batch_size", "4",
         "--wav2lip_batch_size", "16",
         "--resize_factor", "1",
-    ], cwd=WAV2LIP_DIR, timeout=WAV2LIP_TIMEOUT)
+    ], cwd=WAV2LIP_DIR, timeout=WAV2LIP_TIMEOUT, env=env)
 
 
 # ============================================================
@@ -965,15 +978,23 @@ def patch_video_workflow(
     video_fps: int,
     seed: int,
     selected_loras: list[str] | None = None,
+    continuity_prompt: str = "",
+    continuity_negative: str = "",
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
-    wf["93"]["inputs"]["text"] = f"{prompt}\n\n{VIDEO_NO_TEXT_PROMPT}\n{VIDEO_NO_LOOP_PROMPT}"
+    prompt_parts = [prompt, VIDEO_NO_TEXT_PROMPT, VIDEO_NO_LOOP_PROMPT]
+    if continuity_prompt:
+        prompt_parts.append(continuity_prompt)
+    wf["93"]["inputs"]["text"] = "\n\n".join(x for x in prompt_parts if x)
     negative_text = wf["373:360"]["inputs"].get("text", "")
     if VIDEO_NO_TEXT_NEGATIVE not in negative_text:
         wf["373:360"]["inputs"]["text"] = f"{negative_text}, {VIDEO_NO_TEXT_NEGATIVE}"
         negative_text = wf["373:360"]["inputs"]["text"]
     if VIDEO_NO_LOOP_NEGATIVE not in negative_text:
         wf["373:360"]["inputs"]["text"] = f"{negative_text}, {VIDEO_NO_LOOP_NEGATIVE}"
+        negative_text = wf["373:360"]["inputs"]["text"]
+    if continuity_negative and continuity_negative not in negative_text:
+        wf["373:360"]["inputs"]["text"] = f"{negative_text}, {continuity_negative}"
     wf["385"]["inputs"]["image"] = image_name
     wf["164"]["inputs"]["value"] = int(width)
     wf["165"]["inputs"]["value"] = int(height)
@@ -2115,6 +2136,8 @@ async def submit_multitalk_job(app: Application, job: Job) -> None:
         video_fps=job.video_fps,
         seed=job.seed,
         selected_loras=job.video_loras,
+        continuity_prompt=TALK_CONTINUITY_PROMPT,
+        continuity_negative=TALK_CONTINUITY_NEGATIVE,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
