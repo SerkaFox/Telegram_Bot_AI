@@ -48,7 +48,7 @@ ALLOWED_USER_IDS = {
 DEFAULT_SECONDS = int(os.getenv("DEFAULT_SECONDS", "8"))
 MIN_SECONDS = int(os.getenv("MIN_SECONDS", "2"))
 MAX_SECONDS = int(os.getenv("MAX_SECONDS", "12"))
-TALK_MAX_SECONDS = int(os.getenv("TALK_MAX_SECONDS", "4"))
+TALK_MAX_SECONDS = int(os.getenv("TALK_MAX_SECONDS", "8"))
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "medium").strip().lower()
 QUALITY_PRESETS = {
     "low": {"max_side": 480, "video_fps": 16},
@@ -89,6 +89,8 @@ MULTITALK_CFG = float(os.getenv("MULTITALK_CFG", "1.0"))
 MULTITALK_SHIFT = float(os.getenv("MULTITALK_SHIFT", "11.0"))
 MULTITALK_AUDIO_SCALE = float(os.getenv("MULTITALK_AUDIO_SCALE", "1.0"))
 MULTITALK_AUDIO_CFG_SCALE = float(os.getenv("MULTITALK_AUDIO_CFG_SCALE", "1.0"))
+MULTITALK_LORA = os.getenv("MULTITALK_LORA", "nsfw_wan_14b_sex.safetensors")
+MULTITALK_LORA_STRENGTH = float(os.getenv("MULTITALK_LORA_STRENGTH", "0.65"))
 VIDEO_MAX_LORAS = int(os.getenv("VIDEO_MAX_LORAS", "8"))
 VIDEO_LORA_STRENGTH_DEFAULT = float(os.getenv("VIDEO_LORA_STRENGTH_DEFAULT", "0.35"))
 VIDEO_LORA_OPTIONS = [
@@ -724,7 +726,7 @@ def help_text(st: dict[str, Any]) -> str:
         "/talk — experimental photo → talking video\n"
         "/image — photo → image\n"
         "/prompt текст — сохранить промт\n"
-        f"/seconds 8 — video до {MAX_SECONDS} сек\n"
+        f"/seconds 8 — video до {MAX_SECONDS} сек, talk до {TALK_MAX_SECONDS} сек\n"
         "/quality low|medium|high\n"
         "/repeat 1\n"
         "/loras — выбрать LoRA для обычного video\n"
@@ -739,6 +741,7 @@ def help_text(st: dict[str, Any]) -> str:
         f"• video LoRA: {selected_lora_labels(st)}\n"
         f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
         f"• video TTS: {'on' if VIDEO_TTS else 'off'}\n"
+        f"• talk LoRA: {MULTITALK_LORA} ({MULTITALK_LORA_STRENGTH:.2f})\n"
         f"• video source: {media_line(st['video_source'])}\n"
         f"• image ref #1: {media_line(refs[0])}\n"
         f"• image ref #2: {media_line(refs[1])}\n"
@@ -966,6 +969,8 @@ def patch_multitalk_workflow(
     wf["9"]["inputs"]["width"] = int(width)
     wf["9"]["inputs"]["height"] = int(height)
     wf["9"]["inputs"]["frame_window_size"] = min(81, max(17, ((frame_count - 1) // 4) * 4 + 1))
+    wf["10"]["inputs"]["lora"] = MULTITALK_LORA
+    wf["10"]["inputs"]["strength"] = float(MULTITALK_LORA_STRENGTH)
     wf["14"]["inputs"]["positive_prompt"] = f"{prompt}\n\n{VIDEO_NO_TEXT_PROMPT}"
     negative_text = wf["14"]["inputs"].get("negative_prompt", "")
     if VIDEO_NO_TEXT_NEGATIVE not in negative_text:
