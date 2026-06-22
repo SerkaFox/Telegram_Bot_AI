@@ -761,53 +761,55 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
     dub_voice_on = bool(st.get("dub_voice")) if st else False
     roulette_label = f"🎰 Рулетка: {'✅ ВКЛ' if roulette_on else '⬜ выкл'}"
     dub_voice_label = f"🎙 Дубляж: {'✅ ВКЛ' if dub_voice_on else '⬜ выкл'}"
-    return InlineKeyboardMarkup(
+
+    rows = [
         [
-            [
-                InlineKeyboardButton("🎬 Video", callback_data="mode:video"),
-                InlineKeyboardButton("✏️ Edit Photo", callback_data="mode:image"),
-            ],
-            [
-                InlineKeyboardButton("🧪 LTX Sulphur", callback_data="mode:ltx_sulphur"),
-                InlineKeyboardButton("🔥 LTX Eros", callback_data="mode:ltx_eros"),
-            ],
-            [
-                InlineKeyboardButton("🎨 MopMix", callback_data="mode:mopmix"),
-                InlineKeyboardButton("👯 MopMix Duo", callback_data="mode:mopmix_duo"),
-            ],
-            [
-                InlineKeyboardButton("L", callback_data="quality:low"),
-                InlineKeyboardButton("M", callback_data="quality:medium"),
-                InlineKeyboardButton("H", callback_data="quality:high"),
-                InlineKeyboardButton("➖2s", callback_data="sec:-2"),
-                InlineKeyboardButton("➕2s", callback_data="sec:+2"),
-            ],
-            [
-                InlineKeyboardButton("1x", callback_data="repeat:1"),
-                InlineKeyboardButton("10x", callback_data="repeat:10"),
-                InlineKeyboardButton("30x", callback_data="repeat:30"),
-            ],
-            [
-                InlineKeyboardButton("📷 Recent photos", callback_data="media:list"),
-                InlineKeyboardButton("🎚 LoRA", callback_data="lora:list"),
-                InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
-            ],
-            [
-                InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
-            ],
-            [
-                InlineKeyboardButton(roulette_label, callback_data="do:roulette"),
-                InlineKeyboardButton(dub_voice_label, callback_data="do:dubvoice"),
-            ],
-            [
-                InlineKeyboardButton(f"🎙 Голос: {st.get('dub_voice_name', DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME}", callback_data="voice:list"),
-            ],
-            [
-                InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
-                InlineKeyboardButton("🚀 Generate", callback_data="do:go"),
-            ],
+            InlineKeyboardButton("🎬 Video", callback_data="mode:video"),
+            InlineKeyboardButton("✏️ Edit Photo", callback_data="mode:image"),
+        ],
+        [
+            InlineKeyboardButton("🧪 LTX Sulphur", callback_data="mode:ltx_sulphur"),
+            InlineKeyboardButton("🔥 LTX Eros", callback_data="mode:ltx_eros"),
+        ],
+        [
+            InlineKeyboardButton("🎨 MopMix", callback_data="mode:mopmix"),
+            InlineKeyboardButton("👯 MopMix Duo", callback_data="mode:mopmix_duo"),
+        ],
+        [
+            InlineKeyboardButton("L", callback_data="quality:low"),
+            InlineKeyboardButton("M", callback_data="quality:medium"),
+            InlineKeyboardButton("H", callback_data="quality:high"),
+            InlineKeyboardButton("➖2s", callback_data="sec:-2"),
+            InlineKeyboardButton("➕2s", callback_data="sec:+2"),
+        ],
+        [
+            InlineKeyboardButton("1x", callback_data="repeat:1"),
+            InlineKeyboardButton("10x", callback_data="repeat:10"),
+            InlineKeyboardButton("30x", callback_data="repeat:30"),
+        ],
+        [
+            InlineKeyboardButton("📷 Recent photos", callback_data="media:list"),
+            InlineKeyboardButton("🎚 LoRA", callback_data="lora:list"),
+            InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
+        ],
+        [
+            InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
+        ],
+        [
+            InlineKeyboardButton(roulette_label, callback_data="do:roulette"),
+            InlineKeyboardButton(dub_voice_label, callback_data="do:dubvoice"),
+        ],
+    ]
+    if dub_voice_on:
+        voice_name = st.get("dub_voice_name", DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME
+        rows.append([InlineKeyboardButton(f"🎙 Голос: {voice_name}", callback_data="voice:list")])
+    rows.append(
+        [
+            InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
+            InlineKeyboardButton("🚀 Generate", callback_data="do:go"),
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 def media_preview_caption(media: dict[str, Any], index: int, total: int) -> str:
@@ -2901,7 +2903,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context,
             f"🎙 Дубляж голоса {state_text}.\n"
             f"Работает только для LTX Sulphur/LTX Eros — после генерации голос в дорожке "
-            f"заменяется на голос из {DUB_VOICE_SAMPLE_PATH}, остальные звуки (шлепки/стоны) сохраняются.",
+            f"заменяется на голос «{st.get('dub_voice_name', DEFAULT_VOICE_NAME)}», остальные звуки (шлепки/стоны) сохраняются.",
             reply_markup=main_keyboard(st),
         )
         return
