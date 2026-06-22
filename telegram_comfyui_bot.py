@@ -2462,6 +2462,60 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await send_ui_message(update.message, context, "Текст принят как промт.", reply_markup=main_keyboard(st))
 
 
+async def run_expand_flow(
+    context: ContextTypes.DEFAULT_TYPE,
+    st: dict[str, Any],
+    chat_id: int,
+    idea: str,
+    photo_caption: str | None = None,
+) -> None:
+    """Caption the attached photo (if any and not already known from a previous round),
+    expand the idea via Ollama, then ask the user to use/retry/cancel the result instead of
+    silently overwriting the prompt - so it's never unclear whether a generated scenario was
+    actually applied."""
+    status_msg = None
+    if photo_caption is None:
+        photo_caption = ""
+        photo = st.get("video_source") if st["mode"] in SINGLE_PHOTO_MODES else None
+        if photo and photo.get("path"):
+            status_msg = await context.bot.send_message(chat_id, "🖼 Смотрю на фото...")
+            photo_caption = await asyncio.to_thread(caption_photo, photo["path"], photo["name"])
+
+    if status_msg is None:
+        status_msg = await context.bot.send_message(chat_id, "✨ Развиваю идею...")
+    else:
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=status_msg.message_id, text="✨ Развиваю идею...")
+        except Exception:
+            pass
+
+    try:
+        expanded = await asyncio.to_thread(expand_idea_with_ollama, idea, photo_caption)
+    except Exception as e:
+        log.exception("Ollama scenario expansion failed")
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+        except Exception:
+            pass
+        await context.bot.send_message(chat_id, f"Не получилось развить идею: {e}", reply_markup=main_keyboard(st))
+        return
+
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+    except Exception:
+        pass
+
+    st["pending_expansion"] = {"idea": idea, "photo_caption": photo_caption, "expanded": expanded}
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Использовать", callback_data="expand:use")],
+            [InlineKeyboardButton("🔁 Другой вариант", callback_data="expand:retry")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="expand:cancel")],
+        ]
+    )
+    await context.bot.send_message(chat_id, f"Новый промт:\n\n{expanded}", reply_markup=keyboard)
+
+
 # ============================================================
 # BUTTONS
 # ============================================================
@@ -2638,22 +2692,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not idea:
             await replace_ui_message_from_callback(query, context, "Сначала напиши идею промтом.", reply_markup=main_keyboard(st))
             return
-
-        photo_caption = ""
-        photo = st.get("video_source") if st["mode"] in SINGLE_PHOTO_MODES else None
-        if photo and photo.get("path"):
-            await replace_ui_message_from_callback(query, context, "🖼 Смотрю на фото...", reply_markup=None)
-            photo_caption = await asyncio.to_thread(caption_photo, photo["path"], photo["name"])
-
-        await context.bot.send_message(query.message.chat_id, "✨ Развиваю идею...")
         try:
-            expanded = await asyncio.to_thread(expand_idea_with_ollama, idea, photo_caption)
-        except Exception as e:
-            log.exception("Ollama scenario expansion failed")
-            await context.bot.send_message(query.message.chat_id, f"Не получилось развить идею: {e}", reply_markup=main_keyboard(st))
+            await query.message.delete()
+        except Exception:
+            pass
+        await run_expand_flow(context, st, query.message.chat_id, idea)
+        return
+
+    if data == "expand:retry":
+        pending = st.get("pending_expansion")
+        if not pending:
+            await replace_ui_message_from_callback(query, context, "Нечего повторять — начни заново через «✨ Развить идею».", reply_markup=main_keyboard(st))
             return
-        st["prompt"] = expanded
-        await context.bot.send_message(query.message.chat_id, f"Новый промт:\n\n{expanded}", reply_markup=main_keyboard(st))
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await run_expand_flow(context, st, query.message.chat_id, pending["idea"], photo_caption=pending["photo_caption"])
+        return
+
+    if data == "expand:use":
+        pending = st.get("pending_expansion")
+        if not pending:
+            await replace_ui_message_from_callback(query, context, "Нечего применять — начни заново через «✨ Развить идею».", reply_markup=main_keyboard(st))
+            return
+        st["prompt"] = pending["expanded"]
+        st.pop("pending_expansion", None)
+        await replace_ui_message_from_callback(query, context, f"✅ Промт применён:\n\n{st['prompt']}", reply_markup=main_keyboard(st))
+        return
+
+    if data == "expand:cancel":
+        st.pop("pending_expansion", None)
+        await replace_ui_message_from_callback(query, context, "Отменено, промт не изменён.", reply_markup=main_keyboard(st))
         return
 
     if data == "do:roulette":
