@@ -61,9 +61,9 @@ ROUND_TO = int(os.getenv("ROUND_TO", "64"))
 
 # LTX Sulphur (LTX2.3_2.json) target generation resolution per quality level.
 LTX_SULPHUR_QUALITY = {
-    "low": (1536, 912),
-    "medium": (2048, 1216),
-    "high": (2560, 1520),
+    "low": (576, 324),
+    "medium": (832, 468),
+    "high": (1152, 648),
 }
 
 # MopMix (workflow_mopmix.json) SDXL bucket resolution per quality level.
@@ -82,9 +82,9 @@ MOPMIX_DUO_DENOISE = float(os.getenv("MOPMIX_DUO_DENOISE", "0.85"))
 # LTX Eros (workflow_ltx_eros.json) target generation resolution per quality level
 # (width, height fed to the MultiImageLoader; portrait orientation by default).
 LTX_EROS_QUALITY = {
-    "low": (640, 960),
-    "medium": (768, 1152),
-    "high": (896, 1344),
+    "low": (288, 512),
+    "medium": (416, 736),
+    "high": (576, 1024),
 }
 # Original workflow's 4 keyframe insert points (seconds) at its default 12s duration;
 # scaled proportionally to whatever duration the job actually requests.
@@ -496,8 +496,17 @@ def blank_media() -> dict[str, Any]:
     }
 
 
+# Per-mode duration ceiling overrides (RTX 5070, 12GB VRAM - the latent upscale step in
+# LTX Sulphur/Eros can already use ~92% of the card at 12s; raise per-mode only after
+# testing on this hardware, not by guessing).
+MODE_MAX_SECONDS = {
+    "ltx_sulphur": int(os.getenv("MAX_SECONDS_LTX_SULPHUR", str(MAX_SECONDS))),
+    "ltx_eros": int(os.getenv("MAX_SECONDS_LTX_EROS", str(MAX_SECONDS))),
+}
+
+
 def mode_max_seconds(mode: str) -> int:
-    return MAX_SECONDS
+    return MODE_MAX_SECONDS.get(mode, MAX_SECONDS)
 
 
 def clamp_seconds(value: int, mode: str) -> int:
@@ -1318,6 +1327,23 @@ def patch_mopmix_duo_workflow(
     return wf
 
 
+def split_prompt_into_timeline_segments(prompt: str, max_frames: int) -> tuple[list[str], list[int]]:
+    """Break a free-form prompt into sentence-level segments and proportionally distribute
+    the video's frame budget across them in the order they were written, so an event
+    described early in the prompt actually happens early in the video instead of every
+    sentence competing for the same time window (PromptRelayEncodeTimeline otherwise treats
+    a single-segment prompt as applying uniformly across the whole duration)."""
+    parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", prompt.strip()) if p.strip()]
+    if len(parts) <= 1:
+        return [prompt.strip()], [max_frames]
+
+    weights = [max(1, len(p)) for p in parts]
+    total_weight = sum(weights)
+    lengths = [max(1, round(max_frames * w / total_weight)) for w in weights]
+    lengths[-1] = max(1, lengths[-1] + (max_frames - sum(lengths)))
+    return parts, lengths
+
+
 def patch_ltx_eros_workflow(
     wf: dict[str, Any],
     *,
@@ -1345,13 +1371,19 @@ def patch_ltx_eros_workflow(
 
     fps = 24
     max_frames = int(seconds) * fps + 1
+    segments, segment_lengths = split_prompt_into_timeline_segments(prompt, max_frames)
     wf["1048"]["inputs"]["global_prompt"] = prompt
     wf["1048"]["inputs"]["max_frames"] = max_frames
     wf["1048"]["inputs"]["timeline_data"] = json.dumps(
-        {"segments": [{"prompt": prompt, "length": max_frames, "color": "#4f8edc"}]}
+        {
+            "segments": [
+                {"prompt": seg, "length": length, "color": "#4f8edc"}
+                for seg, length in zip(segments, segment_lengths)
+            ]
+        }
     )
-    wf["1048"]["inputs"]["local_prompts"] = prompt
-    wf["1048"]["inputs"]["segment_lengths"] = str(max_frames)
+    wf["1048"]["inputs"]["local_prompts"] = " | ".join(segments)
+    wf["1048"]["inputs"]["segment_lengths"] = ", ".join(str(n) for n in segment_lengths)
 
     # Only one distinct source photo is available (duplicated into all 4 MultiImageLoader
     # slots), so re-inserting it as a keyframe partway through/near the end just re-anchors

@@ -530,28 +530,6 @@
     "class_type": "Context (rgthree)",
     "inputs": {}
   },
-  "889:549": {
-    "class_type": "VHS_VideoCombine",
-    "inputs": {
-      "images": [
-        "889:552",
-        0
-      ],
-      "frame_rate": [
-        "985",
-        0
-      ],
-      "loop_count": 0,
-      "filename_prefix": "10E_firstpass",
-      "format": "video/h264-mp4",
-      "pingpong": false,
-      "save_output": false,
-      "audio": [
-        "889:551",
-        0
-      ]
-    }
-  },
   "889:556": {
     "class_type": "LTXVSeparateAVLatent",
     "inputs": {
@@ -578,19 +556,6 @@
       ]
     }
   },
-  "889:552": {
-    "class_type": "VAEDecode",
-    "inputs": {
-      "samples": [
-        "889:1070",
-        2
-      ],
-      "vae": [
-        "1118",
-        3
-      ]
-    }
-  },
   "889:550": {
     "class_type": "LTXVAudioVAEDecode",
     "inputs": {
@@ -602,16 +567,6 @@
         "974",
         0
       ]
-    }
-  },
-  "889:551": {
-    "class_type": "AudioAdjustVolume",
-    "inputs": {
-      "audio": [
-        "889:550",
-        0
-      ],
-      "volume": 0
     }
   },
   "889:789": {

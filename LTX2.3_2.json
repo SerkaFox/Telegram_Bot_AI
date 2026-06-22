@@ -183,35 +183,6 @@
       "title": "Negative"
     }
   },
-  "59": {
-    "inputs": {
-      "frame_rate": [
-        "26:53",
-        0
-      ],
-      "loop_count": 0,
-      "filename_prefix": "MrXin/LTX2.3/I2V/FirstPass",
-      "format": "video/h264-mp4",
-      "pix_fmt": "yuv420p",
-      "crf": 14,
-      "save_metadata": false,
-      "trim_to_audio": false,
-      "pingpong": false,
-      "save_output": false,
-      "images": [
-        "26:164",
-        0
-      ],
-      "audio": [
-        "26:114",
-        0
-      ]
-    },
-    "class_type": "VHS_VideoCombine",
-    "_meta": {
-      "title": "Video Combine 🎥🅥🅗🅢"
-    }
-  },
   "61": {
     "inputs": {
       "frame_rate": [
@@ -543,19 +514,6 @@
       "title": "Sampler Final Pass"
     }
   },
-  "26:114": {
-    "inputs": {
-      "volume": -10,
-      "audio": [
-        "26:66",
-        0
-      ]
-    },
-    "class_type": "AudioAdjustVolume",
-    "_meta": {
-      "title": "Audio Adjust Volume"
-    }
-  },
   "26:66": {
     "inputs": {
       "samples": [
@@ -820,22 +778,6 @@
     "class_type": "LTXVAudioVAEDecode",
     "_meta": {
       "title": "LTXV Audio VAE Decode"
-    }
-  },
-  "26:164": {
-    "inputs": {
-      "samples": [
-        "26:153",
-        0
-      ],
-      "vae": [
-        "193",
-        0
-      ]
-    },
-    "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE Decode"
     }
   },
   "26:65": {
