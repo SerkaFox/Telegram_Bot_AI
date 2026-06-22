@@ -1307,12 +1307,22 @@ def caption_photo(local_path: str, name_hint: str) -> str:
     return ""
 
 
-def expand_idea_with_ollama(idea: str) -> str:
+def expand_idea_with_ollama(idea: str, photo_caption: str = "") -> str:
+    prompt = f"{OLLAMA_SCENARIO_SYSTEM_PROMPT}"
+    if photo_caption:
+        prompt += (
+            f"\n\nНа референс-фото, с которого делается видео, видно: {photo_caption}\n"
+            "ПЕРВОЕ предложение обязано описывать именно то, что на фото (внешность, одежда) — "
+            "бери эти детали из описания фото, а не выдумывай свои. Не меняй внешность/одежду "
+            "персонажа между предложениями (без этого видео-модель «теряет» лицо и причёску, "
+            "переключаясь на других людей)."
+        )
+    prompt += f"\n\nИдея пользователя: {idea}"
     r = requests.post(
         f"{OLLAMA_BASE}/api/generate",
         json={
             "model": OLLAMA_SCENARIO_MODEL,
-            "prompt": f"{OLLAMA_SCENARIO_SYSTEM_PROMPT}\n\nИдея пользователя: {idea}",
+            "prompt": prompt,
             "stream": False,
             # Force CPU-only: Ollama was offloading this 32B model onto the GPU by default
             # (~9.7GB VRAM, observed via `ollama ps`), starving ComfyUI's video generation
@@ -2628,9 +2638,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not idea:
             await replace_ui_message_from_callback(query, context, "Сначала напиши идею промтом.", reply_markup=main_keyboard(st))
             return
-        await replace_ui_message_from_callback(query, context, "✨ Развиваю идею...", reply_markup=None)
+
+        photo_caption = ""
+        photo = st.get("video_source") if st["mode"] in SINGLE_PHOTO_MODES else None
+        if photo and photo.get("path"):
+            await replace_ui_message_from_callback(query, context, "🖼 Смотрю на фото...", reply_markup=None)
+            photo_caption = await asyncio.to_thread(caption_photo, photo["path"], photo["name"])
+
+        await context.bot.send_message(query.message.chat_id, "✨ Развиваю идею...")
         try:
-            expanded = await asyncio.to_thread(expand_idea_with_ollama, idea)
+            expanded = await asyncio.to_thread(expand_idea_with_ollama, idea, photo_caption)
         except Exception as e:
             log.exception("Ollama scenario expansion failed")
             await context.bot.send_message(query.message.chat_id, f"Не получилось развить идею: {e}", reply_markup=main_keyboard(st))
@@ -2719,11 +2736,19 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     current_prompt = st["prompt"]
     variations = 1
 
+    roulette_photo_caption = ""
+    if roulette:
+        photo = st.get("video_source") if st["mode"] in SINGLE_PHOTO_MODES else None
+        if photo and photo.get("path"):
+            roulette_photo_caption = await asyncio.to_thread(caption_photo, photo["path"], photo["name"])
+
     for i in range(repeat):
         if roulette and i % ROULETTE_GROUP_SIZE == 0:
             if i > 0:
                 try:
-                    current_prompt = await asyncio.to_thread(expand_idea_with_ollama, base_idea)
+                    current_prompt = await asyncio.to_thread(
+                        expand_idea_with_ollama, base_idea, roulette_photo_caption
+                    )
                     variations += 1
                 except Exception:
                     log.exception("Roulette re-roll failed, reusing previous prompt")
