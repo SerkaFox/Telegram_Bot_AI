@@ -1706,11 +1706,13 @@ def _get_openvoice_converter():
     if _openvoice_converter is None:
         if str(OPENVOICE_DIR) not in sys.path:
             sys.path.insert(0, str(OPENVOICE_DIR))
-        import torch
         from openvoice.api import ToneColorConverter
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        conv = ToneColorConverter(str(OPENVOICE_DIR / "checkpoints_v2/converter/config.json"), device=device)
+        # CPU, not CUDA: the bot and ComfyUI are separate processes sharing one 12GB GPU.
+        # Once loaded this stays cached (and resident in VRAM if put there) for the bot's
+        # whole uptime, permanently shrinking ComfyUI's headroom - same class of bug as the
+        # Ollama scenario model defaulting to GPU and starving video generation of VRAM.
+        conv = ToneColorConverter(str(OPENVOICE_DIR / "checkpoints_v2/converter/config.json"), device="cpu")
         conv.load_ckpt(str(OPENVOICE_DIR / "checkpoints_v2/converter/checkpoint.pth"))
         _openvoice_converter = conv
     return _openvoice_converter
