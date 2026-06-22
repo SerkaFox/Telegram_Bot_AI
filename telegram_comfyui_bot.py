@@ -1897,18 +1897,33 @@ def job_status_text(meta: dict[str, Any], *, started: bool) -> str:
     return f"{header}\nПрошло: {format_eta(elapsed)} · Осталось: {format_eta(remaining)}"
 
 
+def status_inline_keyboard() -> InlineKeyboardMarkup:
+    # Generation status messages otherwise have no keyboard at all, so there's no way to
+    # open the menu (change mode/quality, queue more, or stop) without already knowing to
+    # send /start - put quick access right on the status message instead.
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📋 Меню", callback_data="menu:open"),
+                InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
+            ]
+        ]
+    )
+
+
 async def update_chat_status(bot, chat_id: int, text: str) -> None:
+    reply_markup = status_inline_keyboard()
     entry = CHAT_STATUS.setdefault(chat_id, {})
     if entry.get("message_id"):
         try:
-            await bot.edit_message_text(chat_id=chat_id, message_id=entry["message_id"], text=text)
+            await bot.edit_message_text(chat_id=chat_id, message_id=entry["message_id"], text=text, reply_markup=reply_markup)
             return
         except Exception as e:
             if "not modified" in str(e).lower():
                 return
             entry["message_id"] = None
     try:
-        msg = await bot.send_message(chat_id=chat_id, text=text)
+        msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         entry["message_id"] = msg.message_id
     except Exception:
         log.exception("Failed to send status message to chat %s", chat_id)
@@ -2906,6 +2921,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"заменяется на голос «{st.get('dub_voice_name', DEFAULT_VOICE_NAME)}», остальные звуки (шлепки/стоны) сохраняются.",
             reply_markup=main_keyboard(st),
         )
+        return
+
+    if data == "menu:open":
+        # Sent as a brand new message (not via replace_ui_message_from_callback) so it
+        # doesn't delete the live generation-status message this button is attached to -
+        # the user can keep watching progress and still queue more / change settings.
+        await context.bot.send_message(query.message.chat_id, help_text(st), reply_markup=main_keyboard(st))
         return
 
     if data == "do:go":
