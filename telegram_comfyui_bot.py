@@ -1314,6 +1314,12 @@ def expand_idea_with_ollama(idea: str) -> str:
             "model": OLLAMA_SCENARIO_MODEL,
             "prompt": f"{OLLAMA_SCENARIO_SYSTEM_PROMPT}\n\nИдея пользователя: {idea}",
             "stream": False,
+            # Force CPU-only: Ollama was offloading this 32B model onto the GPU by default
+            # (~9.7GB VRAM, observed via `ollama ps`), starving ComfyUI's video generation
+            # and causing it to OOM in the text encoder within seconds of starting. The two
+            # services share one physical GPU even though they're separate processes.
+            "options": {"num_gpu": 0},
+            "keep_alive": 0,
         },
         timeout=OLLAMA_SCENARIO_TIMEOUT,
     )
