@@ -123,6 +123,9 @@ OLLAMA_SCENARIO_MODEL = os.getenv(
     "OLLAMA_SCENARIO_MODEL", "hf.co/mradermacher/Qwen2.5-32B-Instruct-abliterated-v2-i1-GGUF:Q4_K_M"
 )
 OLLAMA_SCENARIO_TIMEOUT = int(os.getenv("OLLAMA_SCENARIO_TIMEOUT", "180"))
+# "🎰 Рулетка": with repeat >= 2, re-roll a fresh scenario variation every N jobs in the batch
+# instead of reusing one prompt for the whole batch.
+ROULETTE_GROUP_SIZE = int(os.getenv("ROULETTE_GROUP_SIZE", "2"))
 OLLAMA_SCENARIO_SYSTEM_PROMPT = (
     "Ты — сценарист для генерации коротких 12-секундных видео нейросетью. "
     "Видео склеивается из 3-4 смысловых блоков, каждый блок — одно предложение, и получает "
@@ -551,6 +554,7 @@ def initial_state() -> dict[str, Any]:
         "video_source": blank_media(),
         "duo_photos": [blank_media(), blank_media()],
         "video_loras": [],
+        "roulette": False,
     }
 
 
@@ -564,6 +568,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["video_loras"] = []
     if "duo_photos" not in st:
         st["duo_photos"] = [blank_media(), blank_media()]
+    if "roulette" not in st:
+        st["roulette"] = False
     if "quality" not in st:
         st["quality"] = quality_label(int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"]))
     preset = quality_preset(st.get("quality")) or QUALITY_PRESETS["medium"]
@@ -739,6 +745,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
+                InlineKeyboardButton("🎰 Рулетка", callback_data="do:roulette"),
             ],
             [
                 InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
@@ -912,6 +919,7 @@ def help_text(st: dict[str, Any]) -> str:
         f"• quality: {quality_status(st)}\n"
         f"• seconds: {st['seconds']}\n"
         f"• repeat: {st.get('repeat', 1)}\n"
+        f"• рулетка: {'on' if st.get('roulette') else 'off'}\n"
         f"• video LoRA: {selected_lora_labels(st)}\n"
         f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
         f"• video TTS: {'on' if VIDEO_TTS else 'off'}\n"
@@ -2516,6 +2524,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await context.bot.send_message(query.message.chat_id, f"Новый промт:\n\n{expanded}", reply_markup=main_keyboard())
         return
 
+    if data == "do:roulette":
+        st["roulette"] = not st.get("roulette")
+        state_text = "включена" if st["roulette"] else "выключена"
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"🎰 Рулетка {state_text}.\n"
+            f"При repeat ≥ 2 каждые {ROULETTE_GROUP_SIZE} видео промт будет переписываться заново "
+            f"через Ollama (та же идея, другие детали) — на 10x получится 5 вариаций, на 30x — 15.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
     if data == "do:go":
         ui = get_ui_state(context)
         if ui.get("last_ui_message_id") == query.message.message_id:
@@ -2555,14 +2576,36 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     repeat = max(1, int(st.get("repeat", 1)))
     first_job_id = JOB_SEQ + 1
+    last_job_id = first_job_id + repeat - 1
+    roulette = bool(st.get("roulette")) and repeat > 1
+
+    ui = get_ui_state(context)
+    ui["last_ui_message_id"] = None
+    await cleanup_chat_status(context.bot, target.chat_id)
+    status_text = f"🕐 В очереди: {repeat} задач(а). ID: #{first_job_id}–#{last_job_id}."
+    if roulette:
+        status_text += f"\n🎰 Рулетка включена: вариации каждые {ROULETTE_GROUP_SIZE} видео."
+    await update_chat_status(context.bot, target.chat_id, status_text)
+
+    base_idea = st["prompt"]
+    current_prompt = st["prompt"]
+    variations = 1
 
     for i in range(repeat):
+        if roulette and i % ROULETTE_GROUP_SIZE == 0:
+            if i > 0:
+                try:
+                    current_prompt = await asyncio.to_thread(expand_idea_with_ollama, base_idea)
+                    variations += 1
+                except Exception:
+                    log.exception("Roulette re-roll failed, reusing previous prompt")
+
         JOB_SEQ += 1
         job = Job(
             job_id=JOB_SEQ,
             chat_id=target.chat_id,
             mode=st["mode"],
-            prompt=st["prompt"],
+            prompt=current_prompt,
             seconds=int(st["seconds"]),
             max_side=int(st["max_side"]),
             video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
@@ -2576,14 +2619,13 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         await GEN_QUEUE.put(job)
 
-    ui = get_ui_state(context)
-    ui["last_ui_message_id"] = None
-    await cleanup_chat_status(context.bot, target.chat_id)
-    await update_chat_status(
-        context.bot,
-        target.chat_id,
-        f"🕐 В очереди: {repeat} задач(а). ID: #{first_job_id}–#{JOB_SEQ}.",
-    )
+    if roulette:
+        try:
+            await context.bot.send_message(
+                target.chat_id, f"🎰 Рулетка: подготовлено {variations} вариаций промта по {ROULETTE_GROUP_SIZE} видео."
+            )
+        except Exception:
+            log.exception("Failed to send roulette summary")
 
 
 async def submit_image_job(app: Application, job: Job) -> None:
