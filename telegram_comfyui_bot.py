@@ -2692,6 +2692,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not idea:
             await replace_ui_message_from_callback(query, context, "Сначала напиши идею промтом.", reply_markup=main_keyboard(st))
             return
+        if st["mode"] in SINGLE_PHOTO_MODES and not st["video_source"].get("path"):
+            await replace_ui_message_from_callback(
+                query, context, f"Сначала пришли фото для {st['mode']}, потом разворачивай идею — иначе Ollama сочинит внешность от себя.",
+                reply_markup=main_keyboard(st),
+            )
+            return
+        if st["mode"] in DUO_PHOTO_MODES and not all(x.get("path") for x in st["duo_photos"]):
+            await replace_ui_message_from_callback(
+                query, context, "Сначала пришли оба фото (лицо A и лицо B), потом разворачивай идею.",
+                reply_markup=main_keyboard(st),
+            )
+            return
         try:
             await query.message.delete()
         except Exception:
