@@ -1656,6 +1656,14 @@ def format_eta(seconds: float) -> str:
     return f"~{minutes} мин {sec} сек" if sec else f"~{minutes} мин"
 
 
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} сек"
+    minutes, sec = divmod(seconds, 60)
+    return f"{minutes} мин {sec} сек" if sec else f"{minutes} мин"
+
+
 def job_status_text(meta: dict[str, Any], *, started: bool) -> str:
     mode_label = MODE_DISPLAY_NAMES.get(meta.get("mode"), meta.get("mode") or "")
     batch_index = meta.get("batch_index", 1)
@@ -1744,6 +1752,9 @@ def workflow_info_line(meta: dict[str, Any]) -> str:
     quality = meta.get("quality")
     if quality:
         parts.append(str(quality))
+    started_at = meta.get("started_at")
+    if started_at:
+        parts.append(format_duration(time.time() - started_at))
     return " · ".join(p for p in parts if p)
 
 
