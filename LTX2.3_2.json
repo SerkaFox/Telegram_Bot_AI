@@ -1,0 +1,1182 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "sulphur_distil_bf16.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "2": {
+    "inputs": {
+      "ckpt_name": "sulphur_distil_bf16.safetensors"
+    },
+    "class_type": "LTXVAudioVAELoader",
+    "_meta": {
+      "title": "LTXV Audio VAE Loader"
+    }
+  },
+  "4": {
+    "inputs": {
+      "model_name": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+    },
+    "class_type": "LatentUpscaleModelLoader",
+    "_meta": {
+      "title": "Load Latent Upscale Model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "vae_name": "taeltx2_3.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load Preview VAE"
+    }
+  },
+  "6": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "lora_1": {
+        "on": true,
+        "lora": "DR34ML4Y_LTXXX_V2.safetensors",
+        "strength": 0.6
+      },
+      "lora_2": {
+        "on": true,
+        "lora": "LTX2.3_reasoning_I2V_V3.safetensors",
+        "strength": 1
+      },
+      "lora_3": {
+        "on": true,
+        "lora": "LTX2.3_Multi_step_video_reasoning_V0.1.safetensors",
+        "strength": 1
+      },
+      "lora_4": {
+        "on": true,
+        "lora": "LTX2.3-NSFWMOTION_00750.safetensors",
+        "strength": 0.6
+      },
+      "lora_5": {
+        "on": false,
+        "lora": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil36.safetensors",
+        "strength": 1
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "191",
+        0
+      ],
+      "clip": [
+        "194",
+        0
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Load Lora's"
+    }
+  },
+  "7": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "6",
+        0
+      ],
+      "clip": [
+        "6",
+        1
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Load Distilled Lora"
+    }
+  },
+  "8": {
+    "inputs": {
+      "chunks": 2,
+      "dim_threshold": 4096,
+      "model": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "LTXVChunkFeedForward",
+    "_meta": {
+      "title": "LTXV Chunk FeedForward"
+    }
+  },
+  "15": {
+    "inputs": {
+      "image": "ComfyUI_00048_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "18": {
+    "inputs": {
+      "Xi": 7,
+      "Xf": 7,
+      "isfloatX": 0
+    },
+    "class_type": "mxSlider",
+    "_meta": {
+      "title": "Video Length (seconds)"
+    }
+  },
+  "19": {
+    "inputs": {
+      "Xi": 2560,
+      "Xf": 2560,
+      "isfloatX": 0
+    },
+    "class_type": "mxSlider",
+    "_meta": {
+      "title": "Video Width"
+    }
+  },
+  "27": {
+    "inputs": {
+      "images": [
+        "26:178",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "28": {
+    "inputs": {
+      "text": "vbvr, video reasoning lora, precise motion control, enhanced temporal coherence, complex dynamic action sequence, perfect lip synchronization, ultra realistic raw amateur video, extremely high fidelity motion and physics, authentic real couple home video style,\nA stunning, highly sexual 18-year-old girl with long dark hair, big blue eyes, freckles, pale glowing skin and a very youthful but extremely seductive face is lying on her back on a messy bed with gray sheets and pillows. She is in a deep missionary position with her legs spread wide and one leg raised high. She wears black fishnet thigh-high stockings (one with a black band), black patent high-heel boots, a black lace top pulled down exposing her large natural breasts, and a black choker. A man is on top of her, fucking her hard and deep in her tight young pussy with powerful, rhythmic, full-depth thrusts — pulling his thick veiny cock almost completely out until only the swollen head stretches her pink pussy lips, then slamming balls-deep back inside repeatedly, pelvis slapping hard against her ass and thighs.\nThe 18-year-old girl maintains direct, constant eye contact with the camera the entire time. She has a filthy, pornstar-like expression — half-lidded lust-filled eyes, raised eyebrows, flushed cheeks, biting her lower lip, and a naughty, cock-hungry smile. Her face is full of pure sexual pleasure and craving, looking like a professional pornstar who loves getting fucked hard.\nShe moans loudly and shamelessly in a very young but extremely slutty, high-pitched girly voice with strong natural room reverb and heavy echo/hall. Her voice is breathy, desperate and pornstar-level horny. She repeatedly talks dirty while staring at the camera with intense eye contact:\n'Oh fuck jaaa… härter… fick meine kleine nasse Muschi… ahhh jaaa genau so… tiefer… ich liebe deinen dicken Schwanz… oh mein Gott ich bin so geil… fick mich richtig durch… jaaa Baby!'\n— her moans are constant, loud, slutty and dramatic, voice cracking from the intense pounding, mixed with heavy breathing, desperate whimpering and pornstar-style gasping.\nUltra-detailed physical realism: Her tight young pussy stretches visibly around the thick cock with every hard thrust, creamy juices coating the shaft and dripping down. Heavy natural jiggle and ripple on her thighs, ass and large breasts with every powerful impact. Light sweat glistening on her youthful skin, realistic pores, texture and goosebumps. Her raised leg trembles in the high heel, toes curled inside the boot, hands gripping the sheets tightly. The black fishnet stockings, high heels and choker stay in place.\nDynamic motion details: Hard, steady deep missionary pounding with complete in-and-out strokes, realistic weight, momentum, loud wet squelching sounds and skin slapping. Her body rocks and bounces from the force, breasts jiggling heavily, but her slutty pornstar face keeps the intense lust-filled expression and direct eye contact with the camera the whole time.\nCamera & style: Shaky handheld amateur camera with realistic slight unsteady movements, subtle tilting and panning from a slight high angle (POV-style). Bright natural daylight from the side creating beautiful highlights on her sweaty skin, the deep penetration and dripping juices. Shallow depth of field focused on her filthy pornstar facial expressions, eye contact and the intense hard fucking.\nExtremely detailed 8k raw quality, perfect anatomy, weight, jiggle physics and motion realism, highly intimate, extremely sexual and arousing amateur erotic atmosphere with strong contrast between her youthful cute look and her pornstar-level dirty performance and loud echoing vocals.",
+      "clip": [
+        "7",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive"
+    }
+  },
+  "29": {
+    "inputs": {
+      "text": "blurry, low quality, professional camera, stable shot, studio lighting, pornstar perfect, mature face, older woman, sad face, bored expression, no eye contact, looking away, closed eyes, no grin, serious face, quiet moaning, no dirty talk, shallow penetration, soft thrusts, deformed, bad anatomy, extra limbs, soft cock, artificial voice, weak reverb, no hall, bad lip sync, plastic skin, too clean, no sweat, no jiggle, cartoonish, censored, text, watermark, jerky motion",
+      "clip": [
+        "7",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative"
+    }
+  },
+  "59": {
+    "inputs": {
+      "frame_rate": [
+        "26:53",
+        0
+      ],
+      "loop_count": 0,
+      "filename_prefix": "MrXin/LTX2.3/I2V/FirstPass",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 14,
+      "save_metadata": false,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": false,
+      "images": [
+        "26:164",
+        0
+      ],
+      "audio": [
+        "26:114",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "61": {
+    "inputs": {
+      "frame_rate": [
+        "26:53",
+        0
+      ],
+      "loop_count": 0,
+      "filename_prefix": "MrXin/LTX2.3/I2V/Final",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 14,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "26:149",
+        0
+      ],
+      "audio": [
+        "26:117",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "118": {
+    "inputs": {
+      "text_encoder": "gemma_3_12B_it_fp8_e4m3fn.safetensors",
+      "ckpt_name": "sulphur_distil_bf16.safetensors",
+      "device": "default"
+    },
+    "class_type": "LTXAVTextEncoderLoader",
+    "_meta": {
+      "title": "LTXV Audio Text Encoder Loader"
+    }
+  },
+  "123": {
+    "inputs": {
+      "noise_seed": [
+        "125",
+        0
+      ]
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "125": {
+    "inputs": {
+      "seed": 448332790905732
+    },
+    "class_type": "Seed (rgthree)",
+    "_meta": {
+      "title": "Seed (rgthree)"
+    }
+  },
+  "127": {
+    "inputs": {
+      "video": "Final_00370-audio.mp4",
+      "force_rate": 0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "None"
+    },
+    "class_type": "VHS_LoadVideo",
+    "_meta": {
+      "title": "Load Video (Upload) 🎥🅥🅗🅢"
+    }
+  },
+  "130": {
+    "inputs": {
+      "resize_type": "scale by multiplier",
+      "resize_type.scale": 2,
+      "quality": "ULTRA",
+      "images": [
+        "127",
+        0
+      ]
+    },
+    "class_type": "RTXVideoSuperResolution",
+    "_meta": {
+      "title": "RTX Video Super Resolution"
+    }
+  },
+  "133": {
+    "inputs": {
+      "source_fps": [
+        "138",
+        0
+      ],
+      "target_fps": [
+        "140",
+        0
+      ],
+      "scale": 2,
+      "model_name": "flownet.pkl",
+      "batch_size": 6,
+      "use_fp16": true,
+      "images": [
+        "130",
+        0
+      ]
+    },
+    "class_type": "RIFEInterpolation",
+    "_meta": {
+      "title": "RIFE Frame Interpolation"
+    }
+  },
+  "138": {
+    "inputs": {
+      "video_info": [
+        "127",
+        3
+      ]
+    },
+    "class_type": "VHS_VideoInfo",
+    "_meta": {
+      "title": "Video Info 🎥🅥🅗🅢"
+    }
+  },
+  "140": {
+    "inputs": {
+      "value": 48
+    },
+    "class_type": "easy float",
+    "_meta": {
+      "title": "Target FPS"
+    }
+  },
+  "161": {
+    "inputs": {
+      "clean_file_cache": true,
+      "clean_processes": true,
+      "clean_dlls": true,
+      "retry_times": 3,
+      "anything": [
+        "163",
+        0
+      ]
+    },
+    "class_type": "RAMCleanup",
+    "_meta": {
+      "title": "🎈RAM-Cleanup"
+    }
+  },
+  "162": {
+    "inputs": {},
+    "class_type": "ImpactDummyInput",
+    "_meta": {
+      "title": "ImpactDummyInput"
+    }
+  },
+  "163": {
+    "inputs": {
+      "cleanup_mode": true,
+      "anything": [
+        "162",
+        0
+      ]
+    },
+    "class_type": "VRAMCleanup",
+    "_meta": {
+      "title": "VRAM Cleanup"
+    }
+  },
+  "181": {
+    "inputs": {
+      "Xi": 1520,
+      "Xf": 1520,
+      "isfloatX": 0
+    },
+    "class_type": "mxSlider",
+    "_meta": {
+      "title": "Video Height"
+    }
+  },
+  "191": {
+    "inputs": {
+      "selection_setting": 1,
+      "input_1": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "TwoWaySwitch",
+    "_meta": {
+      "title": "Switch Model"
+    }
+  },
+  "192": {
+    "inputs": {
+      "selection_setting": 2,
+      "input_1": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "TwoWaySwitch",
+    "_meta": {
+      "title": "Switch Audio VAE"
+    }
+  },
+  "193": {
+    "inputs": {
+      "selection_setting": 2,
+      "input_1": [
+        "1",
+        2
+      ]
+    },
+    "class_type": "TwoWaySwitch",
+    "_meta": {
+      "title": "Switch Video VAE"
+    }
+  },
+  "194": {
+    "inputs": {
+      "selection_setting": 2,
+      "input_1": [
+        "118",
+        0
+      ]
+    },
+    "class_type": "TwoWaySwitch",
+    "_meta": {
+      "title": "Switch CLIP"
+    }
+  },
+  "225": {
+    "inputs": {
+      "sigmas": "1., 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "Sigmas First Pass"
+    }
+  },
+  "226": {
+    "inputs": {
+      "sigmas": "0.85, 0.7250, 0.4219, 0.0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "Sigmas Final Pass"
+    }
+  },
+  "26:49": {
+    "inputs": {
+      "cfg": 0.9,
+      "model": [
+        "8",
+        0
+      ],
+      "positive": [
+        "26:46",
+        0
+      ],
+      "negative": [
+        "26:46",
+        1
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFGGuider"
+    }
+  },
+  "26:53": {
+    "inputs": {
+      "int_value": [
+        "26:43",
+        0
+      ]
+    },
+    "class_type": "IntToFloat",
+    "_meta": {
+      "title": "IntToFloat"
+    }
+  },
+  "26:62": {
+    "inputs": {
+      "audio": [
+        "26:154",
+        0
+      ],
+      "audio_vae": [
+        "192",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEEncode",
+    "_meta": {
+      "title": "LTXV Audio VAE Encode"
+    }
+  },
+  "26:92": {
+    "inputs": {
+      "noise": [
+        "123",
+        0
+      ],
+      "guider": [
+        "26:90",
+        0
+      ],
+      "sampler": [
+        "26:169",
+        0
+      ],
+      "sigmas": [
+        "226",
+        0
+      ],
+      "latent_image": [
+        "26:88",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "Sampler Final Pass"
+    }
+  },
+  "26:114": {
+    "inputs": {
+      "volume": -10,
+      "audio": [
+        "26:66",
+        0
+      ]
+    },
+    "class_type": "AudioAdjustVolume",
+    "_meta": {
+      "title": "Audio Adjust Volume"
+    }
+  },
+  "26:66": {
+    "inputs": {
+      "samples": [
+        "26:64",
+        0
+      ],
+      "audio_vae": [
+        "192",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV Audio VAE Decode"
+    }
+  },
+  "26:117": {
+    "inputs": {
+      "volume": -10,
+      "audio": [
+        "26:98",
+        0
+      ]
+    },
+    "class_type": "AudioAdjustVolume",
+    "_meta": {
+      "title": "Audio Adjust Volume"
+    }
+  },
+  "26:98": {
+    "inputs": {
+      "samples": [
+        "26:99",
+        0
+      ],
+      "audio_vae": [
+        "192",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV Audio VAE Decode"
+    }
+  },
+  "26:99": {
+    "inputs": {
+      "samples": [
+        "26:97",
+        0
+      ],
+      "mask": [
+        "26:93",
+        0
+      ]
+    },
+    "class_type": "SetLatentNoiseMask",
+    "_meta": {
+      "title": "Set Latent Noise Mask"
+    }
+  },
+  "26:91": {
+    "inputs": {
+      "positive": [
+        "26:46",
+        0
+      ],
+      "negative": [
+        "26:46",
+        1
+      ],
+      "latent": [
+        "26:153",
+        0
+      ]
+    },
+    "class_type": "LTXVCropGuides",
+    "_meta": {
+      "title": "LTXVCropGuides"
+    }
+  },
+  "26:90": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "8",
+        0
+      ],
+      "positive": [
+        "26:91",
+        0
+      ],
+      "negative": [
+        "26:91",
+        1
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFGGuider"
+    }
+  },
+  "26:88": {
+    "inputs": {
+      "video_latent": [
+        "26:87",
+        0
+      ],
+      "audio_latent": [
+        "26:64",
+        0
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "LTXVConcatAVLatent"
+    }
+  },
+  "26:64": {
+    "inputs": {
+      "samples": [
+        "26:62",
+        0
+      ],
+      "mask": [
+        "26:65",
+        0
+      ]
+    },
+    "class_type": "SetLatentNoiseMask",
+    "_meta": {
+      "title": "Set Latent Noise Mask"
+    }
+  },
+  "26:95": {
+    "inputs": {
+      "av_latent": [
+        "26:151",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "LTXVSeparateAVLatent"
+    }
+  },
+  "26:96": {
+    "inputs": {
+      "samples": [
+        "26:95",
+        1
+      ],
+      "audio_vae": [
+        "192",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV Audio VAE Decode"
+    }
+  },
+  "26:97": {
+    "inputs": {
+      "audio": [
+        "26:96",
+        0
+      ],
+      "audio_vae": [
+        "192",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEEncode",
+    "_meta": {
+      "title": "LTXV Audio VAE Encode"
+    }
+  },
+  "26:93": {
+    "inputs": {
+      "value": 0,
+      "width": [
+        "26:176",
+        0
+      ],
+      "height": [
+        "26:176",
+        1
+      ]
+    },
+    "class_type": "SolidMask",
+    "_meta": {
+      "title": "SolidMask"
+    }
+  },
+  "26:51": {
+    "inputs": {
+      "noise": [
+        "123",
+        0
+      ],
+      "guider": [
+        "26:49",
+        0
+      ],
+      "sampler": [
+        "26:50",
+        0
+      ],
+      "sigmas": [
+        "225",
+        0
+      ],
+      "latent_image": [
+        "26:45",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "Sampler First Pass"
+    }
+  },
+  "26:153": {
+    "inputs": {
+      "av_latent": [
+        "26:51",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "LTXVSeparateAVLatent"
+    }
+  },
+  "26:151": {
+    "inputs": {
+      "empty_cache": false,
+      "gc_collect": true,
+      "unload_all_models": true,
+      "any_input": [
+        "26:92",
+        0
+      ]
+    },
+    "class_type": "VRAM_Debug",
+    "_meta": {
+      "title": "VRAM Debug"
+    }
+  },
+  "26:154": {
+    "inputs": {
+      "samples": [
+        "26:153",
+        1
+      ],
+      "audio_vae": [
+        "192",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV Audio VAE Decode"
+    }
+  },
+  "26:164": {
+    "inputs": {
+      "samples": [
+        "26:153",
+        0
+      ],
+      "vae": [
+        "193",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "26:65": {
+    "inputs": {
+      "value": 0,
+      "width": [
+        "26:176",
+        0
+      ],
+      "height": [
+        "26:176",
+        1
+      ]
+    },
+    "class_type": "SolidMask",
+    "_meta": {
+      "title": "SolidMask"
+    }
+  },
+  "26:87": {
+    "inputs": {
+      "strength": 1,
+      "bypass": false,
+      "vae": [
+        "193",
+        0
+      ],
+      "image": [
+        "26:232",
+        0
+      ],
+      "latent": [
+        "26:89",
+        0
+      ]
+    },
+    "class_type": "LTXVImgToVideoInplace",
+    "_meta": {
+      "title": "LTXVImgToVideoInplace"
+    }
+  },
+  "26:37": {
+    "inputs": {
+      "img_compression": 20,
+      "image": [
+        "26:178",
+        0
+      ]
+    },
+    "class_type": "LTXVPreprocess",
+    "_meta": {
+      "title": "LTXVPreprocess"
+    }
+  },
+  "26:176": {
+    "inputs": {
+      "image": [
+        "26:177",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "26:179": {
+    "inputs": {
+      "width": [
+        "26:178",
+        1
+      ],
+      "height": [
+        "26:178",
+        2
+      ],
+      "batch_size": 1,
+      "color": 0
+    },
+    "class_type": "EmptyImage",
+    "_meta": {
+      "title": "EmptyImage"
+    }
+  },
+  "26:89": {
+    "inputs": {
+      "samples": [
+        "26:153",
+        0
+      ],
+      "upscale_model": [
+        "4",
+        0
+      ],
+      "vae": [
+        "193",
+        0
+      ]
+    },
+    "class_type": "LTXVLatentUpsampler",
+    "_meta": {
+      "title": "spatial"
+    }
+  },
+  "26:149": {
+    "inputs": {
+      "spatial_tiles": 4,
+      "spatial_overlap": 4,
+      "temporal_tile_length": 24,
+      "temporal_overlap": 4,
+      "last_frame_fix": false,
+      "working_device": "auto",
+      "working_dtype": "auto",
+      "vae": [
+        "193",
+        0
+      ],
+      "latents": [
+        "26:95",
+        0
+      ]
+    },
+    "class_type": "LTXVSpatioTemporalTiledVAEDecode",
+    "_meta": {
+      "title": "🅛🅣🅧 LTXV Spatio Temporal Tiled VAE Decode"
+    }
+  },
+  "26:46": {
+    "inputs": {
+      "frame_rate": [
+        "26:53",
+        0
+      ],
+      "positive": [
+        "28",
+        0
+      ],
+      "negative": [
+        "29",
+        0
+      ]
+    },
+    "class_type": "LTXVConditioning",
+    "_meta": {
+      "title": "LTXVConditioning"
+    }
+  },
+  "26:44": {
+    "inputs": {
+      "strength": 1,
+      "bypass": false,
+      "vae": [
+        "193",
+        0
+      ],
+      "image": [
+        "26:232",
+        0
+      ],
+      "latent": [
+        "26:39",
+        0
+      ]
+    },
+    "class_type": "LTXVImgToVideoInplace",
+    "_meta": {
+      "title": "LTXVImgToVideoInplace"
+    }
+  },
+  "26:207": {
+    "inputs": {
+      "sigmas": "0.85, 0.7250, 0.4219, 0.0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "ManualSigmas"
+    }
+  },
+  "26:169": {
+    "inputs": {
+      "sampler_name": "euler_cfg_pp"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "26:50": {
+    "inputs": {
+      "sampler_name": "euler_ancestral_cfg_pp"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "26:39": {
+    "inputs": {
+      "width": [
+        "26:176",
+        0
+      ],
+      "height": [
+        "26:176",
+        1
+      ],
+      "length": [
+        "26:42",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": {
+      "title": "EmptyLTXVLatentVideo"
+    }
+  },
+  "26:177": {
+    "inputs": {
+      "resize_type": "scale by multiplier",
+      "resize_type.multiplier": 0.5,
+      "scale_method": "area",
+      "input": [
+        "26:179",
+        0
+      ]
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": {
+      "title": "Resize Image/Mask"
+    }
+  },
+  "26:45": {
+    "inputs": {
+      "video_latent": [
+        "26:44",
+        0
+      ],
+      "audio_latent": [
+        "26:40",
+        0
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "LTXVConcatAVLatent"
+    }
+  },
+  "26:43": {
+    "inputs": {
+      "value": 24
+    },
+    "class_type": "easy int",
+    "_meta": {
+      "title": "FPS"
+    }
+  },
+  "26:40": {
+    "inputs": {
+      "frames_number": [
+        "26:42",
+        0
+      ],
+      "frame_rate": [
+        "26:43",
+        0
+      ],
+      "batch_size": 1,
+      "audio_vae": [
+        "192",
+        0
+      ]
+    },
+    "class_type": "LTXVEmptyLatentAudio",
+    "_meta": {
+      "title": "LTXV Empty Latent Audio"
+    }
+  },
+  "26:178": {
+    "inputs": {
+      "width": [
+        "19",
+        0
+      ],
+      "height": [
+        "181",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "keep_proportion": "resize",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 32,
+      "device": "cpu",
+      "image": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2"
+    }
+  },
+  "26:231": {
+    "inputs": {
+      "longer_edge": 1536,
+      "images": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "ResizeImagesByLongerEdge",
+    "_meta": {
+      "title": "Resize Images by Longer Edge"
+    }
+  },
+  "26:232": {
+    "inputs": {
+      "img_compression": 18,
+      "image": [
+        "26:231",
+        0
+      ]
+    },
+    "class_type": "LTXVPreprocess",
+    "_meta": {
+      "title": "LTXVPreprocess"
+    }
+  },
+  "26:42": {
+    "inputs": {
+      "expression": "a*24+1",
+      "a": [
+        "18",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "Video Length"
+    }
+  }
+}

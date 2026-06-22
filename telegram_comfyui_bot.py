@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import requests
+from deep_translator import GoogleTranslator
 from PIL import Image, ImageOps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import (
@@ -30,8 +31,10 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 COMFY_BASE = os.getenv("COMFY_BASE", "http://127.0.0.1:8188").rstrip("/")
 
 WORKFLOW_VIDEO = os.getenv("COMFY_WORKFLOW_VIDEO", "./workflow_video.json")
-WORKFLOW_IMAGE = os.getenv("COMFY_WORKFLOW_IMAGE", "./workflow_image.json")
-WORKFLOW_MULTITALK = os.getenv("COMFY_WORKFLOW_MULTITALK", "./workflow_multitalk.json")
+WORKFLOW_LTX_SULPHUR = os.getenv("COMFY_WORKFLOW_LTX_SULPHUR", "./LTX2.3_2.json")
+WORKFLOW_MOPMIX = os.getenv("COMFY_WORKFLOW_MOPMIX", "./workflow_mopmix.json")
+WORKFLOW_LTX_EROS = os.getenv("COMFY_WORKFLOW_LTX_EROS", "./workflow_ltx_eros.json")
+WORKFLOW_MOPMIX_DUO = os.getenv("COMFY_WORKFLOW_MOPMIX_DUO", "./workflow_mopmix_duo.json")
 
 TMP_DIR = Path(os.getenv("BOT_TMP_DIR", "./tmp_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,7 +51,6 @@ ALLOWED_USER_IDS = {
 DEFAULT_SECONDS = int(os.getenv("DEFAULT_SECONDS", "8"))
 MIN_SECONDS = int(os.getenv("MIN_SECONDS", "2"))
 MAX_SECONDS = int(os.getenv("MAX_SECONDS", "12"))
-TALK_MAX_SECONDS = int(os.getenv("TALK_MAX_SECONDS", str(MAX_SECONDS)))
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "medium").strip().lower()
 QUALITY_PRESETS = {
     "low": {"max_side": 480, "video_fps": 16},
@@ -57,10 +59,76 @@ QUALITY_PRESETS = {
 }
 ROUND_TO = int(os.getenv("ROUND_TO", "64"))
 
+# LTX Sulphur (LTX2.3_2.json) target generation resolution per quality level.
+LTX_SULPHUR_QUALITY = {
+    "low": (1536, 912),
+    "medium": (2048, 1216),
+    "high": (2560, 1520),
+}
+
+# MopMix (workflow_mopmix.json) SDXL bucket resolution per quality level.
+MOPMIX_RESOLUTIONS = {
+    "low": "768x1280 (0.6)",
+    "medium": "832x1216 (0.68)",
+    "high": "896x1152 (0.78)",
+}
+# img2img strength for mopmix: 0 keeps the uploaded photo untouched, 1 regenerates it
+# from scratch. 0.6 redraws per the prompt while keeping the photo's pose/composition.
+MOPMIX_DENOISE = float(os.getenv("MOPMIX_DENOISE", "0.6"))
+# Duo's starting image is a rough side-by-side composite of two unrelated photos, not one
+# coherent photo, so it needs more repainting than single-photo MopMix to merge into one scene.
+MOPMIX_DUO_DENOISE = float(os.getenv("MOPMIX_DUO_DENOISE", "0.85"))
+
+# LTX Eros (workflow_ltx_eros.json) target generation resolution per quality level
+# (width, height fed to the MultiImageLoader; portrait orientation by default).
+LTX_EROS_QUALITY = {
+    "low": (640, 960),
+    "medium": (768, 1152),
+    "high": (896, 1344),
+}
+# Original workflow's 4 keyframe insert points (seconds) at its default 12s duration;
+# scaled proportionally to whatever duration the job actually requests.
+LTX_EROS_KEYFRAME_SECONDS = [0, 3, 6, 10]
+LTX_EROS_KEYFRAME_DEFAULT_SECONDS = 12
+# The workflow's own "ablit-norms-biproj-fp8mixed" gemma text encoder fails to load on
+# this ComfyUI install ('Linear' object has no attribute 'weight' on partial GPU load of
+# this particular fp8 quantization scheme); substitute the gemma encoder already used
+# successfully by LTX Sulphur instead.
+LTX_EROS_CLIP_NAME1 = os.getenv("LTX_EROS_CLIP_NAME1", "gemma_3_12B_it_fp8_e4m3fn.safetensors")
+
+# ReActor face-swap model/quality settings shared by mopmix_duo's two swap passes.
+REACTOR_SWAP_MODEL = os.getenv("REACTOR_SWAP_MODEL", "inswapper_128.onnx")
+REACTOR_FACE_DETECTION = os.getenv("REACTOR_FACE_DETECTION", "retinaface_resnet50")
+REACTOR_FACE_RESTORE_MODEL = os.getenv("REACTOR_FACE_RESTORE_MODEL", "GFPGANv1.3.pth")
+
+# Image (Qwen-Image-Edit) instruction-based photo editor: keeps the original photo intact
+# except for whatever the prompt asks to change (clothes, body, background, add/remove
+# someone), unlike img2img-from-noise which redraws everything.
+IMAGE_EDIT_QWEN_UNET = os.getenv("IMAGE_EDIT_QWEN_UNET", "qwen_image_edit_2509_fp8_e4m3fn.safetensors")
+IMAGE_EDIT_QWEN_CLIP = os.getenv("IMAGE_EDIT_QWEN_CLIP", "qwen_2.5_vl_7b_fp8_scaled.safetensors")
+IMAGE_EDIT_QWEN_VAE = os.getenv("IMAGE_EDIT_QWEN_VAE", "qwen_image_vae.safetensors")
+IMAGE_EDIT_STEPS = int(os.getenv("IMAGE_EDIT_STEPS", "20"))
+IMAGE_EDIT_CFG = float(os.getenv("IMAGE_EDIT_CFG", "4"))
+IMAGE_EDIT_SHIFT = float(os.getenv("IMAGE_EDIT_SHIFT", "3.1"))
+IMAGE_EDIT_QUALITY = {
+    "low": (1024, 1024),
+    "medium": (1328, 1328),
+    "high": (1536, 1536),
+}
+
+# Modes whose final ComfyUI output is a video, vs a still image.
+VIDEO_MODES = {"video", "ltx_sulphur", "ltx_eros"}
+# Modes that take a single uploaded photo into st["video_source"] (video modes, plus
+# mopmix which runs img2img off of it, plus image which edits it directly).
+SINGLE_PHOTO_MODES = VIDEO_MODES | {"mopmix", "image"}
+# Modes that take two uploaded photos into st["duo_photos"].
+DUO_PHOTO_MODES = {"mopmix_duo"}
+# Modes whose workflow renders silent video and needs the MMAudio postprocess pass.
+SILENT_VIDEO_MODES = {"video"}
+
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 POLL_SECONDS = float(os.getenv("POLL_SECONDS", "2"))
 
-MAX_REFS_FOR_IMAGE = 3
 MEDIA_LIBRARY_LIMIT = int(os.getenv("MEDIA_LIBRARY_LIMIT", "10"))
 VIDEO_AUDIO = os.getenv("VIDEO_AUDIO", "1").strip().lower() not in {"0", "false", "no", "off"}
 VIDEO_AUDIO_MODEL = os.getenv("VIDEO_AUDIO_MODEL", "mmaudio_large_44k_nsfw_gold_8.5k_final_fp16.safetensors")
@@ -76,8 +144,6 @@ VIDEO_NO_TEXT_PROMPT = "No subtitles, no captions, no on-screen text, no speech 
 VIDEO_NO_TEXT_NEGATIVE = "subtitles, captions, on-screen text, text overlay, speech bubbles, written words, labels, watermark"
 VIDEO_NO_LOOP_PROMPT = "Continuous non-looping motion, no replay, no boomerang, no ping-pong motion, no reset to the first frame."
 VIDEO_NO_LOOP_NEGATIVE = "loop, looping, replay, boomerang, ping-pong motion, reverse playback, return to first frame, reset to starting pose"
-TALK_CONTINUITY_PROMPT = "Keep one continuous shot progression. Do not return to the starting outfit, starting pose, or starting frame. Preserve the final changed appearance through the last frame."
-TALK_CONTINUITY_NEGATIVE = "starting outfit, starting clothes, original pose, original frame, dressed again, reset clothing, reset scene"
 VIDEO_TTS = os.getenv("VIDEO_TTS", "0").strip().lower() not in {"0", "false", "no", "off"}
 EDGE_TTS_BIN = os.getenv("EDGE_TTS_BIN", "/home/iaadmin/miniconda3/bin/edge-tts")
 VIDEO_TTS_VOICE_RU = os.getenv("VIDEO_TTS_VOICE_RU", "ru-RU-SvetlanaNeural")
@@ -87,20 +153,6 @@ VIDEO_TTS_VOLUME = os.getenv("VIDEO_TTS_VOLUME", "+20%")
 VIDEO_TTS_DELAY_MS = int(os.getenv("VIDEO_TTS_DELAY_MS", "500"))
 VIDEO_TTS_BG_VOLUME = float(os.getenv("VIDEO_TTS_BG_VOLUME", "0.65"))
 VIDEO_TTS_SPEECH_VOLUME = float(os.getenv("VIDEO_TTS_SPEECH_VOLUME", "1.25"))
-TALK_LIPSYNC = os.getenv("TALK_LIPSYNC", "1").strip().lower() not in {"0", "false", "no", "off"}
-TALK_LIPSYNC_MIN_SIDE = int(os.getenv("TALK_LIPSYNC_MIN_SIDE", "640"))
-WAV2LIP_DIR = Path(os.getenv("WAV2LIP_DIR", "./third_party/Wav2Lip")).resolve()
-WAV2LIP_PYTHON = os.getenv("WAV2LIP_PYTHON", "/home/iaadmin/ComfyUI/venv/bin/python")
-WAV2LIP_CHECKPOINT = Path(os.getenv("WAV2LIP_CHECKPOINT", str(WAV2LIP_DIR / "checkpoints" / "wav2lip_gan.pth")))
-WAV2LIP_TIMEOUT = int(os.getenv("WAV2LIP_TIMEOUT", "900"))
-MULTITALK_FPS = int(os.getenv("MULTITALK_FPS", "25"))
-MULTITALK_STEPS = int(os.getenv("MULTITALK_STEPS", "4"))
-MULTITALK_CFG = float(os.getenv("MULTITALK_CFG", "1.0"))
-MULTITALK_SHIFT = float(os.getenv("MULTITALK_SHIFT", "11.0"))
-MULTITALK_AUDIO_SCALE = float(os.getenv("MULTITALK_AUDIO_SCALE", "1.0"))
-MULTITALK_AUDIO_CFG_SCALE = float(os.getenv("MULTITALK_AUDIO_CFG_SCALE", "1.0"))
-MULTITALK_LORA = os.getenv("MULTITALK_LORA", "nsfw_wan_14b_sex.safetensors")
-MULTITALK_LORA_STRENGTH = float(os.getenv("MULTITALK_LORA_STRENGTH", "0.65"))
 VIDEO_MAX_LORAS = int(os.getenv("VIDEO_MAX_LORAS", "8"))
 VIDEO_LORA_STRENGTH_DEFAULT = float(os.getenv("VIDEO_LORA_STRENGTH_DEFAULT", "0.35"))
 VIDEO_LORA_STRENGTH_MULTIPLIER = float(os.getenv("VIDEO_LORA_STRENGTH_MULTIPLIER", "2.0"))
@@ -138,6 +190,20 @@ WORKER_STARTED = False
 JOB_SEQ = 0
 ACTIVE_PROMPTS: dict[str, dict] = {}
 
+# Live progress status message per chat, edited in place while a job is generating so the
+# user doesn't think the bot/server hung. Rolling average duration per mode (seconds) used
+# for the ETA estimate, seeded with rough defaults and refined after every completed job.
+CHAT_STATUS: dict[int, dict[str, Any]] = {}
+MODE_AVG_DURATION: dict[str, float] = {
+    "video": 240.0,
+    "ltx_sulphur": 230.0,
+    "ltx_eros": 230.0,
+    "mopmix": 60.0,
+    "mopmix_duo": 90.0,
+    "image": 30.0,
+}
+STATUS_UPDATE_INTERVAL = 8.0
+
 
 @dataclass
 class Job:
@@ -150,8 +216,11 @@ class Job:
     video_fps: int
     seed: int
     video_source: dict | None
-    image_refs: list[dict]
+    duo_photos: list[dict]
     video_loras: list[str]
+    quality: str
+    batch_index: int
+    batch_total: int
 
 
 # ============================================================
@@ -180,6 +249,19 @@ def apply_quality(st: dict[str, Any], name: str) -> bool:
 
 
 def quality_status(st: dict[str, Any]) -> str:
+    quality = (st.get("quality") or "medium").strip().lower()
+    mode = st.get("mode")
+    if mode == "ltx_sulphur":
+        w, h = LTX_SULPHUR_QUALITY.get(quality, LTX_SULPHUR_QUALITY["medium"])
+        return f"{quality} ({w}x{h})"
+    if mode == "ltx_eros":
+        w, h = LTX_EROS_QUALITY.get(quality, LTX_EROS_QUALITY["medium"])
+        return f"{quality} ({w}x{h})"
+    if mode in {"mopmix", "mopmix_duo"}:
+        return f"{quality} ({MOPMIX_RESOLUTIONS.get(quality, MOPMIX_RESOLUTIONS['medium'])})"
+    if mode == "image":
+        w, h = IMAGE_EDIT_QUALITY.get(quality, IMAGE_EDIT_QUALITY["medium"])
+        return f"{quality} ({w}x{h})"
     label = quality_label(int(st.get("max_side") or 0))
     fps = int(st.get("video_fps") or 0)
     fps_text = f", {fps} fps" if fps else ""
@@ -212,6 +294,32 @@ def fit_size_keep_aspect(width: int, height: int, max_side: int, multiple: int =
     w = round_to_multiple(w, multiple)
     h = round_to_multiple(h, multiple)
     return max(multiple, w), max(multiple, h)
+
+
+def fit_to_pixel_budget(src_width: int, src_height: int, target_pixels: int, multiple: int = ROUND_TO) -> tuple[int, int]:
+    """Scale (src_width, src_height) to roughly target_pixels total pixels, keeping the
+    source's own aspect ratio. Used so LTX Sulphur/Eros quality presets control output
+    cost (resolution) without forcing every photo into one fixed orientation/box, which
+    was cropping faces out of photos whose aspect ratio didn't match the preset."""
+    src_width = max(1, int(src_width))
+    src_height = max(1, int(src_height))
+    scale = (target_pixels / (src_width * src_height)) ** 0.5
+    w = round_to_multiple(src_width * scale, multiple)
+    h = round_to_multiple(src_height * scale, multiple)
+    return max(multiple, w), max(multiple, h)
+
+
+def build_duo_composite(path_a: str, path_b: str, *, height: int = 1536, half_width: int = 1075) -> Image.Image:
+    """Side-by-side composite of two source photos, used as the img2img starting latent for
+    MopMix Duo so body/hair/age/clothing come from the real photos instead of being imagined
+    by the model from scratch (which a pure txt2img + final face-swap can't fix)."""
+    canvas = Image.new("RGB", (half_width * 2, height))
+    for i, path in enumerate((path_a, path_b)):
+        with Image.open(path) as im:
+            im = ImageOps.exif_transpose(im).convert("RGB")
+            fitted = ImageOps.fit(im, (half_width, height), method=Image.LANCZOS, centering=(0.5, 0.3))
+        canvas.paste(fitted, (i * half_width, 0))
+    return canvas
 
 
 def save_bytes(path: Path, blob: bytes) -> None:
@@ -328,88 +436,6 @@ def video_has_audio(video_path: Path) -> bool:
     return p.returncode == 0 and bool(p.stdout.strip())
 
 
-def media_duration_seconds(path: Path) -> float:
-    p = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if p.returncode != 0:
-        raise RuntimeError(f"ffprobe duration failed for {path}: {p.stderr}")
-    return max(0.0, float((p.stdout or "0").strip() or "0"))
-
-
-def media_video_size(path: Path) -> tuple[int, int]:
-    p = subprocess.run(
-        [
-            "ffprobe",
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "json",
-            str(path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if p.returncode != 0:
-        raise RuntimeError(f"ffprobe size failed for {path}: {p.stderr}")
-    data = json.loads(p.stdout or "{}")
-    stream = (data.get("streams") or [{}])[0]
-    width = int(stream.get("width") or 0)
-    height = int(stream.get("height") or 0)
-    return width, height
-
-
-def upscale_video_for_lipsync(input_path: Path, output_path: Path) -> Path:
-    min_side = max(0, int(TALK_LIPSYNC_MIN_SIDE))
-    if min_side <= 0:
-        return input_path
-
-    width, height = media_video_size(input_path)
-    if min(width, height) >= min_side:
-        return input_path
-
-    if width <= height:
-        scale_expr = f"{min_side}:-2"
-    else:
-        scale_expr = f"-2:{min_side}"
-
-    run_cmd([
-        "ffmpeg",
-        "-y",
-        "-i", str(input_path),
-        "-vf", f"scale={scale_expr}:flags=lanczos",
-        "-c:v", "libx264",
-        "-crf", "18",
-        "-preset", "veryfast",
-        "-pix_fmt", "yuv420p",
-        "-an",
-        "-movflags", "+faststart",
-        str(output_path),
-    ])
-    return output_path
-
-
-def build_lipsync_audio_track(speech_path: Path, output_path: Path, duration: float) -> None:
-    delay = max(0, int(VIDEO_TTS_DELAY_MS))
-    duration = max(0.1, float(duration))
-    run_cmd([
-        "ffmpeg",
-        "-y",
-        "-i", str(speech_path),
-        "-filter_complex",
-        f"[0:a]adelay={delay}|{delay},volume={VIDEO_TTS_SPEECH_VOLUME},apad,atrim=0:{duration:.3f}[a]",
-        "-map", "[a]",
-        "-ar", "16000",
-        "-ac", "1",
-        "-c:a", "pcm_s16le",
-        str(output_path),
-    ])
-
-
 def mix_video_with_tts(video_path: Path, speech_path: Path, output_path: Path) -> None:
     delay = max(0, int(VIDEO_TTS_DELAY_MS))
     if video_has_audio(video_path):
@@ -434,31 +460,6 @@ def mix_video_with_tts(video_path: Path, speech_path: Path, output_path: Path) -
         "-movflags", "+faststart",
         str(output_path),
     ])
-
-
-def run_wav2lip(video_path: Path, audio_path: Path, output_path: Path) -> None:
-    if not WAV2LIP_CHECKPOINT.exists():
-        raise FileNotFoundError(f"Wav2Lip checkpoint not found: {WAV2LIP_CHECKPOINT}")
-    if not (WAV2LIP_DIR / "inference.py").exists():
-        raise FileNotFoundError(f"Wav2Lip inference.py not found in {WAV2LIP_DIR}")
-
-    (WAV2LIP_DIR / "temp").mkdir(parents=True, exist_ok=True)
-    numba_cache_dir = TMP_DIR / "numba_cache"
-    numba_cache_dir.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["NUMBA_CACHE_DIR"] = str(numba_cache_dir.resolve())
-    run_cmd([
-        WAV2LIP_PYTHON,
-        "inference.py",
-        "--checkpoint_path", str(WAV2LIP_CHECKPOINT),
-        "--face", str(video_path.resolve()),
-        "--audio", str(audio_path.resolve()),
-        "--outfile", str(output_path.resolve()),
-        "--pads", "0", "10", "0", "0",
-        "--face_det_batch_size", "1",
-        "--wav2lip_batch_size", "16",
-        "--resize_factor", "1",
-    ], cwd=WAV2LIP_DIR, timeout=WAV2LIP_TIMEOUT, env=env)
 
 
 # ============================================================
@@ -496,8 +497,6 @@ def blank_media() -> dict[str, Any]:
 
 
 def mode_max_seconds(mode: str) -> int:
-    if mode == "talk":
-        return TALK_MAX_SECONDS
     return MAX_SECONDS
 
 
@@ -515,7 +514,7 @@ def initial_state() -> dict[str, Any]:
         "max_side": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["max_side"],
         "video_fps": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["video_fps"],
         "video_source": blank_media(),
-        "image_refs": [blank_media(), blank_media(), blank_media()],
+        "duo_photos": [blank_media(), blank_media()],
         "video_loras": [],
     }
 
@@ -524,10 +523,12 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     if "job_state" not in context.user_data:
         context.user_data["job_state"] = initial_state()
     st = context.user_data["job_state"]
-    if st.get("mode") == "director":
+    if st.get("mode") in {"director", "talk"}:
         st["mode"] = "video"
     if "video_loras" not in st:
         st["video_loras"] = []
+    if "duo_photos" not in st:
+        st["duo_photos"] = [blank_media(), blank_media()]
     if "quality" not in st:
         st["quality"] = quality_label(int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"]))
     preset = quality_preset(st.get("quality")) or QUALITY_PRESETS["medium"]
@@ -561,8 +562,6 @@ def refresh_media_size(media: dict[str, Any], max_side: int) -> None:
 def refresh_all_sizes(st: dict[str, Any]) -> None:
     max_side = int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"])
     refresh_media_size(st.get("video_source") or {}, max_side)
-    for media in st.get("image_refs") or []:
-        refresh_media_size(media, max_side)
 
 
 def get_media_library(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, Any]]:
@@ -676,15 +675,20 @@ def main_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("🎬 Video", callback_data="mode:video"),
-                InlineKeyboardButton("🗣 Talk", callback_data="mode:talk"),
-                InlineKeyboardButton("🖼 Image", callback_data="mode:image"),
+                InlineKeyboardButton("✏️ Edit Photo", callback_data="mode:image"),
+            ],
+            [
+                InlineKeyboardButton("🧪 LTX Sulphur", callback_data="mode:ltx_sulphur"),
+                InlineKeyboardButton("🔥 LTX Eros", callback_data="mode:ltx_eros"),
+            ],
+            [
+                InlineKeyboardButton("🎨 MopMix", callback_data="mode:mopmix"),
+                InlineKeyboardButton("👯 MopMix Duo", callback_data="mode:mopmix_duo"),
             ],
             [
                 InlineKeyboardButton("L", callback_data="quality:low"),
                 InlineKeyboardButton("M", callback_data="quality:medium"),
                 InlineKeyboardButton("H", callback_data="quality:high"),
-            ],
-            [
                 InlineKeyboardButton("➖2s", callback_data="sec:-2"),
                 InlineKeyboardButton("➕2s", callback_data="sec:+2"),
             ],
@@ -694,18 +698,12 @@ def main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("30x", callback_data="repeat:30"),
             ],
             [
-                InlineKeyboardButton("📋 Status", callback_data="show:status"),
                 InlineKeyboardButton("📷 Recent photos", callback_data="media:list"),
                 InlineKeyboardButton("🎚 LoRA", callback_data="lora:list"),
-            ],
-            [
                 InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
             ],
             [
-                InlineKeyboardButton("⛔ Stop", callback_data="queue:stop"),
-                InlineKeyboardButton("🚮 Clear queue", callback_data="queue:clear"),
-            ],
-            [
+                InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
                 InlineKeyboardButton("🚀 Generate", callback_data="do:go"),
             ],
         ]
@@ -846,20 +844,25 @@ def media_line(m: dict[str, Any]) -> str:
 
 def help_text(st: dict[str, Any]) -> str:
     prompt_preview = short_preview(st.get("prompt") or "—", 180)
-    refs = st["image_refs"]
 
     return (
         "Бот готов.\n\n"
         "Режимы:\n"
         "• video: 1 фото + промт + секунды + звук MMAudio\n"
-        "• talk: обычное video + речевой аудиотрек из реплики\n"
-        "• image: до 3 фото + промт\n\n"
+        "• ltx_sulphur: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 Sulphur)\n"
+        "• ltx_eros: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 10Eros)\n"
+        "• image: 1 фото + промт-редактирование (поменять одежду/тело/фон/добавить или убрать кого-то, Qwen-Image-Edit)\n"
+        "• mopmix: 1 фото + промт + качество → картинка img2img (SDXL + face detailer)\n"
+        "• mopmix_duo: 2 фото (лица) + промт → сцена с обоими лицами (face swap)\n\n"
         "Команды:\n"
         "/video — обычный photo → video\n"
-        "/talk — обычное video + speech audio\n"
-        "/image — photo → image\n"
+        "/ltxsulphur — photo → video+audio (LTX2.3 Sulphur)\n"
+        "/ltxeros — photo → video+audio (LTX2.3 10Eros)\n"
+        "/image — photo → редактирование фото по промту\n"
+        "/mopmix — photo → img2img картинка (MopMix BigASP 2.5)\n"
+        "/mopmixduo — 2 фото → сцена с обоими лицами (face swap)\n"
         "/prompt текст — сохранить промт\n"
-        f"/seconds 8 — video до {MAX_SECONDS} сек, talk до {TALK_MAX_SECONDS} сек\n"
+        f"/seconds 8 — video/ltx_sulphur/ltx_eros до {MAX_SECONDS} сек\n"
         "/quality low|medium|high\n"
         "/repeat 1\n"
         "/loras — выбрать LoRA для обычного video\n"
@@ -875,9 +878,8 @@ def help_text(st: dict[str, Any]) -> str:
         f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
         f"• video TTS: {'on' if VIDEO_TTS else 'off'}\n"
         f"• video source: {media_line(st['video_source'])}\n"
-        f"• image ref #1: {media_line(refs[0])}\n"
-        f"• image ref #2: {media_line(refs[1])}\n"
-        f"• image ref #3: {media_line(refs[2])}\n"
+        f"• duo фото A: {media_line(st['duo_photos'][0])}\n"
+        f"• duo фото B: {media_line(st['duo_photos'][1])}\n"
         f"• prompt: {prompt_preview}"
     )
 
@@ -1090,65 +1092,283 @@ def patch_video_workflow(
     return wf
 
 
-def patch_image_workflow(
-    wf: dict[str, Any],
+def build_image_edit_workflow(
     *,
+    image_name: str,
     prompt: str,
-    image_names: list[str],
+    width: int,
+    height: int,
     seed: int,
 ) -> dict[str, Any]:
-    wf = json.loads(json.dumps(wf))
+    """Qwen-Image-Edit: conditions on the source photo via cross-attention and edits only
+    what the prompt asks for, instead of redrawing the whole image like img2img-from-noise."""
+    return {
+        "72": {"class_type": "CLIPLoader", "inputs": {"clip_name": IMAGE_EDIT_QWEN_CLIP, "type": "qwen_image"}},
+        "71": {"class_type": "VAELoader", "inputs": {"vae_name": IMAGE_EDIT_QWEN_VAE}},
+        "73": {"class_type": "UNETLoader", "inputs": {"unet_name": IMAGE_EDIT_QWEN_UNET, "weight_dtype": "default"}},
+        "67": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["73", 0], "shift": IMAGE_EDIT_SHIFT}},
+        "41": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "68": {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"clip": ["72", 0], "prompt": prompt, "vae": ["71", 0], "image1": ["41", 0]},
+        },
+        "69": {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"clip": ["72", 0], "prompt": "", "vae": ["71", 0], "image1": ["41", 0]},
+        },
+        "66": {"class_type": "EmptySD3LatentImage", "inputs": {"width": int(width), "height": int(height), "batch_size": 1}},
+        "65": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["67", 0],
+                "seed": int(seed),
+                "steps": IMAGE_EDIT_STEPS,
+                "cfg": IMAGE_EDIT_CFG,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "positive": ["68", 0],
+                "negative": ["69", 0],
+                "latent_image": ["66", 0],
+                "denoise": 1,
+            },
+        },
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["65", 0], "vae": ["71", 0]}},
+        "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "tg_image_edit"}},
+    }
 
-    wf["435"]["inputs"]["value"] = prompt
-    wf["433:3"]["inputs"]["seed"] = int(seed)
 
-    if len(image_names) >= 1:
-        wf["78"]["inputs"]["image"] = image_names[0]
-    if len(image_names) >= 2:
-        wf["436"]["inputs"]["image"] = image_names[1]
-    if len(image_names) >= 3:
-        wf["437"]["inputs"]["image"] = image_names[2]
-
-    return wf
-
-
-def patch_multitalk_workflow(
+def patch_ltx_sulphur_workflow(
     wf: dict[str, Any],
     *,
     prompt: str,
     image_name: str,
-    audio_name: str,
     width: int,
     height: int,
     seconds: int,
     seed: int,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
-    fps = max(1, int(MULTITALK_FPS))
-    frame_count = max(1, int(seconds) * fps + 1)
+    wf["28"]["inputs"]["text"] = prompt
+    wf["15"]["inputs"]["image"] = image_name
+    wf["19"]["inputs"]["Xi"] = int(width)
+    wf["19"]["inputs"]["Xf"] = int(width)
+    wf["181"]["inputs"]["Xi"] = int(height)
+    wf["181"]["inputs"]["Xf"] = int(height)
+    wf["18"]["inputs"]["Xi"] = int(seconds)
+    wf["18"]["inputs"]["Xf"] = int(seconds)
+    wf["125"]["inputs"]["seed"] = int(seed) % 1_125_899_906_842_624
+    if "163" in wf:
+        cleanup_inputs = wf["163"]["inputs"]
+        if "anything" in cleanup_inputs:
+            cleanup_inputs["input"] = cleanup_inputs.pop("anything")
+        cleanup_inputs["cleanup_mode"] = "Cache Only"
+    return wf
 
-    wf["1"]["inputs"]["image"] = image_name
-    wf["2"]["inputs"]["width"] = int(width)
-    wf["2"]["inputs"]["height"] = int(height)
-    wf["3"]["inputs"]["audio"] = audio_name
-    wf["5"]["inputs"]["num_frames"] = frame_count
-    wf["5"]["inputs"]["fps"] = float(fps)
-    wf["5"]["inputs"]["audio_scale"] = float(MULTITALK_AUDIO_SCALE)
-    wf["5"]["inputs"]["audio_cfg_scale"] = float(MULTITALK_AUDIO_CFG_SCALE)
-    wf["9"]["inputs"]["width"] = int(width)
-    wf["9"]["inputs"]["height"] = int(height)
-    wf["9"]["inputs"]["frame_window_size"] = min(81, max(17, ((frame_count - 1) // 4) * 4 + 1))
-    wf["10"]["inputs"]["lora"] = MULTITALK_LORA
-    wf["10"]["inputs"]["strength"] = float(MULTITALK_LORA_STRENGTH)
-    wf["14"]["inputs"]["positive_prompt"] = f"{prompt}\n\n{VIDEO_NO_TEXT_PROMPT}"
-    negative_text = wf["14"]["inputs"].get("negative_prompt", "")
-    if VIDEO_NO_TEXT_NEGATIVE not in negative_text:
-        wf["14"]["inputs"]["negative_prompt"] = f"{negative_text}, {VIDEO_NO_TEXT_NEGATIVE}"
-    wf["15"]["inputs"]["steps"] = int(MULTITALK_STEPS)
-    wf["15"]["inputs"]["cfg"] = float(MULTITALK_CFG)
-    wf["15"]["inputs"]["shift"] = float(MULTITALK_SHIFT)
-    wf["15"]["inputs"]["seed"] = int(seed)
-    wf["17"]["inputs"]["frame_rate"] = float(fps)
+
+FLORENCE2_MODEL = os.getenv("FLORENCE2_CAPTION_MODEL", "microsoft/Florence-2-large")
+CAPTION_TIMEOUT = int(os.getenv("CAPTION_TIMEOUT", "120"))
+CAPTION_SCENE_KEYWORDS = (
+    "background", "standing in", "sitting in", "kitchen", "street", "wall",
+    "room", "building", "indoor", "outdoor", "in front of", "taken in", "setting",
+)
+
+
+def strip_scene_details(caption: str) -> str:
+    """Florence's caption mixes appearance with background/location ('standing in a
+    kitchen'), which then competes with the actual requested scene in the final prompt.
+    Strip location/background clauses, keep clothing/hair/age clauses."""
+    caption = re.sub(
+        r"^(the image (is|shows)\s*)?(a |an )?(selfie|portrait|photo|picture)\s+of\s+",
+        "", caption, flags=re.IGNORECASE,
+    )
+    sentences = re.split(r"(?<=[.!?])\s+", caption)
+    kept_sentences = []
+    for sentence in sentences:
+        clauses = re.split(r",\s+| and (?=\w)", sentence)
+        kept_clauses = [c for c in clauses if not any(kw in c.lower() for kw in CAPTION_SCENE_KEYWORDS)]
+        if kept_clauses:
+            kept_sentences.append(", ".join(kept_clauses))
+    return ". ".join(s.strip(" .") for s in kept_sentences if s.strip(" ."))
+
+
+def build_caption_workflow(image_name: str) -> dict[str, Any]:
+    return {
+        "1": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "2": {
+            "class_type": "DownloadAndLoadFlorence2Model",
+            "inputs": {"model": FLORENCE2_MODEL, "precision": "fp16", "attention": "sdpa"},
+        },
+        "3": {
+            "class_type": "Florence2Run",
+            "inputs": {
+                "image": ["1", 0],
+                "florence2_model": ["2", 0],
+                "text_input": "",
+                "task": "more_detailed_caption",
+                "fill_mask": True,
+                "keep_model_loaded": False,
+                "max_new_tokens": 256,
+                "num_beams": 3,
+                "do_sample": True,
+                "seed": 1,
+            },
+        },
+        "4": {"class_type": "ShowText|pysssss", "inputs": {"text": ["3", 2]}},
+    }
+
+
+def caption_photo(local_path: str, name_hint: str) -> str:
+    """Describe a photo's subject (age impression, body type, hair, clothing) via Florence-2,
+    so MopMix Duo's prompt can fight the checkpoint's own bias (which skews young/athletic)
+    instead of relying on img2img denoise alone to carry those traits through."""
+    try:
+        uploaded = upload_image_to_comfy(local_path, name_hint)
+        prompt_id = queue_prompt(build_caption_workflow(uploaded), str(uuid.uuid4()))
+        deadline = time.time() + CAPTION_TIMEOUT
+        while time.time() < deadline:
+            history = get_history(prompt_id)
+            item = history.get(prompt_id)
+            if item and item.get("outputs"):
+                texts = item["outputs"].get("4", {}).get("text") or []
+                if texts:
+                    return strip_scene_details(str(texts[0]).strip())
+                return ""
+            time.sleep(POLL_SECONDS)
+    except Exception:
+        log.warning("Photo captioning failed, continuing without it", exc_info=True)
+    return ""
+
+
+def translate_to_english(text: str) -> str:
+    """MopMix's SDXL checkpoint uses a plain CLIPTextEncode (English-only training data);
+    non-English prompts produce near-random conditioning instead of following the request.
+    LTX Sulphur/Eros use LLM-based multilingual text encoders and don't need this."""
+    try:
+        translated = GoogleTranslator(source="auto", target="en").translate(text)
+        return translated or text
+    except Exception:
+        log.warning("Prompt translation failed, using original text", exc_info=True)
+        return text
+
+
+def patch_mopmix_workflow(
+    wf: dict[str, Any],
+    *,
+    prompt: str,
+    resolution: str,
+    image_name: str,
+    seed: int,
+    denoise: float = MOPMIX_DENOISE,
+) -> dict[str, Any]:
+    wf = json.loads(json.dumps(wf))
+    wf["109"]["inputs"]["text"] = prompt
+    wf["18"]["inputs"]["resolution"] = resolution
+    wf["300"]["inputs"]["image"] = image_name
+
+    # img2img: node 168 (high-noise KSamplerAdvanced) now starts from the photo's encoded
+    # latent (node 302) instead of an empty one; partially skip its own step schedule so
+    # the photo survives instead of being fully redrawn from noise.
+    steps = int(wf["168"]["inputs"]["steps"])
+    wf["168"]["inputs"]["start_at_step"] = max(0, min(steps - 1, round(steps * (1 - float(denoise)))))
+
+    seed = int(seed)
+    wf["168"]["inputs"]["noise_seed"] = seed
+    wf["169"]["inputs"]["noise_seed"] = seed
+    wf["170"]["inputs"]["seed"] = seed
+    wf["193:137"]["inputs"]["seed"] = seed + 1
+    wf["194:160"]["inputs"]["seed"] = seed + 2
+    return wf
+
+
+def patch_mopmix_duo_workflow(
+    wf: dict[str, Any],
+    *,
+    prompt: str,
+    resolution: str,
+    image_name_a: str,
+    image_name_b: str,
+    composite_image_name: str,
+    seed: int,
+    denoise: float = MOPMIX_DUO_DENOISE,
+) -> dict[str, Any]:
+    wf = json.loads(json.dumps(wf))
+    wf["109"]["inputs"]["text"] = prompt
+    wf["18"]["inputs"]["resolution"] = resolution
+    wf["300"]["inputs"]["image"] = composite_image_name
+    wf["400"]["inputs"]["image"] = image_name_a
+    wf["401"]["inputs"]["image"] = image_name_b
+
+    # img2img from the two-photo composite (node 300/301/302) instead of an empty latent, so
+    # body/hair/age/clothing come from the real photos; ReActor below only fine-tunes faces.
+    steps = int(wf["168"]["inputs"]["steps"])
+    wf["168"]["inputs"]["start_at_step"] = max(0, min(steps - 1, round(steps * (1 - float(denoise)))))
+
+    for node_id in ("402", "403"):
+        inputs = wf[node_id]["inputs"]
+        inputs["swap_model"] = REACTOR_SWAP_MODEL
+        inputs["facedetection"] = REACTOR_FACE_DETECTION
+        inputs["face_restore_model"] = REACTOR_FACE_RESTORE_MODEL
+
+    seed = int(seed)
+    wf["168"]["inputs"]["noise_seed"] = seed
+    wf["169"]["inputs"]["noise_seed"] = seed
+    wf["170"]["inputs"]["seed"] = seed
+    wf["193:137"]["inputs"]["seed"] = seed + 1
+    wf["194:160"]["inputs"]["seed"] = seed + 2
+    return wf
+
+
+def patch_ltx_eros_workflow(
+    wf: dict[str, Any],
+    *,
+    prompt: str,
+    image_name: str,
+    width: int,
+    height: int,
+    seconds: int,
+    seed: int,
+) -> dict[str, Any]:
+    wf = json.loads(json.dumps(wf))
+
+    wf["990"]["inputs"]["ckpt_name"] = "10Eros_v1.2_fp8mixed_learned.safetensors"
+    wf["988"]["inputs"]["lora_name"] = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
+    wf["971"]["inputs"]["clip_name1"] = LTX_EROS_CLIP_NAME1
+
+    wf["791"]["inputs"]["Xi"] = int(width)
+    wf["791"]["inputs"]["Xf"] = int(width)
+    wf["792"]["inputs"]["Xi"] = int(height)
+    wf["792"]["inputs"]["Xf"] = int(height)
+    wf["796"]["inputs"]["Xi"] = int(seconds)
+    wf["796"]["inputs"]["Xf"] = int(seconds)
+
+    wf["1053"]["inputs"]["image_paths"] = "\n".join([image_name] * 4)
+
+    fps = 24
+    max_frames = int(seconds) * fps + 1
+    wf["1048"]["inputs"]["global_prompt"] = prompt
+    wf["1048"]["inputs"]["max_frames"] = max_frames
+    wf["1048"]["inputs"]["timeline_data"] = json.dumps(
+        {"segments": [{"prompt": prompt, "length": max_frames, "color": "#4f8edc"}]}
+    )
+    wf["1048"]["inputs"]["local_prompts"] = prompt
+    wf["1048"]["inputs"]["segment_lengths"] = str(max_frames)
+
+    # Only one distinct source photo is available (duplicated into all 4 MultiImageLoader
+    # slots), so re-inserting it as a keyframe partway through/near the end just re-anchors
+    # the video to the static photo and produces a visible snap-back/jump-cut. Keep only the
+    # first keyframe (the actual img2img starting frame) active; disable the rest so the
+    # video is driven continuously by the prompt instead of repeatedly reverting to the photo.
+    keyframe_seconds = [
+        min(int(seconds), round(p * int(seconds) / LTX_EROS_KEYFRAME_DEFAULT_SECONDS))
+        for p in LTX_EROS_KEYFRAME_SECONDS
+    ]
+    for node_id in ("1132", "889:1054", "906:1059"):
+        for i, sec in enumerate(keyframe_seconds, start=1):
+            wf[node_id]["inputs"][f"insert_second_{i}"] = sec
+            if i > 1:
+                wf[node_id]["inputs"][f"strength_{i}"] = 0.0
+
+    wf["524"]["inputs"]["seed"] = int(seed) % 1_125_899_906_842_624
     return wf
 
 
@@ -1181,23 +1401,32 @@ def pick_required_result_from_outputs(outputs, preferred_node: str, keys: tuple[
 async def pick_result_from_history(prompt_id: str, mode: str) -> dict[str, Any] | None:
     history = await asyncio.to_thread(get_history, prompt_id)
     item = history.get(prompt_id)
-    if not item or not item.get("outputs"):
+    if not item:
         return None
-
-    outputs = item["outputs"]
-    required_outputs = {}
-    if mode in required_outputs:
-        preferred_node, keys = required_outputs[mode]
-        return pick_required_result_from_outputs(outputs, preferred_node, keys)
 
     preferred_nodes = {
         "video": "314",
-        "talk": "314",
-        "image": "60",
+        "ltx_sulphur": "61",
+        "ltx_eros": "1135:597",
+        "image": "9",
+        "mopmix": "128",
+        "mopmix_duo": "128",
     }
-    preferred_node = preferred_nodes.get(mode, "60")
+    preferred_node = preferred_nodes.get(mode, "9")
 
-    return pick_first_result_from_outputs(outputs, preferred_node=preferred_node)
+    outputs = item.get("outputs") or {}
+    result = pick_required_result_from_outputs(outputs, preferred_node, ("videos", "images", "gifs"))
+    if result is not None:
+        return result
+
+    status = item.get("status") or {}
+    if status.get("status_str") == "error" or status.get("completed"):
+        # The prompt finished (or errored) without ever producing the expected output node -
+        # e.g. a mid-generation crash (OOM, etc). Don't silently fall back to some unrelated
+        # node's leftover/partial file; surface a real failure instead.
+        raise RuntimeError(f"ComfyUI prompt {prompt_id} finished without node {preferred_node} (status={status.get('status_str')})")
+
+    return None
 
 
 def clear_directory_safe(path: Path, max_age_sec=120):
@@ -1377,36 +1606,113 @@ async def run_video_tts_postprocess(blob: bytes, meta: dict[str, Any], filename:
                 pass
 
 
-async def run_talk_lipsync_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
-    speech_text = meta.get("speech_text") or extract_speech_text(meta.get("prompt") or "")
-    if not speech_text:
-        return None
+MODE_DISPLAY_NAMES = {
+    "video": "Video",
+    "image": "Edit Photo",
+    "ltx_sulphur": "LTX Sulphur",
+    "ltx_eros": "LTX Eros",
+    "mopmix": "MopMix",
+    "mopmix_duo": "MopMix Duo",
+}
 
-    video_path = TMP_DIR / f"tg_talk_video_{uuid.uuid4().hex}.mp4"
-    speech_path = TMP_DIR / f"tg_talk_speech_{uuid.uuid4().hex}.mp3"
-    lipsync_audio_path = TMP_DIR / f"tg_talk_lipsync_audio_{uuid.uuid4().hex}.wav"
-    lipsync_video_path = TMP_DIR / f"tg_talk_lipsync_video_{uuid.uuid4().hex}.mp4"
-    lipsync_path = TMP_DIR / f"tg_talk_lipsync_{uuid.uuid4().hex}.mp4"
-    mixed_path = TMP_DIR / f"tg_talk_tts_{uuid.uuid4().hex}.mp4"
+
+def format_eta(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"~{seconds} сек"
+    minutes, sec = divmod(seconds, 60)
+    return f"~{minutes} мин {sec} сек" if sec else f"~{minutes} мин"
+
+
+def job_status_text(meta: dict[str, Any], *, started: bool) -> str:
+    mode_label = MODE_DISPLAY_NAMES.get(meta.get("mode"), meta.get("mode") or "")
+    batch_index = meta.get("batch_index", 1)
+    batch_total = meta.get("batch_total", 1)
+    position = f" {batch_index}/{batch_total}" if batch_total > 1 else ""
+    header = f"🔄 Генерация{position}: {mode_label}"
+    avg = MODE_AVG_DURATION.get(meta.get("mode"), 120.0)
+    if not started:
+        return f"{header}\nОжидаемое время: {format_eta(avg)}"
+    elapsed = time.time() - meta.get("started_at", time.time())
+    remaining = max(0.0, avg - elapsed)
+    return f"{header}\nПрошло: {format_eta(elapsed)} · Осталось: {format_eta(remaining)}"
+
+
+async def update_chat_status(bot, chat_id: int, text: str) -> None:
+    entry = CHAT_STATUS.setdefault(chat_id, {})
+    if entry.get("message_id"):
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=entry["message_id"], text=text)
+            return
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                return
+            entry["message_id"] = None
     try:
-        save_bytes(video_path, blob)
-        await asyncio.to_thread(synthesize_speech, speech_text, speech_path)
+        msg = await bot.send_message(chat_id=chat_id, text=text)
+        entry["message_id"] = msg.message_id
+    except Exception:
+        log.exception("Failed to send status message to chat %s", chat_id)
 
-        if TALK_LIPSYNC:
-            duration = await asyncio.to_thread(media_duration_seconds, video_path)
-            await asyncio.to_thread(build_lipsync_audio_track, speech_path, lipsync_audio_path, duration)
-            wav2lip_video_path = await asyncio.to_thread(upscale_video_for_lipsync, video_path, lipsync_video_path)
-            await asyncio.to_thread(run_wav2lip, wav2lip_video_path, lipsync_audio_path, lipsync_path)
-            return lipsync_path.read_bytes(), lipsync_path.name
 
-        await asyncio.to_thread(mix_video_with_tts, video_path, speech_path, mixed_path)
-        return mixed_path.read_bytes(), mixed_path.name
-    finally:
-        for path in (video_path, speech_path, lipsync_audio_path, lipsync_video_path, lipsync_path, mixed_path):
+async def delete_chat_status_message(bot, chat_id: int) -> None:
+    """Drop the tracked status message without replacing it, so the next update_chat_status
+    call sends a fresh message instead of editing one stuck above newer chat content (Telegram
+    can't move a message - only delete+resend keeps the status pinned to the bottom)."""
+    entry = CHAT_STATUS.get(chat_id)
+    if not entry:
+        return
+    msg_id = entry.pop("message_id", None)
+    if msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+
+
+async def cleanup_chat_status(bot, chat_id: int) -> None:
+    """Remove leftover artifacts from the previous generation cycle (the status message and
+    the post-completion menu) before starting a new one, so the chat doesn't accumulate trace
+    messages and the new status lands at the bottom instead of editing a stale, scrolled-away one."""
+    await delete_chat_status_message(bot, chat_id)
+    entry = CHAT_STATUS.get(chat_id)
+    if not entry:
+        return
+    menu_message_id = entry.pop("menu_message_id", None)
+    if menu_message_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=menu_message_id)
+        except Exception:
+            pass
+
+
+async def finish_chat_status(bot, chat_id: int, text: str, *, show_menu: bool) -> None:
+    await update_chat_status(bot, chat_id, text)
+    if show_menu:
+        entry = CHAT_STATUS.setdefault(chat_id, {})
+        old_menu_id = entry.pop("menu_message_id", None)
+        if old_menu_id:
             try:
-                path.unlink(missing_ok=True)
+                await bot.delete_message(chat_id=chat_id, message_id=old_menu_id)
             except Exception:
                 pass
+        try:
+            msg = await bot.send_message(chat_id=chat_id, text="Готово! Выбери режим:", reply_markup=main_keyboard())
+            entry["menu_message_id"] = msg.message_id
+        except Exception:
+            log.exception("Failed to send menu to chat %s", chat_id)
+
+
+def workflow_info_line(meta: dict[str, Any]) -> str:
+    label = MODE_DISPLAY_NAMES.get(meta.get("mode"), meta.get("mode") or "")
+    parts = [label]
+    seconds = meta.get("seconds")
+    if seconds:
+        parts.append(f"{seconds}с")
+    quality = meta.get("quality")
+    if quality:
+        parts.append(str(quality))
+    return " · ".join(p for p in parts if p)
 
 
 async def send_result(app: Application, meta: dict[str, Any], result: dict[str, Any]) -> None:
@@ -1421,7 +1727,7 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
 
     if (
         VIDEO_AUDIO
-        and meta.get("mode") == "video"
+        and meta.get("mode") in SILENT_VIDEO_MODES
         and filename.lower().endswith((".mp4", ".mov", ".webm"))
     ):
         try:
@@ -1433,26 +1739,8 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
             log.exception("MMAudio postprocess failed; sending original silent video")
 
     if (
-        meta.get("mode") == "talk"
-        and meta.get("speech_overlay")
-        and filename.lower().endswith((".mp4", ".mov", ".webm"))
-    ):
-        try:
-            processed = await run_talk_lipsync_postprocess(blob, meta, filename)
-            if processed:
-                blob, filename = processed
-                log.info("Talk lipsync postprocess applied for job #%s", meta.get("job_id"))
-        except Exception:
-            log.exception("Talk lipsync failed; falling back to TTS overlay")
-            try:
-                processed = await run_video_tts_postprocess(blob, meta, filename)
-                if processed:
-                    blob, filename = processed
-            except Exception:
-                log.exception("TTS fallback failed; sending original talk video")
-    elif (
-        (VIDEO_TTS or meta.get("speech_overlay"))
-        and meta.get("mode") in {"video", "talk"}
+        VIDEO_TTS
+        and meta.get("mode") in SILENT_VIDEO_MODES
         and filename.lower().endswith((".mp4", ".mov", ".webm"))
     ):
         try:
@@ -1465,9 +1753,11 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
 
     prompt_text = (meta.get("prompt") or "").strip()
 
-    caption = "Готово."
-    if prompt_text:
-        caption = f"Готово.\n\n{prompt_text}"[:MAX_CAPTION]
+    caption = prompt_text or ""
+    info_line = workflow_info_line(meta)
+    if info_line:
+        caption = f"{caption}\n\n{info_line}" if caption else info_line
+    caption = caption[:MAX_CAPTION]
 
     input_audio_name = meta.get("input_audio_name")
     if input_audio_name:
@@ -1495,7 +1785,7 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
         await asyncio.to_thread(clear_directory_safe, COMFY_OUTPUT_DIR)
         return
 
-    if meta["mode"] in {"video", "talk"}:
+    if meta["mode"] in VIDEO_MODES:
         if not filename.lower().endswith((".mp4", ".mov", ".webm", ".gif")):
             filename += ".mp4"
             bio.name = filename
@@ -1538,16 +1828,43 @@ async def monitor_loop(app: Application) -> None:
 
         for prompt_id, meta in list(ACTIVE_PROMPTS.items()):
             try:
-                history = await asyncio.to_thread(get_history, prompt_id)
-                item = history.get(prompt_id)
-                if not item or not item.get("outputs"):
+                if "started_at" in meta:
+                    now = time.time()
+                    if now - meta.get("last_status_edit", 0.0) >= STATUS_UPDATE_INTERVAL:
+                        meta["last_status_edit"] = now
+                        await update_chat_status(app.bot, meta["chat_id"], job_status_text(meta, started=True))
+
+                try:
+                    result = await pick_result_from_history(prompt_id, meta["mode"])
+                except Exception as e:
+                    log.exception("Prompt %s failed", prompt_id)
+                    done_ids.append(prompt_id)
+                    try:
+                        await app.bot.send_message(meta["chat_id"], f"⚠️ Генерация не удалась: {e}")
+                    except Exception:
+                        pass
+                    if meta.get("batch_index", 1) == meta.get("batch_total", 1):
+                        await finish_chat_status(app.bot, meta["chat_id"], "⚠️ Завершено с ошибкой.", show_menu=True)
+                    else:
+                        await delete_chat_status_message(app.bot, meta["chat_id"])
                     continue
 
-                result = await pick_result_from_history(prompt_id, meta["mode"])
                 if result is None:
                     continue
+                # Drop the status message before delivering the photo/video so it doesn't end
+                # up stuck above the new content; it gets recreated fresh at the bottom below.
+                await delete_chat_status_message(app.bot, meta["chat_id"])
                 await send_result(app, meta, result)
                 done_ids.append(prompt_id)
+
+                if "started_at" in meta:
+                    duration = time.time() - meta["started_at"]
+                    prev_avg = MODE_AVG_DURATION.get(meta["mode"], duration)
+                    MODE_AVG_DURATION[meta["mode"]] = 0.7 * prev_avg + 0.3 * duration
+
+                if meta.get("batch_index", 1) == meta.get("batch_total", 1):
+                    mode_label = MODE_DISPLAY_NAMES.get(meta["mode"], meta["mode"])
+                    await finish_chat_status(app.bot, meta["chat_id"], f"✅ Готово: {mode_label}", show_menu=True)
 
             except Exception:
                 log.exception("Monitor error for %s", prompt_id)
@@ -1571,21 +1888,44 @@ async def submit_worker_loop(app: Application) -> None:
             await asyncio.sleep(POLL_SECONDS)
 
         job = await GEN_QUEUE.get()
+        await update_chat_status(
+            app.bot, job.chat_id,
+            job_status_text(
+                {"mode": job.mode, "batch_index": job.batch_index, "batch_total": job.batch_total},
+                started=False,
+            ),
+        )
         try:
             if job.mode == "video":
                 await submit_video_job(app, job)
-            elif job.mode == "talk":
-                await submit_multitalk_job(app, job)
+            elif job.mode == "ltx_sulphur":
+                await submit_ltx_sulphur_job(app, job)
+            elif job.mode == "ltx_eros":
+                await submit_ltx_eros_job(app, job)
             elif job.mode == "image":
                 await submit_image_job(app, job)
+            elif job.mode == "mopmix":
+                await submit_mopmix_job(app, job)
+            elif job.mode == "mopmix_duo":
+                await submit_mopmix_duo_job(app, job)
             else:
                 raise RuntimeError(f"Unknown job mode: {job.mode}")
+
+            for meta in ACTIVE_PROMPTS.values():
+                if meta.get("job_id") == job.job_id:
+                    meta["batch_index"] = job.batch_index
+                    meta["batch_total"] = job.batch_total
+                    meta["started_at"] = time.time()
+                    meta["last_status_edit"] = 0.0
+                    break
         except Exception as e:
             log.exception("Submit failed")
             try:
                 await app.bot.send_message(job.chat_id, f"Ошибка отправки задачи #{job.job_id}: {e}")
             except Exception:
                 pass
+            if job.batch_index == job.batch_total:
+                await finish_chat_status(app.bot, job.chat_id, "⚠️ Завершено с ошибкой.", show_menu=True)
         finally:
             GEN_QUEUE.task_done()
 
@@ -1677,13 +2017,22 @@ async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_ui_message(update.message, context, "Режим: photo → video", reply_markup=main_keyboard())
 
 
-async def talk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def ltx_sulphur_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update):
         return
     st = get_state(context)
-    st["mode"] = "talk"
+    st["mode"] = "ltx_sulphur"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-    await send_ui_message(update.message, context, "Режим: обычное video + speech audio", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Режим: photo → video+audio (LTX2.3 Sulphur)", reply_markup=main_keyboard())
+
+
+async def ltx_eros_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+    st = get_state(context)
+    st["mode"] = "ltx_eros"
+    st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
+    await send_ui_message(update.message, context, "Режим: photo → video+audio (LTX2.3 10Eros)", reply_markup=main_keyboard())
 
 
 async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1693,6 +2042,22 @@ async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     st["mode"] = "image"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
     await send_ui_message(update.message, context, "Режим: photo → image", reply_markup=main_keyboard())
+
+
+async def mopmix_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+    st = get_state(context)
+    st["mode"] = "mopmix"
+    await send_ui_message(update.message, context, "Режим: photo → img2img картинка (MopMix BigASP 2.5)", reply_markup=main_keyboard())
+
+
+async def mopmix_duo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+    st = get_state(context)
+    st["mode"] = "mopmix_duo"
+    await send_ui_message(update.message, context, "Режим: 2 фото → сцена с обоими лицами (face swap)", reply_markup=main_keyboard())
 
 
 async def loras_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1842,7 +2207,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     }
     remember_media(context, media)
 
-    if st["mode"] in {"video", "talk"}:
+    if st["mode"] in SINGLE_PHOTO_MODES:
         st["video_source"] = media
         await send_ui_message(
             update.message,
@@ -1852,27 +2217,15 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    placed = False
-    for i in range(MAX_REFS_FOR_IMAGE):
-        if not st["image_refs"][i].get("path"):
-            st["image_refs"][i] = media
-            await send_ui_message(
-                update.message,
-                context,
-                f"Фото #{i + 1} для image сохранено: {width}×{height} → {fit_w}×{fit_h}",
-                reply_markup=main_keyboard(),
-            )
-            placed = True
-            break
-
-    if not placed:
-        st["image_refs"][MAX_REFS_FOR_IMAGE - 1] = media
-        await send_ui_message(
-            update.message,
-            context,
-            "Слоты image уже заполнены. Я заменил 3-е фото новым.",
-            reply_markup=main_keyboard(),
-        )
+    duo = st["duo_photos"]
+    slot = 0 if not duo[0].get("path") else 1
+    duo[slot] = media
+    await send_ui_message(
+        update.message,
+        context,
+        f"Фото лица {'A' if slot == 0 else 'B'} сохранено: {width}×{height} → {fit_w}×{fit_h}",
+        reply_markup=main_keyboard(),
+    )
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2007,27 +2360,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await replace_ui_message_from_callback(query, context, "Файл этого фото уже удалён с диска. Пришли его заново.", reply_markup=main_keyboard())
             return
 
+        if st["mode"] in DUO_PHOTO_MODES:
+            duo = st["duo_photos"]
+            slot = 0 if not duo[0].get("path") else 1
+            duo[slot] = media
+            await replace_ui_message_from_callback(
+                query, context, f"Фото лица {'A' if slot == 0 else 'B'} выбрано: {media_line(media)}", reply_markup=main_keyboard()
+            )
+            return
+
         st["video_source"] = media
         await replace_ui_message_from_callback(query, context, f"Базовое фото выбрано: {media_line(media)}", reply_markup=main_keyboard())
         return
 
-    if data == "queue:stop":
+    if data == "queue:stopclear":
         try:
             await asyncio.to_thread(interrupt_current)
             active_cleared = clear_active_prompts()
-            await replace_ui_message_from_callback(query, context, f"Текущая генерация остановлена.\nСброшено active prompt: {active_cleared}", reply_markup=main_keyboard())
-        except Exception as e:
-            await replace_ui_message_from_callback(query, context, f"Ошибка остановки: {e}", reply_markup=main_keyboard())
-        return
-
-    if data == "queue:clear":
-        try:
             comfy_resp = await asyncio.to_thread(clear_comfy_queue)
             local_cleared = clear_local_queue()
             await replace_ui_message_from_callback(
                 query,
                 context,
-                f"Очередь очищена.\n• локальных задач удалено: {local_cleared}\n• ответ ComfyUI: {comfy_resp}",
+                f"Остановлено и очищено.\n• active prompt сброшено: {active_cleared}\n"
+                f"• локальных задач удалено: {local_cleared}\n• ответ ComfyUI: {comfy_resp}",
                 reply_markup=main_keyboard(),
             )
         except Exception as e:
@@ -2082,16 +2438,13 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_ui_message(target, context, "Сначала задай промт.", reply_markup=main_keyboard())
         return
 
-    if st["mode"] in {"video", "talk"}:
+    if st["mode"] in SINGLE_PHOTO_MODES:
         if not st["video_source"].get("path"):
             await send_ui_message(target, context, f"Для {st['mode']} сначала пришли фото.", reply_markup=main_keyboard())
             return
-        if st["mode"] == "talk" and not extract_speech_text(st["prompt"]):
-            await send_ui_message(target, context, "Для talk нужна реплика в промте: например, говорит: привет", reply_markup=main_keyboard())
-            return
-    elif st["mode"] == "image":
-        if not any(x.get("path") for x in st["image_refs"]):
-            await send_ui_message(target, context, "Для image пришли хотя бы одно фото.", reply_markup=main_keyboard())
+    elif st["mode"] in DUO_PHOTO_MODES:
+        if not all(x.get("path") for x in st["duo_photos"]):
+            await send_ui_message(target, context, "Для mopmix_duo пришли два фото (лицо A и лицо B).", reply_markup=main_keyboard())
             return
     else:
         await send_ui_message(target, context, f"Неизвестный режим: {st['mode']}", reply_markup=main_keyboard())
@@ -2100,7 +2453,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     repeat = max(1, int(st.get("repeat", 1)))
     first_job_id = JOB_SEQ + 1
 
-    for _ in range(repeat):
+    for i in range(repeat):
         JOB_SEQ += 1
         job = Job(
             job_id=JOB_SEQ,
@@ -2112,39 +2465,38 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
             seed=make_seed(),
             video_source=copy.deepcopy(st["video_source"]),
-            image_refs=copy.deepcopy(st["image_refs"]),
+            duo_photos=copy.deepcopy(st["duo_photos"]),
             video_loras=list(st.get("video_loras") or []),
+            quality=(st.get("quality") or "medium").strip().lower(),
+            batch_index=i + 1,
+            batch_total=repeat,
         )
         await GEN_QUEUE.put(job)
 
-    await send_ui_message(
-        target,
-        context,
-        f"Добавлено задач: {repeat}. ID: #{first_job_id}–#{JOB_SEQ}. Сейчас в очереди: {GEN_QUEUE.qsize()}",
-        reply_markup=main_keyboard(),
+    ui = get_ui_state(context)
+    ui["last_ui_message_id"] = None
+    await cleanup_chat_status(context.bot, target.chat_id)
+    await update_chat_status(
+        context.bot,
+        target.chat_id,
+        f"🕐 В очереди: {repeat} задач(а). ID: #{first_job_id}–#{JOB_SEQ}.",
     )
 
 
 async def submit_image_job(app: Application, job: Job) -> None:
-    refs = [x for x in job.image_refs if x.get("path")]
-    if not refs:
-        raise RuntimeError("Для image нужно хотя бы одно фото.")
+    src = job.video_source
+    if not src or not src.get("path"):
+        raise RuntimeError("Для image сначала пришли фото.")
 
-    wf = await asyncio.to_thread(load_workflow, WORKFLOW_IMAGE)
+    width, height = IMAGE_EDIT_QUALITY.get(job.quality, IMAGE_EDIT_QUALITY["medium"])
+    target_w, target_h = fit_to_pixel_budget(src["orig_width"], src["orig_height"], width * height)
 
-    uploaded_names = []
-    for media in refs[:MAX_REFS_FOR_IMAGE]:
-        name = await asyncio.to_thread(upload_image_to_comfy, media["path"], media["name"])
-        uploaded_names.append(name)
-
-    while len(uploaded_names) < 3:
-        uploaded_names.append(uploaded_names[-1])
-
-    wf = await asyncio.to_thread(
-        patch_image_workflow,
-        wf,
+    uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+    wf = build_image_edit_workflow(
+        image_name=uploaded_name,
         prompt=job.prompt,
-        image_names=uploaded_names,
+        width=target_w,
+        height=target_h,
         seed=job.seed,
     )
 
@@ -2154,8 +2506,8 @@ async def submit_image_job(app: Application, job: Job) -> None:
         "job_id": job.job_id,
         "chat_id": job.chat_id,
         "mode": "image",
-        "preferred_node": "60",
-        "refs_count": len(refs),
+        "preferred_node": "9",
+        "quality": job.quality,
         "prompt": job.prompt,
     }
 
@@ -2192,36 +2544,32 @@ async def submit_video_job(app: Application, job: Job) -> None:
         "width": src["fit_width"],
         "height": src["fit_height"],
         "video_fps": job.video_fps,
+        "quality": job.quality,
         "prompt": job.prompt,
         "video_loras": job.video_loras,
     }
 
 
-async def submit_multitalk_job(app: Application, job: Job) -> None:
+async def submit_ltx_sulphur_job(app: Application, job: Job) -> None:
     src = job.video_source
     if not src or not src.get("path"):
-        raise RuntimeError("Для talk сначала пришли фото.")
+        raise RuntimeError("Для ltx_sulphur сначала пришли фото.")
 
-    speech_text = extract_speech_text(job.prompt)
-    if not speech_text:
-        raise RuntimeError("Для talk нужна реплика в промте: например, говорит: привет")
+    preset_w, preset_h = LTX_SULPHUR_QUALITY.get(job.quality, LTX_SULPHUR_QUALITY["medium"])
+    width, height = fit_to_pixel_budget(src["orig_width"], src["orig_height"], preset_w * preset_h)
 
-    wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
+    wf = await asyncio.to_thread(load_workflow, WORKFLOW_LTX_SULPHUR)
     uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
 
     wf = await asyncio.to_thread(
-        patch_video_workflow,
+        patch_ltx_sulphur_workflow,
         wf,
         prompt=job.prompt,
         image_name=uploaded_name,
-        width=src["fit_width"],
-        height=src["fit_height"],
-        seconds=clamp_seconds(job.seconds, "talk"),
-        video_fps=job.video_fps,
+        width=width,
+        height=height,
+        seconds=job.seconds,
         seed=job.seed,
-        selected_loras=job.video_loras,
-        continuity_prompt=TALK_CONTINUITY_PROMPT,
-        continuity_negative=TALK_CONTINUITY_NEGATIVE,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
@@ -2229,16 +2577,137 @@ async def submit_multitalk_job(app: Application, job: Job) -> None:
     ACTIVE_PROMPTS[prompt_id] = {
         "job_id": job.job_id,
         "chat_id": job.chat_id,
-        "mode": "talk",
-        "preferred_node": "314",
-        "seconds": clamp_seconds(job.seconds, "talk"),
-        "width": src["fit_width"],
-        "height": src["fit_height"],
-        "video_fps": job.video_fps,
+        "mode": "ltx_sulphur",
+        "preferred_node": "61",
+        "seconds": job.seconds,
+        "width": width,
+        "height": height,
+        "quality": job.quality,
         "prompt": job.prompt,
-        "speech_text": speech_text,
-        "speech_overlay": True,
-        "video_loras": job.video_loras,
+    }
+
+
+async def submit_ltx_eros_job(app: Application, job: Job) -> None:
+    src = job.video_source
+    if not src or not src.get("path"):
+        raise RuntimeError("Для ltx_eros сначала пришли фото.")
+
+    preset_w, preset_h = LTX_EROS_QUALITY.get(job.quality, LTX_EROS_QUALITY["medium"])
+    width, height = fit_to_pixel_budget(src["orig_width"], src["orig_height"], preset_w * preset_h)
+
+    wf = await asyncio.to_thread(load_workflow, WORKFLOW_LTX_EROS)
+    uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+
+    wf = await asyncio.to_thread(
+        patch_ltx_eros_workflow,
+        wf,
+        prompt=job.prompt,
+        image_name=uploaded_name,
+        width=width,
+        height=height,
+        seconds=job.seconds,
+        seed=job.seed,
+    )
+
+    prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+
+    ACTIVE_PROMPTS[prompt_id] = {
+        "job_id": job.job_id,
+        "chat_id": job.chat_id,
+        "mode": "ltx_eros",
+        "preferred_node": "1135:597",
+        "seconds": job.seconds,
+        "width": width,
+        "height": height,
+        "quality": job.quality,
+        "prompt": job.prompt,
+    }
+
+
+async def submit_mopmix_job(app: Application, job: Job) -> None:
+    src = job.video_source
+    if not src or not src.get("path"):
+        raise RuntimeError("Для mopmix сначала пришли фото.")
+
+    resolution = MOPMIX_RESOLUTIONS.get(job.quality, MOPMIX_RESOLUTIONS["medium"])
+
+    wf = await asyncio.to_thread(load_workflow, WORKFLOW_MOPMIX)
+    uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+    translated_prompt = await asyncio.to_thread(translate_to_english, job.prompt)
+
+    wf = await asyncio.to_thread(
+        patch_mopmix_workflow,
+        wf,
+        prompt=translated_prompt,
+        resolution=resolution,
+        image_name=uploaded_name,
+        seed=job.seed,
+    )
+
+    prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+
+    ACTIVE_PROMPTS[prompt_id] = {
+        "job_id": job.job_id,
+        "chat_id": job.chat_id,
+        "mode": "mopmix",
+        "preferred_node": "128",
+        "quality": job.quality,
+        "prompt": job.prompt,
+    }
+
+
+async def submit_mopmix_duo_job(app: Application, job: Job) -> None:
+    photo_a, photo_b = job.duo_photos
+    if not photo_a.get("path") or not photo_b.get("path"):
+        raise RuntimeError("Для mopmix_duo нужны два фото.")
+
+    resolution = MOPMIX_RESOLUTIONS.get(job.quality, MOPMIX_RESOLUTIONS["medium"])
+
+    wf = await asyncio.to_thread(load_workflow, WORKFLOW_MOPMIX_DUO)
+    uploaded_a = await asyncio.to_thread(upload_image_to_comfy, photo_a["path"], photo_a["name"])
+    uploaded_b = await asyncio.to_thread(upload_image_to_comfy, photo_b["path"], photo_b["name"])
+    translated_prompt = await asyncio.to_thread(translate_to_english, job.prompt)
+
+    caption_a, caption_b = await asyncio.gather(
+        asyncio.to_thread(caption_photo, photo_a["path"], photo_a["name"]),
+        asyncio.to_thread(caption_photo, photo_b["path"], photo_b["name"]),
+    )
+    appearance_notes = []
+    if caption_a:
+        appearance_notes.append(f"Person A appearance (match exactly): {caption_a}")
+    if caption_b:
+        appearance_notes.append(f"Person B appearance (match exactly): {caption_b}")
+    if appearance_notes:
+        translated_prompt = translated_prompt + ". " + ". ".join(appearance_notes)
+
+    composite = await asyncio.to_thread(build_duo_composite, photo_a["path"], photo_b["path"])
+    composite_path = TMP_DIR / f"tg_duo_composite_{uuid.uuid4().hex}.jpg"
+    await asyncio.to_thread(composite.save, composite_path, "JPEG", quality=95)
+    try:
+        uploaded_composite = await asyncio.to_thread(upload_image_to_comfy, str(composite_path), composite_path.name)
+    finally:
+        composite_path.unlink(missing_ok=True)
+
+    wf = await asyncio.to_thread(
+        patch_mopmix_duo_workflow,
+        wf,
+        prompt=translated_prompt,
+        resolution=resolution,
+        image_name_a=uploaded_a,
+        image_name_b=uploaded_b,
+        composite_image_name=uploaded_composite,
+        seed=job.seed,
+    )
+
+    prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+
+    ACTIVE_PROMPTS[prompt_id] = {
+        "job_id": job.job_id,
+        "chat_id": job.chat_id,
+        "mode": "mopmix_duo",
+        "preferred_node": "128",
+        "quality": job.quality,
+        "prompt": job.prompt,
     }
 
 
@@ -2264,10 +2733,14 @@ def main() -> None:
 
     if not Path(WORKFLOW_VIDEO).exists():
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_VIDEO}")
-    if not Path(WORKFLOW_IMAGE).exists():
-        raise RuntimeError(f"Workflow file not found: {WORKFLOW_IMAGE}")
-    if not Path(WORKFLOW_MULTITALK).exists():
-        raise RuntimeError(f"Workflow file not found: {WORKFLOW_MULTITALK}")
+    if not Path(WORKFLOW_LTX_SULPHUR).exists():
+        raise RuntimeError(f"Workflow file not found: {WORKFLOW_LTX_SULPHUR}")
+    if not Path(WORKFLOW_MOPMIX).exists():
+        raise RuntimeError(f"Workflow file not found: {WORKFLOW_MOPMIX}")
+    if not Path(WORKFLOW_LTX_EROS).exists():
+        raise RuntimeError(f"Workflow file not found: {WORKFLOW_LTX_EROS}")
+    if not Path(WORKFLOW_MOPMIX_DUO).exists():
+        raise RuntimeError(f"Workflow file not found: {WORKFLOW_MOPMIX_DUO}")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
@@ -2276,8 +2749,11 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status_cmd))
 
     app.add_handler(CommandHandler("video", video_cmd))
-    app.add_handler(CommandHandler("talk", talk_cmd))
+    app.add_handler(CommandHandler("ltxsulphur", ltx_sulphur_cmd))
+    app.add_handler(CommandHandler("ltxeros", ltx_eros_cmd))
     app.add_handler(CommandHandler("image", image_cmd))
+    app.add_handler(CommandHandler("mopmix", mopmix_cmd))
+    app.add_handler(CommandHandler("mopmixduo", mopmix_duo_cmd))
     app.add_handler(CommandHandler("photos", photos_cmd))
     app.add_handler(CommandHandler("loras", loras_cmd))
     app.add_handler(CommandHandler("prompt", prompt_cmd))
