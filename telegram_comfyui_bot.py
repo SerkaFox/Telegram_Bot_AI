@@ -6,6 +6,7 @@ import os
 import re
 import copy
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -126,6 +127,15 @@ OLLAMA_SCENARIO_TIMEOUT = int(os.getenv("OLLAMA_SCENARIO_TIMEOUT", "180"))
 # "🎰 Рулетка": with repeat >= 2, re-roll a fresh scenario variation every N jobs in the batch
 # instead of reusing one prompt for the whole batch.
 ROULETTE_GROUP_SIZE = int(os.getenv("ROULETTE_GROUP_SIZE", "2"))
+
+# "🎙 Дубляж": replaces the native voice in LTX Sulphur/Eros's generated audio with a
+# reference voice via OpenVoice V2 tone-color conversion. Runs on the full mixed audio
+# (no Demucs vocal separation) because Demucs is trained on music and mis-routes non-speech
+# vocalizations (moans) into the "background" stem, leaving the original voice audible there.
+DUB_VOICE_ENABLED_MODES = {"ltx_sulphur", "ltx_eros"}
+DUB_VOICE_SAMPLE_PATH = os.getenv("DUB_VOICE_SAMPLE_PATH", "./voices/tati.mp3")
+OPENVOICE_DIR = Path(os.getenv("OPENVOICE_DIR", "./third_party/OpenVoice"))
+OPENVOICE_TAU = float(os.getenv("OPENVOICE_TAU", "0.3"))
 OLLAMA_SCENARIO_SYSTEM_PROMPT = (
     "Ты — сценарист для генерации коротких 12-секундных видео нейросетью. "
     "Видео склеивается из 3-4 смысловых блоков, каждый блок — одно предложение, и получает "
@@ -250,6 +260,7 @@ class Job:
     quality: str
     batch_index: int
     batch_total: int
+    dub_voice: bool
 
 
 # ============================================================
@@ -555,6 +566,7 @@ def initial_state() -> dict[str, Any]:
         "duo_photos": [blank_media(), blank_media()],
         "video_loras": [],
         "roulette": False,
+        "dub_voice": False,
     }
 
 
@@ -570,6 +582,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["duo_photos"] = [blank_media(), blank_media()]
     if "roulette" not in st:
         st["roulette"] = False
+    if "dub_voice" not in st:
+        st["dub_voice"] = False
     if "quality" not in st:
         st["quality"] = quality_label(int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"]))
     preset = quality_preset(st.get("quality")) or QUALITY_PRESETS["medium"]
@@ -711,7 +725,11 @@ async def replace_ui_message_from_callback(query, context: ContextTypes.DEFAULT_
 # ============================================================
 # UI
 # ============================================================
-def main_keyboard() -> InlineKeyboardMarkup:
+def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    roulette_on = bool(st.get("roulette")) if st else False
+    dub_voice_on = bool(st.get("dub_voice")) if st else False
+    roulette_label = f"🎰 Рулетка: {'✅ ВКЛ' if roulette_on else '⬜ выкл'}"
+    dub_voice_label = f"🎙 Дубляж: {'✅ ВКЛ' if dub_voice_on else '⬜ выкл'}"
     return InlineKeyboardMarkup(
         [
             [
@@ -745,7 +763,10 @@ def main_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
-                InlineKeyboardButton("🎰 Рулетка", callback_data="do:roulette"),
+            ],
+            [
+                InlineKeyboardButton(roulette_label, callback_data="do:roulette"),
+                InlineKeyboardButton(dub_voice_label, callback_data="do:dubvoice"),
             ],
             [
                 InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
@@ -830,7 +851,7 @@ async def send_media_preview_message(target_message, context: ContextTypes.DEFAU
     if not library:
         msg = await target_message.reply_text(
             "Пока нет сохранённых фото. Пришли фото один раз, потом его можно будет выбрать здесь.",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(get_state(context)),
         )
     else:
         index = max(0, min(index, len(library) - 1))
@@ -862,7 +883,7 @@ async def replace_media_preview_from_callback(query, context: ContextTypes.DEFAU
         msg = await context.bot.send_message(
             chat_id=query.message.chat_id,
             text="Пока нет сохранённых фото. Пришли фото один раз, потом его можно будет выбрать здесь.",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(get_state(context)),
         )
     else:
         index = max(0, min(index, len(library) - 1))
@@ -920,6 +941,7 @@ def help_text(st: dict[str, Any]) -> str:
         f"• seconds: {st['seconds']}\n"
         f"• repeat: {st.get('repeat', 1)}\n"
         f"• рулетка: {'on' if st.get('roulette') else 'off'}\n"
+        f"• дубляж голоса: {'on' if st.get('dub_voice') else 'off'}\n"
         f"• video LoRA: {selected_lora_labels(st)}\n"
         f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
         f"• video TTS: {'on' if VIDEO_TTS else 'off'}\n"
@@ -1669,6 +1691,78 @@ async def run_video_audio_postprocess(blob: bytes, meta: dict[str, Any], filenam
             pass
 
 
+_openvoice_converter = None
+_openvoice_target_se = None
+
+
+def _get_openvoice_converter():
+    global _openvoice_converter
+    if _openvoice_converter is None:
+        if str(OPENVOICE_DIR) not in sys.path:
+            sys.path.insert(0, str(OPENVOICE_DIR))
+        import torch
+        from openvoice.api import ToneColorConverter
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        conv = ToneColorConverter(str(OPENVOICE_DIR / "checkpoints_v2/converter/config.json"), device=device)
+        conv.load_ckpt(str(OPENVOICE_DIR / "checkpoints_v2/converter/checkpoint.pth"))
+        _openvoice_converter = conv
+    return _openvoice_converter
+
+
+def _get_dub_target_se():
+    global _openvoice_target_se
+    if _openvoice_target_se is None:
+        conv = _get_openvoice_converter()
+        from openvoice import se_extractor
+
+        se, _ = se_extractor.get_se(DUB_VOICE_SAMPLE_PATH, conv, vad=False)
+        _openvoice_target_se = se
+    return _openvoice_target_se
+
+
+def dub_voice_in_video(video_path: Path, output_path: Path) -> None:
+    conv = _get_openvoice_converter()
+    target_se = _get_dub_target_se()
+    from openvoice import se_extractor
+
+    extracted_path = video_path.with_name(video_path.stem + "_extracted.wav")
+    converted_path = video_path.with_name(video_path.stem + "_converted.wav")
+    try:
+        run_cmd(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
+                  "-ar", "44100", "-ac", "2", str(extracted_path)])
+        source_se, _ = se_extractor.get_se(str(extracted_path), conv, vad=False)
+        conv.convert(
+            audio_src_path=str(extracted_path),
+            src_se=source_se,
+            tgt_se=target_se,
+            output_path=str(converted_path),
+            tau=OPENVOICE_TAU,
+        )
+        run_cmd(["ffmpeg", "-y", "-i", str(video_path), "-i", str(converted_path),
+                  "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
+                  "-shortest", str(output_path)])
+    finally:
+        extracted_path.unlink(missing_ok=True)
+        converted_path.unlink(missing_ok=True)
+
+
+async def run_voice_dub_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
+    if not Path(DUB_VOICE_SAMPLE_PATH).exists():
+        log.warning("Voice dub sample not found at %s, skipping", DUB_VOICE_SAMPLE_PATH)
+        return None
+
+    video_path = TMP_DIR / f"tg_dub_{uuid.uuid4().hex}.mp4"
+    output_path = TMP_DIR / f"tg_dub_out_{uuid.uuid4().hex}.mp4"
+    try:
+        save_bytes(video_path, blob)
+        await asyncio.to_thread(dub_voice_in_video, video_path, output_path)
+        return output_path.read_bytes(), output_path.name
+    finally:
+        video_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+
+
 async def run_video_tts_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
     speech_text = extract_speech_text(meta.get("prompt") or "")
     if not speech_text:
@@ -1845,6 +1939,19 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
                 log.info("TTS speech postprocess applied for video job #%s", meta.get("job_id"))
         except Exception:
             log.exception("TTS speech postprocess failed; sending video without TTS speech")
+
+    if (
+        meta.get("dub_voice")
+        and meta.get("mode") in DUB_VOICE_ENABLED_MODES
+        and filename.lower().endswith((".mp4", ".mov", ".webm"))
+    ):
+        try:
+            processed = await run_voice_dub_postprocess(blob, meta, filename)
+            if processed:
+                blob, filename = processed
+                log.info("Voice dub postprocess applied for job #%s", meta.get("job_id"))
+        except Exception:
+            log.exception("Voice dub postprocess failed; sending video with original voice")
 
     prompt_text = (meta.get("prompt") or "").strip()
 
@@ -2031,20 +2138,20 @@ async def submit_worker_loop(app: Application) -> None:
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update):
         return
-    await send_ui_message(update.message, context, help_text(get_state(context)), reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, help_text(get_state(context)), reply_markup=main_keyboard(get_state(context)))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update):
         return
-    await send_ui_message(update.message, context, help_text(get_state(context)), reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, help_text(get_state(context)), reply_markup=main_keyboard(get_state(context)))
 
 
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update):
         return
     st = reset_state(context)
-    await send_ui_message(update.message, context, "Состояние очищено.\n\n" + help_text(st), reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Состояние очищено.\n\n" + help_text(st), reply_markup=main_keyboard(st))
 
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2058,10 +2165,10 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             update.message,
             context,
             f"Текущая генерация остановлена.\nСброшено active prompt: {active_cleared}",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(get_state(context)),
         )
     except Exception as e:
-        await send_ui_message(update.message, context, f"Ошибка остановки: {e}", reply_markup=main_keyboard())
+        await send_ui_message(update.message, context, f"Ошибка остановки: {e}", reply_markup=main_keyboard(get_state(context)))
 
 
 async def clearqueue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2075,10 +2182,10 @@ async def clearqueue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update.message,
             context,
             f"Очередь очищена.\n• локальных задач удалено: {local_cleared}\n• ответ ComfyUI: {comfy_resp}",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(get_state(context)),
         )
     except Exception as e:
-        await send_ui_message(update.message, context, f"Ошибка очистки очереди: {e}", reply_markup=main_keyboard())
+        await send_ui_message(update.message, context, f"Ошибка очистки очереди: {e}", reply_markup=main_keyboard(get_state(context)))
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2100,7 +2207,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         comfy_info = f"\n\nСервер:\n• local queue: {GEN_QUEUE.qsize()}\n• comfy status error: {e}"
 
-    await send_ui_message(update.message, context, help_text(st) + comfy_info, reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, help_text(st) + comfy_info, reply_markup=main_keyboard(st))
 
 
 async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2109,7 +2216,7 @@ async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     st = get_state(context)
     st["mode"] = "video"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-    await send_ui_message(update.message, context, "Режим: photo → video", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Режим: photo → video", reply_markup=main_keyboard(st))
 
 
 async def ltx_sulphur_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2118,7 +2225,7 @@ async def ltx_sulphur_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     st = get_state(context)
     st["mode"] = "ltx_sulphur"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-    await send_ui_message(update.message, context, "Режим: photo → video+audio (LTX2.3 Sulphur)", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Режим: photo → video+audio (LTX2.3 Sulphur)", reply_markup=main_keyboard(st))
 
 
 async def ltx_eros_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2127,7 +2234,7 @@ async def ltx_eros_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     st = get_state(context)
     st["mode"] = "ltx_eros"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-    await send_ui_message(update.message, context, "Режим: photo → video+audio (LTX2.3 10Eros)", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Режим: photo → video+audio (LTX2.3 10Eros)", reply_markup=main_keyboard(st))
 
 
 async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2136,7 +2243,7 @@ async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     st = get_state(context)
     st["mode"] = "image"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-    await send_ui_message(update.message, context, "Режим: photo → image", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Режим: photo → image", reply_markup=main_keyboard(st))
 
 
 async def mopmix_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2144,7 +2251,7 @@ async def mopmix_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     st = get_state(context)
     st["mode"] = "mopmix"
-    await send_ui_message(update.message, context, "Режим: photo → img2img картинка (MopMix BigASP 2.5)", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Режим: photo → img2img картинка (MopMix BigASP 2.5)", reply_markup=main_keyboard(st))
 
 
 async def mopmix_duo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2152,7 +2259,7 @@ async def mopmix_duo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     st = get_state(context)
     st["mode"] = "mopmix_duo"
-    await send_ui_message(update.message, context, "Режим: 2 фото → сцена с обоими лицами (face swap)", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Режим: 2 фото → сцена с обоими лицами (face swap)", reply_markup=main_keyboard(st))
 
 
 async def loras_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2174,7 +2281,7 @@ async def photos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             update.message,
             context,
             "Пока нет сохранённых фото. Пришли фото один раз, потом его можно будет выбрать здесь.",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(st),
         )
         return
 
@@ -2187,12 +2294,12 @@ async def prompt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     text = " ".join(context.args).strip()
     if not text:
-        await send_ui_message(update.message, context, "Используй: /prompt camera slowly zooms in", reply_markup=main_keyboard())
+        await send_ui_message(update.message, context, "Используй: /prompt camera slowly zooms in", reply_markup=main_keyboard(get_state(context)))
         return
 
     st = get_state(context)
     st["prompt"] = text
-    await send_ui_message(update.message, context, "Промт сохранён.", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Промт сохранён.", reply_markup=main_keyboard(st))
 
 
 async def seconds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2205,14 +2312,14 @@ async def seconds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             update.message,
             context,
             f"Сейчас: {st['seconds']} сек. Максимум для режима {st['mode']}: {mode_max_seconds(st['mode'])} сек.",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(st),
         )
         return
 
     try:
         sec = int(context.args[0])
     except Exception:
-        await send_ui_message(update.message, context, "Пример: /seconds 8", reply_markup=main_keyboard())
+        await send_ui_message(update.message, context, "Пример: /seconds 8", reply_markup=main_keyboard(st))
         return
 
     st["seconds"] = clamp_seconds(sec, st["mode"])
@@ -2220,7 +2327,7 @@ async def seconds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         update.message,
         context,
         f"Длина видео: {st['seconds']} сек. Максимум для режима {st['mode']}: {mode_max_seconds(st['mode'])} сек.",
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(st),
     )
 
 
@@ -2234,16 +2341,16 @@ async def quality_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             update.message,
             context,
             f"Сейчас качество: {quality_status(st)}. Используй /quality low | medium | high",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(st),
         )
         return
 
     name = (context.args[0] or "").strip().lower()
     if not apply_quality(st, name):
-        await send_ui_message(update.message, context, "Используй: /quality low | medium | high", reply_markup=main_keyboard())
+        await send_ui_message(update.message, context, "Используй: /quality low | medium | high", reply_markup=main_keyboard(st))
         return
 
-    await send_ui_message(update.message, context, f"Качество: {quality_status(st)}.", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, f"Качество: {quality_status(st)}.", reply_markup=main_keyboard(st))
 
 
 async def repeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2252,19 +2359,19 @@ async def repeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     st = get_state(context)
     if not context.args:
-        await send_ui_message(update.message, context, f"Сейчас repeat: {st['repeat']}. Пример: /repeat 4", reply_markup=main_keyboard())
+        await send_ui_message(update.message, context, f"Сейчас repeat: {st['repeat']}. Пример: /repeat 4", reply_markup=main_keyboard(st))
         return
 
     try:
         n = int(context.args[0])
     except Exception:
-        await send_ui_message(update.message, context, "Пример: /repeat 4", reply_markup=main_keyboard())
+        await send_ui_message(update.message, context, "Пример: /repeat 4", reply_markup=main_keyboard(st))
         return
 
     n = max(1, min(200, n))
     st["repeat"] = n
 
-    await send_ui_message(update.message, context, f"Количество запусков: {n}", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, f"Количество запусков: {n}", reply_markup=main_keyboard(st))
 
 
 async def go_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2308,7 +2415,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             update.message,
             context,
             f"Фото для {st['mode']} сохранено: {width}×{height} → {fit_w}×{fit_h}",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(st),
         )
         return
 
@@ -2319,7 +2426,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         update.message,
         context,
         f"Фото лица {'A' if slot == 0 else 'B'} сохранено: {width}×{height} → {fit_w}×{fit_h}",
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(st),
     )
 
 
@@ -2334,7 +2441,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     st = get_state(context)
     st["prompt"] = text
 
-    await send_ui_message(update.message, context, "Текст принят как промт.", reply_markup=main_keyboard())
+    await send_ui_message(update.message, context, "Текст принят как промт.", reply_markup=main_keyboard(st))
 
 
 # ============================================================
@@ -2355,13 +2462,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data.startswith("mode:"):
         st["mode"] = data.split(":", 1)[1]
         st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-        await replace_ui_message_from_callback(query, context, f"Режим: {st['mode']}", reply_markup=main_keyboard())
+        await replace_ui_message_from_callback(query, context, f"Режим: {st['mode']}", reply_markup=main_keyboard(st))
         return
 
     if data.startswith("quality:"):
         name = data.split(":", 1)[1]
         if apply_quality(st, name):
-            await replace_ui_message_from_callback(query, context, f"Качество: {quality_status(st)}.", reply_markup=main_keyboard())
+            await replace_ui_message_from_callback(query, context, f"Качество: {quality_status(st)}.", reply_markup=main_keyboard(st))
         return
 
     if data.startswith("sec:"):
@@ -2372,7 +2479,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             query,
             context,
             f"Длина видео: {st['seconds']} сек. Максимум для режима {st['mode']}: {mode_max_seconds(st['mode'])} сек.",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(st),
         )
         return
 
@@ -2386,7 +2493,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             query,
             context,
             "Количество запусков: {}".format(st["repeat"]),
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(st),
         )
         return
 
@@ -2423,7 +2530,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 query,
                 context,
                 "Пока нет сохранённых фото. Пришли фото один раз, потом его можно будет выбрать здесь.",
-                reply_markup=main_keyboard(),
+                reply_markup=main_keyboard(st),
             )
             return
         await replace_media_preview_from_callback(query, context, index=0)
@@ -2447,12 +2554,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         library = get_media_library(context)
         if idx < 0 or idx >= len(library):
-            await replace_ui_message_from_callback(query, context, "Это фото уже недоступно.", reply_markup=main_keyboard())
+            await replace_ui_message_from_callback(query, context, "Это фото уже недоступно.", reply_markup=main_keyboard(st))
             return
 
         media = copy.deepcopy(library[idx])
         if not Path(media.get("path", "")).exists():
-            await replace_ui_message_from_callback(query, context, "Файл этого фото уже удалён с диска. Пришли его заново.", reply_markup=main_keyboard())
+            await replace_ui_message_from_callback(query, context, "Файл этого фото уже удалён с диска. Пришли его заново.", reply_markup=main_keyboard(st))
             return
 
         if st["mode"] in DUO_PHOTO_MODES:
@@ -2460,12 +2567,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             slot = 0 if not duo[0].get("path") else 1
             duo[slot] = media
             await replace_ui_message_from_callback(
-                query, context, f"Фото лица {'A' if slot == 0 else 'B'} выбрано: {media_line(media)}", reply_markup=main_keyboard()
+                query, context, f"Фото лица {'A' if slot == 0 else 'B'} выбрано: {media_line(media)}", reply_markup=main_keyboard(st)
             )
             return
 
         st["video_source"] = media
-        await replace_ui_message_from_callback(query, context, f"Базовое фото выбрано: {media_line(media)}", reply_markup=main_keyboard())
+        await replace_ui_message_from_callback(query, context, f"Базовое фото выбрано: {media_line(media)}", reply_markup=main_keyboard(st))
         return
 
     if data == "queue:stopclear":
@@ -2479,10 +2586,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context,
                 f"Остановлено и очищено.\n• active prompt сброшено: {active_cleared}\n"
                 f"• локальных задач удалено: {local_cleared}\n• ответ ComfyUI: {comfy_resp}",
-                reply_markup=main_keyboard(),
+                reply_markup=main_keyboard(st),
             )
         except Exception as e:
-            await replace_ui_message_from_callback(query, context, f"Ошибка очистки очереди: {e}", reply_markup=main_keyboard())
+            await replace_ui_message_from_callback(query, context, f"Ошибка очистки очереди: {e}", reply_markup=main_keyboard(st))
         return
 
     if data == "show:status":
@@ -2500,28 +2607,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as e:
             comfy_info = f"\n\nСервер:\n• local queue: {GEN_QUEUE.qsize()}\n• comfy status error: {e}"
 
-        await replace_ui_message_from_callback(query, context, help_text(st) + comfy_info, reply_markup=main_keyboard())
+        await replace_ui_message_from_callback(query, context, help_text(st) + comfy_info, reply_markup=main_keyboard(st))
         return
 
     if data == "do:reset":
         st = reset_state(context)
-        await replace_ui_message_from_callback(query, context, "Состояние очищено.\n\n" + help_text(st), reply_markup=main_keyboard())
+        await replace_ui_message_from_callback(query, context, "Состояние очищено.\n\n" + help_text(st), reply_markup=main_keyboard(st))
         return
 
     if data == "do:expand":
         idea = (st.get("prompt") or "").strip()
         if not idea:
-            await replace_ui_message_from_callback(query, context, "Сначала напиши идею промтом.", reply_markup=main_keyboard())
+            await replace_ui_message_from_callback(query, context, "Сначала напиши идею промтом.", reply_markup=main_keyboard(st))
             return
         await replace_ui_message_from_callback(query, context, "✨ Развиваю идею...", reply_markup=None)
         try:
             expanded = await asyncio.to_thread(expand_idea_with_ollama, idea)
         except Exception as e:
             log.exception("Ollama scenario expansion failed")
-            await context.bot.send_message(query.message.chat_id, f"Не получилось развить идею: {e}", reply_markup=main_keyboard())
+            await context.bot.send_message(query.message.chat_id, f"Не получилось развить идею: {e}", reply_markup=main_keyboard(st))
             return
         st["prompt"] = expanded
-        await context.bot.send_message(query.message.chat_id, f"Новый промт:\n\n{expanded}", reply_markup=main_keyboard())
+        await context.bot.send_message(query.message.chat_id, f"Новый промт:\n\n{expanded}", reply_markup=main_keyboard(st))
         return
 
     if data == "do:roulette":
@@ -2533,7 +2640,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"🎰 Рулетка {state_text}.\n"
             f"При repeat ≥ 2 каждые {ROULETTE_GROUP_SIZE} видео промт будет переписываться заново "
             f"через Ollama (та же идея, другие детали) — на 10x получится 5 вариаций, на 30x — 15.",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(st),
+        )
+        return
+
+    if data == "do:dubvoice":
+        st["dub_voice"] = not st.get("dub_voice")
+        state_text = "включён" if st["dub_voice"] else "выключен"
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"🎙 Дубляж голоса {state_text}.\n"
+            f"Работает только для LTX Sulphur/LTX Eros — после генерации голос в дорожке "
+            f"заменяется на голос из {DUB_VOICE_SAMPLE_PATH}, остальные звуки (шлепки/стоны) сохраняются.",
+            reply_markup=main_keyboard(st),
         )
         return
 
@@ -2559,19 +2679,19 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target = update.message if update.message else update.callback_query.message
 
     if not st.get("prompt"):
-        await send_ui_message(target, context, "Сначала задай промт.", reply_markup=main_keyboard())
+        await send_ui_message(target, context, "Сначала задай промт.", reply_markup=main_keyboard(st))
         return
 
     if st["mode"] in SINGLE_PHOTO_MODES:
         if not st["video_source"].get("path"):
-            await send_ui_message(target, context, f"Для {st['mode']} сначала пришли фото.", reply_markup=main_keyboard())
+            await send_ui_message(target, context, f"Для {st['mode']} сначала пришли фото.", reply_markup=main_keyboard(st))
             return
     elif st["mode"] in DUO_PHOTO_MODES:
         if not all(x.get("path") for x in st["duo_photos"]):
-            await send_ui_message(target, context, "Для mopmix_duo пришли два фото (лицо A и лицо B).", reply_markup=main_keyboard())
+            await send_ui_message(target, context, "Для mopmix_duo пришли два фото (лицо A и лицо B).", reply_markup=main_keyboard(st))
             return
     else:
-        await send_ui_message(target, context, f"Неизвестный режим: {st['mode']}", reply_markup=main_keyboard())
+        await send_ui_message(target, context, f"Неизвестный режим: {st['mode']}", reply_markup=main_keyboard(st))
         return
 
     repeat = max(1, int(st.get("repeat", 1)))
@@ -2616,6 +2736,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             quality=(st.get("quality") or "medium").strip().lower(),
             batch_index=i + 1,
             batch_total=repeat,
+            dub_voice=bool(st.get("dub_voice")),
         )
         await GEN_QUEUE.put(job)
 
@@ -2729,6 +2850,7 @@ async def submit_ltx_sulphur_job(app: Application, job: Job) -> None:
         "height": height,
         "quality": job.quality,
         "prompt": job.prompt,
+        "dub_voice": job.dub_voice,
     }
 
 
@@ -2766,6 +2888,7 @@ async def submit_ltx_eros_job(app: Application, job: Job) -> None:
         "height": height,
         "quality": job.quality,
         "prompt": job.prompt,
+        "dub_voice": job.dub_voice,
     }
 
 
