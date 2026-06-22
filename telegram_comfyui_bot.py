@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import copy
+import shutil
 import subprocess
 import sys
 import time
@@ -133,9 +134,35 @@ ROULETTE_GROUP_SIZE = int(os.getenv("ROULETTE_GROUP_SIZE", "2"))
 # (no Demucs vocal separation) because Demucs is trained on music and mis-routes non-speech
 # vocalizations (moans) into the "background" stem, leaving the original voice audible there.
 DUB_VOICE_ENABLED_MODES = {"ltx_sulphur", "ltx_eros"}
-DUB_VOICE_SAMPLE_PATH = os.getenv("DUB_VOICE_SAMPLE_PATH", "./voices/tati.mp3")
+VOICES_DIR = Path(os.getenv("VOICES_DIR", "./voices"))
+DEFAULT_VOICE_NAME = os.getenv("DEFAULT_VOICE_NAME", "tati")
 OPENVOICE_DIR = Path(os.getenv("OPENVOICE_DIR", "./third_party/OpenVoice"))
 OPENVOICE_TAU = float(os.getenv("OPENVOICE_TAU", "0.3"))
+VOICE_FILE_EXTENSIONS = (".mp3", ".wav", ".ogg", ".m4a", ".oga", ".flac")
+
+
+def list_voice_names() -> list[str]:
+    if not VOICES_DIR.exists():
+        return []
+    return sorted(p.stem for p in VOICES_DIR.iterdir() if p.suffix.lower() in VOICE_FILE_EXTENSIONS)
+
+
+def voice_path(name: str) -> Path | None:
+    if not VOICES_DIR.exists():
+        return None
+    for ext in VOICE_FILE_EXTENSIONS:
+        p = VOICES_DIR / f"{name}{ext}"
+        if p.exists():
+            return p
+    return None
+
+
+def next_voice_name() -> str:
+    existing = set(list_voice_names())
+    i = 2
+    while f"voice{i}" in existing:
+        i += 1
+    return f"voice{i}"
 OLLAMA_SCENARIO_SYSTEM_PROMPT = (
     "Ты — сценарист для генерации коротких 12-секундных видео нейросетью. "
     "Видео склеивается из 3-4 смысловых блоков, каждый блок — одно предложение, и получает "
@@ -261,6 +288,7 @@ class Job:
     batch_index: int
     batch_total: int
     dub_voice: bool
+    dub_voice_name: str
 
 
 # ============================================================
@@ -567,6 +595,7 @@ def initial_state() -> dict[str, Any]:
         "video_loras": [],
         "roulette": False,
         "dub_voice": False,
+        "dub_voice_name": DEFAULT_VOICE_NAME,
     }
 
 
@@ -584,6 +613,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["roulette"] = False
     if "dub_voice" not in st:
         st["dub_voice"] = False
+    if "dub_voice_name" not in st:
+        st["dub_voice_name"] = DEFAULT_VOICE_NAME
     if "quality" not in st:
         st["quality"] = quality_label(int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"]))
     preset = quality_preset(st.get("quality")) or QUALITY_PRESETS["medium"]
@@ -767,6 +798,9 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(roulette_label, callback_data="do:roulette"),
                 InlineKeyboardButton(dub_voice_label, callback_data="do:dubvoice"),
+            ],
+            [
+                InlineKeyboardButton(f"🎙 Голос: {st.get('dub_voice_name', DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME}", callback_data="voice:list"),
             ],
             [
                 InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
@@ -1708,7 +1742,7 @@ async def run_video_audio_postprocess(blob: bytes, meta: dict[str, Any], filenam
 
 
 _openvoice_converter = None
-_openvoice_target_se = None
+_openvoice_target_se_cache: dict[str, Any] = {}
 
 
 def _get_openvoice_converter():
@@ -1728,20 +1762,22 @@ def _get_openvoice_converter():
     return _openvoice_converter
 
 
-def _get_dub_target_se():
-    global _openvoice_target_se
-    if _openvoice_target_se is None:
+def _get_dub_target_se(voice_name: str):
+    if voice_name not in _openvoice_target_se_cache:
+        path = voice_path(voice_name)
+        if not path:
+            raise RuntimeError(f"Voice '{voice_name}' not found in {VOICES_DIR}")
         conv = _get_openvoice_converter()
         from openvoice import se_extractor
 
-        se, _ = se_extractor.get_se(DUB_VOICE_SAMPLE_PATH, conv, vad=False)
-        _openvoice_target_se = se
-    return _openvoice_target_se
+        se, _ = se_extractor.get_se(str(path), conv, vad=False)
+        _openvoice_target_se_cache[voice_name] = se
+    return _openvoice_target_se_cache[voice_name]
 
 
-def dub_voice_in_video(video_path: Path, output_path: Path) -> None:
+def dub_voice_in_video(video_path: Path, output_path: Path, voice_name: str) -> None:
     conv = _get_openvoice_converter()
-    target_se = _get_dub_target_se()
+    target_se = _get_dub_target_se(voice_name)
     from openvoice import se_extractor
 
     extracted_path = video_path.with_name(video_path.stem + "_extracted.wav")
@@ -1766,15 +1802,16 @@ def dub_voice_in_video(video_path: Path, output_path: Path) -> None:
 
 
 async def run_voice_dub_postprocess(blob: bytes, meta: dict[str, Any], filename: str) -> tuple[bytes, str] | None:
-    if not Path(DUB_VOICE_SAMPLE_PATH).exists():
-        log.warning("Voice dub sample not found at %s, skipping", DUB_VOICE_SAMPLE_PATH)
+    voice_name = meta.get("dub_voice_name") or DEFAULT_VOICE_NAME
+    if not voice_path(voice_name):
+        log.warning("Voice dub sample '%s' not found in %s, skipping", voice_name, VOICES_DIR)
         return None
 
     video_path = TMP_DIR / f"tg_dub_{uuid.uuid4().hex}.mp4"
     output_path = TMP_DIR / f"tg_dub_out_{uuid.uuid4().hex}.mp4"
     try:
         save_bytes(video_path, blob)
-        await asyncio.to_thread(dub_voice_in_video, video_path, output_path)
+        await asyncio.to_thread(dub_voice_in_video, video_path, output_path, voice_name)
         return output_path.read_bytes(), output_path.name
     finally:
         video_path.unlink(missing_ok=True)
@@ -2401,6 +2438,35 @@ async def go_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ============================================================
 # PHOTO / TEXT INPUT
 # ============================================================
+async def voice_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+
+    msg = update.message
+    if msg.voice:
+        tg_file = await context.bot.get_file(msg.voice.file_id)
+        ext = ".ogg"
+    elif msg.audio:
+        tg_file = await context.bot.get_file(msg.audio.file_id)
+        name = msg.audio.file_name or ""
+        ext = Path(name).suffix.lower() if Path(name).suffix else ".mp3"
+    else:
+        return
+
+    path = TMP_DIR / f"tg_voice_upload_{uuid.uuid4().hex}{ext}"
+    await tg_file.download_to_drive(custom_path=str(path))
+    context.user_data["pending_voice_upload"] = str(path)
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"🔄 Заменить «{DEFAULT_VOICE_NAME}»", callback_data="voice:replace")],
+            [InlineKeyboardButton("➕ Добавить как новый голос", callback_data="voice:add")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="voice:cancel")],
+        ]
+    )
+    await send_ui_message(msg, context, "🎙 Получил голос. Что сделать?", reply_markup=keyboard)
+
+
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update):
         return
@@ -2738,6 +2804,66 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await replace_ui_message_from_callback(query, context, "Отменено, промт не изменён.", reply_markup=main_keyboard(st))
         return
 
+    if data == "voice:replace":
+        pending_path = context.user_data.pop("pending_voice_upload", None)
+        if not pending_path or not Path(pending_path).exists():
+            await replace_ui_message_from_callback(query, context, "Нечего применять — пришли голос заново.", reply_markup=main_keyboard(st))
+            return
+        VOICES_DIR.mkdir(parents=True, exist_ok=True)
+        for ext in VOICE_FILE_EXTENSIONS:
+            (VOICES_DIR / f"{DEFAULT_VOICE_NAME}{ext}").unlink(missing_ok=True)
+        dest = VOICES_DIR / f"{DEFAULT_VOICE_NAME}{Path(pending_path).suffix}"
+        shutil.move(pending_path, dest)
+        _openvoice_target_se_cache.pop(DEFAULT_VOICE_NAME, None)
+        st["dub_voice_name"] = DEFAULT_VOICE_NAME
+        await replace_ui_message_from_callback(query, context, f"✅ Голос «{DEFAULT_VOICE_NAME}» заменён.", reply_markup=main_keyboard(st))
+        return
+
+    if data == "voice:add":
+        pending_path = context.user_data.pop("pending_voice_upload", None)
+        if not pending_path or not Path(pending_path).exists():
+            await replace_ui_message_from_callback(query, context, "Нечего применять — пришли голос заново.", reply_markup=main_keyboard(st))
+            return
+        VOICES_DIR.mkdir(parents=True, exist_ok=True)
+        name = next_voice_name()
+        dest = VOICES_DIR / f"{name}{Path(pending_path).suffix}"
+        shutil.move(pending_path, dest)
+        st["dub_voice_name"] = name
+        await replace_ui_message_from_callback(
+            query, context, f"✅ Добавлен новый голос «{name}» и выбран как активный для дубляжа.",
+            reply_markup=main_keyboard(st),
+        )
+        return
+
+    if data == "voice:cancel":
+        pending_path = context.user_data.pop("pending_voice_upload", None)
+        if pending_path:
+            Path(pending_path).unlink(missing_ok=True)
+        await replace_ui_message_from_callback(query, context, "Отменено.", reply_markup=main_keyboard(st))
+        return
+
+    if data == "voice:list":
+        names = list_voice_names()
+        if not names:
+            await replace_ui_message_from_callback(query, context, "Банк голосов пуст — пришли голосовое сообщение боту.", reply_markup=main_keyboard(st))
+            return
+        rows = [
+            [InlineKeyboardButton(f"{'✅ ' if n == st.get('dub_voice_name') else ''}{n}", callback_data=f"voice:pick:{n}")]
+            for n in names
+        ]
+        rows.append([InlineKeyboardButton("↩️ Back", callback_data="show:status")])
+        await replace_ui_message_from_callback(query, context, "Выбери голос для дубляжа:", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data.startswith("voice:pick:"):
+        name = data.split(":", 2)[2]
+        if not voice_path(name):
+            await replace_ui_message_from_callback(query, context, "Этот голос больше не найден.", reply_markup=main_keyboard(st))
+            return
+        st["dub_voice_name"] = name
+        await replace_ui_message_from_callback(query, context, f"🎙 Активный голос для дубляжа: «{name}».", reply_markup=main_keyboard(st))
+        return
+
     if data == "do:roulette":
         st["roulette"] = not st.get("roulette")
         state_text = "включена" if st["roulette"] else "выключена"
@@ -2852,6 +2978,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             batch_index=i + 1,
             batch_total=repeat,
             dub_voice=bool(st.get("dub_voice")),
+            dub_voice_name=st.get("dub_voice_name") or DEFAULT_VOICE_NAME,
         )
         await GEN_QUEUE.put(job)
 
@@ -2966,6 +3093,7 @@ async def submit_ltx_sulphur_job(app: Application, job: Job) -> None:
         "quality": job.quality,
         "prompt": job.prompt,
         "dub_voice": job.dub_voice,
+        "dub_voice_name": job.dub_voice_name,
     }
 
 
@@ -3004,6 +3132,7 @@ async def submit_ltx_eros_job(app: Application, job: Job) -> None:
         "quality": job.quality,
         "prompt": job.prompt,
         "dub_voice": job.dub_voice,
+        "dub_voice_name": job.dub_voice_name,
     }
 
 
@@ -3149,6 +3278,7 @@ def main() -> None:
 
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(error_handler)
 
