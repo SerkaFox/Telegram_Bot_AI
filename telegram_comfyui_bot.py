@@ -1344,6 +1344,10 @@ def caption_photo(local_path: str, name_hint: str) -> str:
 def expand_idea_with_ollama(idea: str, photo_caption: str = "") -> str:
     prompt = f"{OLLAMA_SCENARIO_SYSTEM_PROMPT}"
     if photo_caption:
+        # Florence-2's caption comes back in English; Qwen2.5 (heavily Chinese+English-tuned)
+        # sometimes drifts into Chinese mid-generation if fed English text inside an otherwise
+        # Russian prompt, so translate it first to keep the whole prompt one language.
+        photo_caption = translate_to_russian(photo_caption)
         prompt += (
             f"\n\nНа референс-фото, с которого делается видео, видно: {photo_caption}\n"
             "ПЕРВОЕ предложение обязано описывать именно то, что на фото (внешность, одежда) — "
@@ -1381,6 +1385,18 @@ def translate_to_english(text: str) -> str:
         return translated or text
     except Exception:
         log.warning("Prompt translation failed, using original text", exc_info=True)
+        return text
+
+
+def translate_to_russian(text: str) -> str:
+    """Qwen2.5 is heavily Chinese+English-tuned; feeding it English photo-caption text inside
+    an otherwise-Russian prompt sometimes makes it drift into Chinese mid-generation instead of
+    staying in Russian. Translate the caption first so the whole prompt is one language."""
+    try:
+        translated = GoogleTranslator(source="auto", target="ru").translate(text)
+        return translated or text
+    except Exception:
+        log.warning("Caption translation failed, using original text", exc_info=True)
         return text
 
 
