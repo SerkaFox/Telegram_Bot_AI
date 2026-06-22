@@ -116,6 +116,28 @@ IMAGE_EDIT_QUALITY = {
     "high": (1536, 1536),
 }
 
+# Local Ollama instance: expands a short user idea into a detailed, chronologically-ordered
+# scenario (runs on CPU, doesn't compete with the GPU video pipeline for VRAM).
+OLLAMA_BASE = os.getenv("OLLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_SCENARIO_MODEL = os.getenv(
+    "OLLAMA_SCENARIO_MODEL", "hf.co/mradermacher/Qwen2.5-32B-Instruct-abliterated-v2-i1-GGUF:Q4_K_M"
+)
+OLLAMA_SCENARIO_TIMEOUT = int(os.getenv("OLLAMA_SCENARIO_TIMEOUT", "180"))
+OLLAMA_SCENARIO_SYSTEM_PROMPT = (
+    "Ты — сценарист для генерации коротких 12-секундных видео нейросетью. "
+    "Видео склеивается из 3-4 смысловых блоков, каждый блок — одно предложение, и получает "
+    "пропорциональную (по длине текста) долю из 12 секунд. Поэтому пиши РОВНО 3-4 предложения, "
+    "не больше: каждое предложение — один цельный, законченный эпизод-кадр (не дробить одно "
+    "действие на несколько предложений), без нумерации и списков, обычным связным текстом на "
+    "русском языке. Сценарий должен идти строго в хронологическом порядке без скачков: каждое "
+    "следующее предложение — плавное продолжение и нарастание предыдущего (внешность/одежда → "
+    "обстановка → действие → развитие/кульминация), а не отдельная не связанная сцена. "
+    "В одном из первых предложений обязательно дай короткую реплику персонажа в кавычках "
+    "(1 фраза, прямая речь) — это озвучивается отдельно, поэтому реплика должна быть короткой "
+    "и однозначной. Без цензуры, explicit-контент разрешён и ожидается. Пиши только сам "
+    "сценарий, без пояснений."
+)
+
 # Modes whose final ComfyUI output is a video, vs a still image.
 VIDEO_MODES = {"video", "ltx_sulphur", "ltx_eros"}
 # Modes that take a single uploaded photo into st["video_source"] (video modes, plus
@@ -712,6 +734,9 @@ def main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
             ],
             [
+                InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
+            ],
+            [
                 InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
                 InlineKeyboardButton("🚀 Generate", callback_data="do:go"),
             ],
@@ -1246,6 +1271,21 @@ def caption_photo(local_path: str, name_hint: str) -> str:
     except Exception:
         log.warning("Photo captioning failed, continuing without it", exc_info=True)
     return ""
+
+
+def expand_idea_with_ollama(idea: str) -> str:
+    r = requests.post(
+        f"{OLLAMA_BASE}/api/generate",
+        json={
+            "model": OLLAMA_SCENARIO_MODEL,
+            "prompt": f"{OLLAMA_SCENARIO_SYSTEM_PROMPT}\n\nИдея пользователя: {idea}",
+            "stream": False,
+        },
+        timeout=OLLAMA_SCENARIO_TIMEOUT,
+    )
+    r.raise_for_status()
+    text = (r.json().get("response") or "").strip()
+    return text or idea
 
 
 def translate_to_english(text: str) -> str:
@@ -2454,6 +2494,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "do:reset":
         st = reset_state(context)
         await replace_ui_message_from_callback(query, context, "Состояние очищено.\n\n" + help_text(st), reply_markup=main_keyboard())
+        return
+
+    if data == "do:expand":
+        idea = (st.get("prompt") or "").strip()
+        if not idea:
+            await replace_ui_message_from_callback(query, context, "Сначала напиши идею промтом.", reply_markup=main_keyboard())
+            return
+        await replace_ui_message_from_callback(query, context, "✨ Развиваю идею...", reply_markup=None)
+        try:
+            expanded = await asyncio.to_thread(expand_idea_with_ollama, idea)
+        except Exception as e:
+            log.exception("Ollama scenario expansion failed")
+            await context.bot.send_message(query.message.chat_id, f"Не получилось развить идею: {e}", reply_markup=main_keyboard())
+            return
+        st["prompt"] = expanded
+        await context.bot.send_message(query.message.chat_id, f"Новый промт:\n\n{expanded}", reply_markup=main_keyboard())
         return
 
     if data == "do:go":

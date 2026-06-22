@@ -118,6 +118,46 @@ git clone https://github.com/lrzjason/Comfyui-QwenEditUtils qweneditutils
 ### Florence-2 (автоописание фото для MopMix Duo)
 - `microsoft/Florence-2-large` — **https://huggingface.co/microsoft/Florence-2-large** (скачивается нодой `DownloadAndLoadFlorence2Model` автоматически при первом запуске, кладёт в `models/LLM/Florence-2-large`).
 
+### «✨ Развить идею» (Ollama, расширение промта)
+Кнопка в меню бота отправляет текущий промт в локальный Ollama (`expand_idea_with_ollama` в
+`telegram_comfyui_bot.py`) и заменяет его на развёрнутый сценарий из 3-4 предложений под 12
+секунд (с репликой в кавычках для дальнейшего дубляжа).
+- Сервис Ollama уже стоит на сервере (`systemctl status ollama`, слушает `127.0.0.1:11434`).
+- Модель: `hf.co/mradermacher/Qwen2.5-32B-Instruct-abliterated-v2-i1-GGUF:Q4_K_M` — качается прямо с HF через Ollama:
+  ```
+  ollama pull hf.co/mradermacher/Qwen2.5-32B-Instruct-abliterated-v2-i1-GGUF:Q4_K_M
+  ```
+  Выбрана как лучшая по качеству русского языка среди протестированных (сравнивались также
+  предустановленные `dolphin-llama3.1`, `llama3-lexi-uncensored`, `Llama-3-NeuralDaredevil-8B`,
+  `qwen3-vl-abliterated` — все путали смысл, съезжали на английский или выдавали мусорные слова).
+  Работает на CPU (~20-30 сек на сценарий), не делит GPU/VRAM с генерацией видео.
+- Имя модели/таймаут настраиваются через `OLLAMA_SCENARIO_MODEL` / `OLLAMA_SCENARIO_TIMEOUT`.
+
+### Дубляж голоса (прототип, ещё не встроен в бота)
+Ручной пайплайн в `test/work/` (не часть бота, отдельные скрипты на лету через `venv/bin/python`):
+видео → извлечь аудио → разделить на голос/фон (Demucs) → клонировать тембр голоса по образцу
+(OpenVoice V2) → смешать обратно с фоном → наложить на видео. Сейчас лучше работает БЕЗ
+разделения через Demucs (конвертировать сразу всю смешанную дорожку целиком) — Demucs обучен на
+музыке и путает стоны/не-речевые звуки, частично "роняя" их в фоновую дорожку необработанными.
+- `demucs` (pip, в venv бота) — разделение на vocals/no_vocals.
+- `third_party/OpenVoice` — клон **https://github.com/myshell-ai/OpenVoice.git** (полный
+  репозиторий со своим `.git`, в общий git не входит, см. `.gitignore`). Восстановить:
+  ```
+  git clone https://github.com/myshell-ai/OpenVoice.git third_party/OpenVoice
+  mkdir -p third_party/OpenVoice/checkpoints_v2/converter
+  curl -L -o third_party/OpenVoice/checkpoints_v2/converter/checkpoint.pth \
+    https://huggingface.co/myshell-ai/OpenVoiceV2/resolve/main/converter/checkpoint.pth
+  curl -L -o third_party/OpenVoice/checkpoints_v2/converter/config.json \
+    https://huggingface.co/myshell-ai/OpenVoiceV2/resolve/main/converter/config.json
+  ```
+  Python-зависимости (в venv бота): `soundfile librosa pydub faster-whisper whisper-timestamped
+  eng_to_ipa inflect unidecode pypinyin cn2an jieba langid wavmark torchcodec`.
+- Локальный патч: `third_party/OpenVoice/openvoice/se_extractor.py` — `WhisperModel(...)`
+  переведён с `device="cuda"` на `device="cpu", compute_type="int8"` (faster-whisper/ctranslate2
+  собран под CUDA 12, а в venv бота через demucs/torch подтянулся CUDA 13 — конфликт версий
+  библиотек). При переустановке OpenVoice патч слетит — нужно повторить, иначе извлечение
+  голосового отпечатка падает с `Library libcublas.so.12 is not found`.
+
 ## Прочее окружение
 
 - `deep-translator` (pip) — перевод промта RU→EN для MopMix/MopMix Duo (их SDXL CLIP-энкодер не понимает русский; LTX Sulphur/Eros используют мультиязычные LLM-энкодеры и в переводе не нуждаются).

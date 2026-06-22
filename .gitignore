@@ -13,3 +13,9 @@ third_party/Wav2Lip/results/
 # Local model cache (not the live ComfyUI model path; see README.md for restore links)
 models/
 
+# Full external clone (own .git, plus a 131MB checkpoint) - restore via README instructions
+third_party/OpenVoice/
+
+# Personal test data: voice samples, generated test outputs
+test/
+
