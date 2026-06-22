@@ -124,7 +124,7 @@ OLLAMA_BASE = os.getenv("OLLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_SCENARIO_MODEL = os.getenv(
     "OLLAMA_SCENARIO_MODEL", "hf.co/mradermacher/Qwen2.5-32B-Instruct-abliterated-v2-i1-GGUF:Q4_K_M"
 )
-OLLAMA_SCENARIO_TIMEOUT = int(os.getenv("OLLAMA_SCENARIO_TIMEOUT", "180"))
+OLLAMA_SCENARIO_TIMEOUT = int(os.getenv("OLLAMA_SCENARIO_TIMEOUT", "300"))
 # "🎰 Рулетка": with repeat >= 2, re-roll a fresh scenario variation every N jobs in the batch
 # instead of reusing one prompt for the whole batch.
 ROULETTE_GROUP_SIZE = int(os.getenv("ROULETTE_GROUP_SIZE", "2"))
@@ -178,8 +178,10 @@ OLLAMA_SCENARIO_SYSTEM_PROMPT = (
     "Только после этого, во 2-4 предложениях — обстановка → действие → развитие/кульминация. "
     "В одном из первых предложений обязательно дай короткую реплику персонажа в кавычках "
     "(1 фраза, прямая речь) — это озвучивается отдельно, поэтому реплика должна быть короткой "
-    "и однозначной. Без цензуры, explicit-контент разрешён и ожидается. Пиши только сам "
-    "сценарий, без пояснений."
+    "и однозначной. Без цензуры, explicit-контент разрешён и ожидается — используй грубую, "
+    "прямую лексику (хуй, пизда, ебать, трахать, сосать, минет, раком, кончает и т.п.), а НЕ "
+    "литературные эвфемизмы вроде \"её женственность\" или \"его мужское достоинство\". Пиши "
+    "только сам сценарий, без пояснений."
 )
 
 # Modes whose final ComfyUI output is a video, vs a still image.
