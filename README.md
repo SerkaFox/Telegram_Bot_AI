@@ -113,7 +113,9 @@ git clone https://github.com/lrzjason/Comfyui-QwenEditUtils qweneditutils
 - `qwen_image_edit_2509_fp8_e4m3fn.safetensors` (UNET) — **https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI** → `split_files/diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors`
 - `qwen_2.5_vl_7b_fp8_scaled.safetensors` (CLIP, type=`qwen_image`) — **https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI** → `split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors`
 - `qwen_image_vae.safetensors` (VAE) — тот же репозиторий → `split_files/vae/qwen_image_vae.safetensors`
-- Опционально (сейчас не подключена в воркфлоу, но скачана на сервере про запас для ускорения) — `Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors`: **https://huggingface.co/lightx2v/Qwen-Image-Lightning** → `Qwen-Image-Edit-2509/Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors`
+- `Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors` (LoRA, ускорение 20→4 шага) — **https://huggingface.co/lightx2v/Qwen-Image-Lightning** → `Qwen-Image-Edit-2509/Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors`
+- `SEXGOD_FemaleNudity_QwenEdit_2511_v2.safetensors` (LoRA, анатомия для NSFW) — **https://huggingface.co/Baraje/SexGod_NSFW_Female_Nudes_QWEN_Image_Edit_2511** → файл с тем же именем. Триггер-слова (`LoRA, Nude, Sex.`) автоматически добавляются в начало промта кодом бота.
+- Обе LoRA стекуются на одну UNET-модель (`build_image_edit_workflow`), имена настраиваются через `IMAGE_EDIT_LIGHTNING_LORA` / `IMAGE_EDIT_NSFW_LORA`.
 
 ### Florence-2 (автоописание фото для MopMix Duo)
 - `microsoft/Florence-2-large` — **https://huggingface.co/microsoft/Florence-2-large** (скачивается нодой `DownloadAndLoadFlorence2Model` автоматически при первом запуске, кладёт в `models/LLM/Florence-2-large`).
