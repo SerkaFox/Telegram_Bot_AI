@@ -109,8 +109,9 @@ REACTOR_FACE_RESTORE_MODEL = os.getenv("REACTOR_FACE_RESTORE_MODEL", "GFPGANv1.3
 IMAGE_EDIT_QWEN_UNET = os.getenv("IMAGE_EDIT_QWEN_UNET", "qwen_image_edit_2509_fp8_e4m3fn.safetensors")
 IMAGE_EDIT_QWEN_CLIP = os.getenv("IMAGE_EDIT_QWEN_CLIP", "qwen_2.5_vl_7b_fp8_scaled.safetensors")
 IMAGE_EDIT_QWEN_VAE = os.getenv("IMAGE_EDIT_QWEN_VAE", "qwen_image_vae.safetensors")
-IMAGE_EDIT_STEPS = int(os.getenv("IMAGE_EDIT_STEPS", "20"))
-IMAGE_EDIT_CFG = float(os.getenv("IMAGE_EDIT_CFG", "4"))
+IMAGE_EDIT_LIGHTNING_LORA = os.getenv("IMAGE_EDIT_LIGHTNING_LORA", "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors")
+IMAGE_EDIT_STEPS = int(os.getenv("IMAGE_EDIT_STEPS", "4"))
+IMAGE_EDIT_CFG = float(os.getenv("IMAGE_EDIT_CFG", "1"))
 IMAGE_EDIT_SHIFT = float(os.getenv("IMAGE_EDIT_SHIFT", "3.1"))
 IMAGE_EDIT_QUALITY = {
     "low": (1024, 1024),
@@ -1212,7 +1213,11 @@ def build_image_edit_workflow(
         "72": {"class_type": "CLIPLoader", "inputs": {"clip_name": IMAGE_EDIT_QWEN_CLIP, "type": "qwen_image"}},
         "71": {"class_type": "VAELoader", "inputs": {"vae_name": IMAGE_EDIT_QWEN_VAE}},
         "73": {"class_type": "UNETLoader", "inputs": {"unet_name": IMAGE_EDIT_QWEN_UNET, "weight_dtype": "default"}},
-        "67": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["73", 0], "shift": IMAGE_EDIT_SHIFT}},
+        "74": {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"model": ["73", 0], "lora_name": IMAGE_EDIT_LIGHTNING_LORA, "strength_model": 1.0},
+        },
+        "67": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["74", 0], "shift": IMAGE_EDIT_SHIFT}},
         "41": {"class_type": "LoadImage", "inputs": {"image": image_name}},
         "68": {
             "class_type": "TextEncodeQwenImageEditPlus",
