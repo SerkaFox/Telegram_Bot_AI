@@ -12,7 +12,8 @@ Telegram-бот, который ставит задачи в очередь к C
 
 | Режим бота      | Файл воркфлоу              | Движок                          |
 |-----------------|-----------------------------|----------------------------------|
-| `video`         | `workflow_video.json`       | WAN 2.2 I2V (GGUF)               |
+| `video`         | `workflow_video.json`       | WAN 2.2 I2V NSFW (GGUF) + MMAudio NSFW |
+| `video_clean` (Clean Video) | `workflow_video.json` (тот же граф, патчится в коде) | Авто-конвейер: Ollama (чистый сценарий) → Qwen-Edit (clean) → сток WAN 2.2 I2V → чистый MMAudio |
 | `ltx_sulphur`   | `LTX2.3_2.json`              | LTX-2.3 Sulphur (видео+аудио)    |
 | `ltx_eros`      | `workflow_ltx_eros.json`     | LTX-2.3 10Eros (видео+аудио)     |
 | `image` (Edit Photo) | собирается в коде (`build_image_edit_workflow`) | Qwen-Image-Edit-2509 |
@@ -76,6 +77,21 @@ git clone https://github.com/lrzjason/Comfyui-QwenEditUtils qweneditutils
 - `nsfw_wan_umt5-xxl_fp8_scaled.safetensors` — текстовый энкодер (CLIP), источник не сохранён.
 - `wan_2.1_vae.safetensors` — VAE, источник не сохранён.
 - Опциональные LoRA (кнопка LoRA в боте, `VIDEO_LORA_OPTIONS` в коде) — список из ~15 NSFW LoRA для WAN 2.2, все предустановлены до этой сессии, точные ссылки не сохранены. Имена файлов — в `telegram_comfyui_bot.py`, искать по имени на CivitAI.
+
+### `video_clean` (Clean Video — цензурный WAN 2.2)
+Использует **тот же** `workflow_video.json`, но `patch_video_workflow(..., clean=True)` (функция `apply_clean_video_base`) на лету подменяет ноды 371/372 со стоковых экспертов и форсит чистый дистилл. Меняй модели через env-переменные `VIDEO_CLEAN_*` в юните, не правя воркфлоу.
+- `Wan2_2-I2V-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors` / `...LOW...` (UNET, high/low эксперты) — сток WAN 2.2 I2V A14B, лежат в `models/diffusion_models/`. Источник: **https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged** (Kijai scaled fp8).
+- `Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_high.safetensors` / `...low...` (LoRA, дистилл Lightx2v 4-step, применяется на strength 1.0) — уже в `models/loras/`, тот же, что опция `lightx2v` в `VIDEO_LORA_OPTIONS`.
+- CLIP/VAE — те же, что у `video` (берутся из воркфлоу как есть).
+- Звук: `mmaudio_large_44k_v2_fp16.safetensors` (чистый сток MMAudio, в `models/mmaudio/`) — **https://huggingface.co/Kijai/MMAudio_safetensors**. `video_clean` входит в `SILENT_VIDEO_MODES`, но `video_audio_model_for_mode()`/`video_audio_negative_for_mode()` дают ему именно эту чистую модель и «чистый» audio-негатив (вместо NSFW-Foley `nsfw_gold`, который остаётся у режима `video`). VAE/synchformer/CLIP для MMAudio общие с режимом `video`. Меняется через env `VIDEO_CLEAN_AUDIO_MODEL` / `VIDEO_CLEAN_AUDIO_NEGATIVE`.
+- `sigma_shift` для clean форсится в `5.0` (`VIDEO_CLEAN_SIGMA_SHIFT`), а не 8 как у NSFW-базы: сток-эксперты + внешний Lightx2v-дистилл при shift=8 не дорешают латент и кадр рассыпается в «пыль/туман». NSFW-база — fast-финтюн, заточенный под 8, поэтому у `video` shift не трогаем.
+
+#### «Умная» кнопка: авто-конвейер `submit_video_clean_job`
+Clean Video — не просто анимация фото, а цепочка из трёх локальных моделей (фото + идея → готовый ролик, без доп. кнопок). Каждая стадия при ошибке деградирует к предыдущей (генерация не падает):
+1. **Ollama** разворачивает идею в детальный сценарий движения — `expand_idea_with_ollama(..., system_prompt=OLLAMA_SCENARIO_SYSTEM_PROMPT_CLEAN)`. Используется **чистый** системный промпт (SFW, персонаж всегда одет), а не NSFW-сценарист режима `video` — иначе текст тянет к наготе и борется с clean-негативом. Гейт: `VIDEO_CLEAN_AUTO_EXPAND`.
+2. **Qwen-Image-Edit** перерисовывает фото под запрос — `build_image_edit_workflow(..., clean=True)` (без NSFW-LoRA и её триггера). Это и позволяет показать то, чего нет на исходнике (тигр, самолёт, под водой): I2V сам по себе только анимирует уже видимое. Гейт: `VIDEO_CLEAN_AUTO_EDIT`, таймаут `VIDEO_CLEAN_EDIT_TIMEOUT`.
+3. **Чистый WAN 2.2** анимирует получившийся кадр; поллер результата добавляет MMAudio и отправляет.
+- Между edit и видео вызывается `free_comfy_memory()` (POST `/free`): иначе Qwen остаётся в VRAM и WAN почти целиком уходит в RAM (наблюдалось 9.3 ГБ offload, один рендер >8 мин). Промежуточный edited-кадр шлётся в чат как превью.
 
 ### `ltx_sulphur` (LTX2.3_2.json)
 - `sulphur_distil_bf16.safetensors` — чекпоинт/текстовый энкодер/audio VAE (один файл, грузится тремя разными лоадерами). Источник: **https://huggingface.co/SulphurAI/Sulphur-2-base**

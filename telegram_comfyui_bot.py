@@ -74,6 +74,34 @@ MOPMIX_RESOLUTIONS = {
     "medium": "832x1216 (0.68)",
     "high": "896x1152 (0.78)",
 }
+# Furry/anthro mode for MopMix: swaps the bigASP human base for a Pony Realism base, which
+# natively understands anthro anatomy (muzzle, full-body fur, tail). bigASP only knows humans,
+# so a furry LoRA can't push it there — the base model has to change. Pony does explicit NSFW.
+PONY_FURRY_CHECKPOINT = os.getenv("PONY_FURRY_CHECKPOINT", "ponyRealism_V23ULTRA.safetensors")
+# Pixel buckets per quality for the Pony txt2img graph (SDXL ~1MP sweet spot, portrait).
+PONY_FURRY_RESOLUTIONS = {
+    "low": (768, 1152),
+    "medium": (832, 1216),
+    "high": (1024, 1536),
+}
+# Prepended to the (English) user prompt: Pony quality score tags + anthro + fur, so the result
+# is reliably an anthro/furry. Nudity vs. clothing is deliberately NOT forced here — the user's
+# own prompt decides (e.g. "naked, nipples" → nude; "in a skirt and stockings" → clothed).
+PONY_FURRY_POS_PREFIX = os.getenv(
+    "PONY_FURRY_POS_PREFIX",
+    "score_9, score_8_up, score_7_up, source_furry, anthro, solo, fluffy fur covering whole body, ",
+)
+# Negative keeps the result furry (anti-human) and clean of artifacts, but does NOT ban clothing
+# or nudity — both are user-controlled. Censorship terms stay so requested nudity isn't bar/mosaic'd.
+PONY_FURRY_NEGATIVE = os.getenv(
+    "PONY_FURRY_NEGATIVE",
+    "score_4, score_5, score_6, human face, human skin, hairless skin, bald, censored, "
+    "mosaic censorship, bar censor, low quality, worst quality, bad anatomy, deformed, mutated, "
+    "extra limbs, extra digits, watermark, text, signature",
+)
+PONY_FURRY_STEPS = int(os.getenv("PONY_FURRY_STEPS", "28"))
+PONY_FURRY_CFG = float(os.getenv("PONY_FURRY_CFG", "7.0"))
+
 # img2img strength for mopmix: 0 keeps the uploaded photo untouched, 1 regenerates it
 # from scratch. 0.6 redraws per the prompt while keeping the photo's pose/composition.
 MOPMIX_DENOISE = float(os.getenv("MOPMIX_DENOISE", "0.6"))
@@ -189,15 +217,80 @@ OLLAMA_SCENARIO_SYSTEM_PROMPT = (
     "только сам сценарий, без пояснений."
 )
 
+# Clean counterpart for the censored 🌸 Clean Video pipeline: same 3-4 sentence, chronological,
+# appearance-first structure, but strictly SFW. The NSFW base above pushes nudity/explicit terms
+# into the prompt text, which then fights the clean negative; this keeps the whole chain clean.
+OLLAMA_SCENARIO_SYSTEM_PROMPT_CLEAN = (
+    "Ты — сценарист для генерации коротких 12-секундных видео нейросетью. "
+    "Видео склеивается из 3-4 смысловых блоков, каждый блок — одно предложение, и получает "
+    "пропорциональную (по длине текста) долю из 12 секунд. Поэтому пиши РОВНО 3-4 предложения, "
+    "не больше: каждое предложение — один цельный, законченный эпизод-кадр (не дробить одно "
+    "действие на несколько предложений), без нумерации и списков, обычным связным текстом на "
+    "русском языке. Сценарий должен идти строго в хронологическом порядке без скачков: каждое "
+    "следующее предложение — плавное продолжение и нарастание предыдущего. ПЕРВОЕ предложение — "
+    "ОБЯЗАТЕЛЬНО подробное описание внешности персонажа и его ОДЕЖДЫ (конкретные предметы "
+    "одежды, причёска, выражение лица), без описания обнажённого тела. Только после этого, во "
+    "2-4 предложениях — обстановка → действие → развитие/кульминация (движение, эмоции, "
+    "окружение, свет, погода, детали сцены). Контент строго цензурный и приличный: персонаж "
+    "всегда полностью одет, никакой наготы, эротики, секса, насилия или грубой лексики — это "
+    "красивый, кинематографичный, безопасный ролик. Делай акцент на атмосфере, движении и "
+    "визуальных деталях. Пиши только сам сценарий, без пояснений."
+)
+
 # Modes whose final ComfyUI output is a video, vs a still image.
-VIDEO_MODES = {"video", "ltx_sulphur", "ltx_eros"}
+VIDEO_MODES = {"video", "video_clean", "ltx_sulphur", "ltx_eros"}
 # Modes that take a single uploaded photo into st["video_source"] (video modes, plus
 # mopmix which runs img2img off of it, plus image which edits it directly).
 SINGLE_PHOTO_MODES = VIDEO_MODES | {"mopmix", "image"}
 # Modes that take two uploaded photos into st["duo_photos"].
 DUO_PHOTO_MODES = {"mopmix_duo"}
 # Modes whose workflow renders silent video and needs the MMAudio postprocess pass.
-SILENT_VIDEO_MODES = {"video"}
+# "video" uses the NSFW Foley model; "video_clean" uses the stock MMAudio model
+# (VIDEO_CLEAN_AUDIO_MODEL) via video_audio_model_for_mode() so its Foley track stays clean.
+SILENT_VIDEO_MODES = {"video", "video_clean"}
+
+# "video_clean": a censored, high-fidelity image->video mode. It reuses the same WAN 2.2
+# I2V workflow/graph as "video" but swaps the NSFW-tuned base UNET (nodes 371/372) for the
+# stock WAN 2.2 I2V A14B experts, force-applies only the clean Lightx2v 4-step distill LoRA
+# (ignoring any NSFW LoRA selection), and adds SFW negatives. Stock WAN 2.2 is the
+# community's top-reviewed open-source I2V model for identity ("face") preservation.
+# Default to the Q4_K_M GGUF experts for VRAM parity with the NSFW "video" mode (which also
+# runs Q4 GGUF). The loader is picked by extension in apply_clean_video_base, so overriding
+# these with the fp8 .safetensors checkpoints (also on disk) still works.
+VIDEO_CLEAN_UNET_HIGH = os.getenv("VIDEO_CLEAN_UNET_HIGH", "Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf")
+VIDEO_CLEAN_UNET_LOW = os.getenv("VIDEO_CLEAN_UNET_LOW", "Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf")
+VIDEO_CLEAN_UNET_DTYPE = os.getenv("VIDEO_CLEAN_UNET_DTYPE", "default")
+# The clean (non-NSFW) Lightx2v 4-step distill, applied at full strength so the stock
+# (non-distilled) experts converge in the workflow's low step count. Applied directly rather
+# than via VIDEO_LORA_OPTIONS, whose shared strength multiplier would weaken it to ~0.5.
+VIDEO_CLEAN_DISTILL_HIGH = os.getenv("VIDEO_CLEAN_DISTILL_HIGH", "Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_high.safetensors")
+VIDEO_CLEAN_DISTILL_LOW = os.getenv("VIDEO_CLEAN_DISTILL_LOW", "Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_low.safetensors")
+VIDEO_CLEAN_DISTILL_STRENGTH = float(os.getenv("VIDEO_CLEAN_DISTILL_STRENGTH", "1.0"))
+# The NSFW base is a fast-move finetune baked for sigma_shift=8; stock WAN 2.2 experts driven by
+# an external Lightx2v distill want the canonical ~5.0 shift. At 8 the schedule over-shifts and the
+# stock latent never resolves -> frames disintegrate into dust/fog. Override only the clean sampler.
+VIDEO_CLEAN_SIGMA_SHIFT = float(os.getenv("VIDEO_CLEAN_SIGMA_SHIFT", "5.0"))
+VIDEO_CLEAN_NEGATIVE = (
+    "nudity, nude, naked, nsfw, explicit, sexual, genitals, nipples, exposed breasts, "
+    "underwear, lingerie, suggestive, erotic, pornographic, gore, blood"
+)
+# Clean MMAudio Foley for the censored mode: the stock MMAudio large 44k v2, instead of the
+# NSFW-tuned "nsfw_gold" model (moans/slaps). The VAE/synchformer/CLIP are shared, so only the
+# main model differs. The audio negative steers away from sexual/voice sounds for a "clean
+# but detailed" ambient track (footsteps, wind, room tone, etc.).
+VIDEO_CLEAN_AUDIO_MODEL = os.getenv("VIDEO_CLEAN_AUDIO_MODEL", "mmaudio_large_44k_v2_fp16.safetensors")
+VIDEO_CLEAN_AUDIO_NEGATIVE = os.getenv(
+    "VIDEO_CLEAN_AUDIO_NEGATIVE",
+    "moaning, moans, sex sounds, sexual sounds, screaming, music, voice, speech, singing",
+)
+# "Smart" Clean Video: send a photo + an idea, get a finished clip with zero extra taps. The
+# button runs the whole chain itself - Ollama rewrites the idea into a rich scenario, Qwen-Edit
+# redraws the photo into that scene (so I2V can show things that aren't in the source, e.g. a
+# tiger, a plane, underwater), then the clean WAN animates it and MMAudio adds sound. Both stages
+# are toggleable: AUTO_EDIT off = animate the source as-is, AUTO_EXPAND off = use the raw prompt.
+VIDEO_CLEAN_AUTO_EXPAND = os.getenv("VIDEO_CLEAN_AUTO_EXPAND", "1").strip().lower() not in {"0", "false", "no", "off"}
+VIDEO_CLEAN_AUTO_EDIT = os.getenv("VIDEO_CLEAN_AUTO_EDIT", "1").strip().lower() not in {"0", "false", "no", "off"}
+VIDEO_CLEAN_EDIT_TIMEOUT = int(os.getenv("VIDEO_CLEAN_EDIT_TIMEOUT", "300"))
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 POLL_SECONDS = float(os.getenv("POLL_SECONDS", "2"))
@@ -260,6 +353,9 @@ log = logging.getLogger("tg-comfy-bot")
 # ============================================================
 GEN_QUEUE: asyncio.Queue = asyncio.Queue()
 WORKER_STARTED = False
+# Roulette per-chat state, filled lazily by the worker during a batch
+ROULETTE_LAST_PROMPT: dict[int, str] = {}
+ROULETTE_CAPTION: dict[int, str] = {}
 JOB_SEQ = 0
 ACTIVE_PROMPTS: dict[str, dict] = {}
 
@@ -269,6 +365,7 @@ ACTIVE_PROMPTS: dict[str, dict] = {}
 CHAT_STATUS: dict[int, dict[str, Any]] = {}
 MODE_AVG_DURATION: dict[str, float] = {
     "video": 240.0,
+    "video_clean": 300.0,
     "ltx_sulphur": 230.0,
     "ltx_eros": 230.0,
     "mopmix": 60.0,
@@ -296,6 +393,11 @@ class Job:
     batch_total: int
     dub_voice: bool
     dub_voice_name: str
+    # Roulette: re-roll the prompt lazily in the worker (keeps enqueue instant so Stop works)
+    roulette: bool = False
+    base_idea: str = ""
+    # Furry: MopMix uses the Pony base + anthro tags instead of bigASP
+    furry: bool = False
 
 
 # ============================================================
@@ -603,6 +705,7 @@ def initial_state() -> dict[str, Any]:
         "roulette": False,
         "dub_voice": False,
         "dub_voice_name": DEFAULT_VOICE_NAME,
+        "furry": False,
     }
 
 
@@ -618,6 +721,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["duo_photos"] = [blank_media(), blank_media()]
     if "roulette" not in st:
         st["roulette"] = False
+    if "furry" not in st:
+        st["furry"] = False
     if "dub_voice" not in st:
         st["dub_voice"] = False
     if "dub_voice_name" not in st:
@@ -766,12 +871,17 @@ async def replace_ui_message_from_callback(query, context: ContextTypes.DEFAULT_
 def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
     roulette_on = bool(st.get("roulette")) if st else False
     dub_voice_on = bool(st.get("dub_voice")) if st else False
+    furry_on = bool(st.get("furry")) if st else False
     roulette_label = f"🎰 Рулетка: {'✅ ВКЛ' if roulette_on else '⬜ выкл'}"
     dub_voice_label = f"🎙 Дубляж: {'✅ ВКЛ' if dub_voice_on else '⬜ выкл'}"
+    furry_label = f"🐾 Furry: {'✅ ВКЛ' if furry_on else '⬜ выкл'}"
 
     rows = [
         [
             InlineKeyboardButton("🎬 Video", callback_data="mode:video"),
+            InlineKeyboardButton("🌸 Clean Video", callback_data="mode:video_clean"),
+        ],
+        [
             InlineKeyboardButton("✏️ Edit Photo", callback_data="mode:image"),
         ],
         [
@@ -805,6 +915,9 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(roulette_label, callback_data="do:roulette"),
             InlineKeyboardButton(dub_voice_label, callback_data="do:dubvoice"),
+        ],
+        [
+            InlineKeyboardButton(furry_label, callback_data="do:furry"),
         ],
     ]
     if dub_voice_on:
@@ -961,14 +1074,14 @@ def help_text(st: dict[str, Any]) -> str:
         "• ltx_sulphur: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 Sulphur)\n"
         "• ltx_eros: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 10Eros)\n"
         "• image: 1 фото + промт-редактирование (поменять одежду/тело/фон/добавить или убрать кого-то, Qwen-Image-Edit)\n"
-        "• mopmix: 1 фото + промт + качество → картинка img2img (SDXL + face detailer)\n"
+        "• mopmix: промт (+ фото опционально) → картинка. Без фото — txt2img с нуля; с фото — img2img\n"
         "• mopmix_duo: 2 фото (лица) + промт → сцена с обоими лицами (face swap)\n\n"
         "Команды:\n"
         "/video — обычный photo → video\n"
         "/ltxsulphur — photo → video+audio (LTX2.3 Sulphur)\n"
         "/ltxeros — photo → video+audio (LTX2.3 10Eros)\n"
         "/image — photo → редактирование фото по промту\n"
-        "/mopmix — photo → img2img картинка (MopMix BigASP 2.5)\n"
+        "/mopmix — промт → картинка (MopMix BigASP 2.5); фото опц.: есть → img2img, нет → txt2img\n"
         "/mopmixduo — 2 фото → сцена с обоими лицами (face swap)\n"
         "/prompt текст — сохранить промт\n"
         f"/seconds 8 — video/ltx_sulphur/ltx_eros до {MAX_SECONDS} сек\n"
@@ -1029,6 +1142,20 @@ def get_history(prompt_id: str) -> dict[str, Any]:
     r = requests.get(f"{COMFY_BASE}/history/{prompt_id}", timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     return r.json()
+
+
+def free_comfy_memory() -> None:
+    """Ask ComfyUI to unload models and free VRAM. Used between the Qwen-Edit and WAN stages of
+    the smart Clean Video pipeline: leaving Qwen resident forces WAN almost entirely into RAM
+    (observed: 9.3GB offloaded, single render >8 min), so we flush before switching models."""
+    try:
+        requests.post(
+            f"{COMFY_BASE}/free",
+            json={"unload_models": True, "free_memory": True},
+            timeout=60,
+        )
+    except Exception:
+        log.warning("free_comfy_memory failed", exc_info=True)
 
 
 def fetch_file(filename: str, subfolder: str = "", file_type: str = "output") -> bytes:
@@ -1175,6 +1302,7 @@ def patch_video_workflow(
     selected_loras: list[str] | None = None,
     continuity_prompt: str = "",
     continuity_negative: str = "",
+    clean: bool = False,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
     prompt_parts = [prompt, VIDEO_NO_TEXT_PROMPT, VIDEO_NO_LOOP_PROMPT]
@@ -1199,8 +1327,45 @@ def patch_video_workflow(
     wf["373:359"]["inputs"]["value"] = str(frame_count)
     wf["314"]["inputs"]["frame_rate"] = fps
     wf["141"]["inputs"]["seed"] = int(seed)
-    apply_video_loras(wf, selected_loras or [])
+    if clean:
+        apply_clean_video_base(wf)
+    else:
+        apply_video_loras(wf, selected_loras or [])
     return wf
+
+
+def _clean_unet_loader(unet_name: str) -> dict[str, Any]:
+    """GGUF experts need UnetLoaderGGUF; fp8 .safetensors need the stock UNETLoader. Both
+    expose MODEL at output 0, so the rest of the clean graph wires identically either way."""
+    if unet_name.lower().endswith(".gguf"):
+        return {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet_name}}
+    return {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": VIDEO_CLEAN_UNET_DTYPE}}
+
+
+def apply_clean_video_base(wf: dict[str, Any]) -> None:
+    """Turn the NSFW WAN 2.2 I2V graph into the censored one: swap the NSFW-tuned base UNET
+    experts (371/372) for the stock WAN 2.2 I2V A14B experts, drive them through only the
+    clean Lightx2v 4-step distill at full strength, and bolt SFW terms onto the negative."""
+    wf["371"] = _clean_unet_loader(VIDEO_CLEAN_UNET_HIGH)
+    wf["372"] = _clean_unet_loader(VIDEO_CLEAN_UNET_LOW)
+    # Disable any LoRAs baked into the rgthree Power Lora nodes, then route the experts only
+    # through the clean distill so no NSFW LoRA can leak in.
+    clear_power_lora_node(wf, "152")
+    clear_power_lora_node(wf, "155")
+    wf["tg_clean_high_lora"] = {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {"model": ["371", 0], "lora_name": VIDEO_CLEAN_DISTILL_HIGH, "strength_model": VIDEO_CLEAN_DISTILL_STRENGTH},
+    }
+    wf["tg_clean_low_lora"] = {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {"model": ["372", 0], "lora_name": VIDEO_CLEAN_DISTILL_LOW, "strength_model": VIDEO_CLEAN_DISTILL_STRENGTH},
+    }
+    wf["141"]["inputs"]["model_high_noise"] = ["tg_clean_high_lora", 0]
+    wf["141"]["inputs"]["model_low_noise"] = ["tg_clean_low_lora", 0]
+    wf["141"]["inputs"]["sigma_shift"] = VIDEO_CLEAN_SIGMA_SHIFT
+    neg = wf["373:360"]["inputs"].get("text", "")
+    if VIDEO_CLEAN_NEGATIVE not in neg:
+        wf["373:360"]["inputs"]["text"] = f"{neg}, {VIDEO_CLEAN_NEGATIVE}" if neg else VIDEO_CLEAN_NEGATIVE
 
 
 def build_image_edit_workflow(
@@ -1210,10 +1375,17 @@ def build_image_edit_workflow(
     width: int,
     height: int,
     seed: int,
+    clean: bool = False,
 ) -> dict[str, Any]:
     """Qwen-Image-Edit: conditions on the source photo via cross-attention and edits only
-    what the prompt asks for, instead of redrawing the whole image like img2img-from-noise."""
-    return {
+    what the prompt asks for, instead of redrawing the whole image like img2img-from-noise.
+    When clean=True the NSFW LoRA and its trigger are dropped, so the edit step inside the
+    censored video pipeline can't bleed nudity into the scene it's composing."""
+    # The Lightning (speed) LoRA always applies; the NSFW LoRA is chained in front of it only
+    # for the explicit Edit Photo mode. clean=True wires Lightning straight off the base UNET.
+    lightning_model = ["73", 0] if clean else ["76", 0]
+    edit_prompt = prompt if clean else f"{IMAGE_EDIT_NSFW_LORA_TRIGGER} {prompt}"
+    wf = {
         "72": {"class_type": "CLIPLoader", "inputs": {"clip_name": IMAGE_EDIT_QWEN_CLIP, "type": "qwen_image"}},
         "71": {"class_type": "VAELoader", "inputs": {"vae_name": IMAGE_EDIT_QWEN_VAE}},
         "73": {"class_type": "UNETLoader", "inputs": {"unet_name": IMAGE_EDIT_QWEN_UNET, "weight_dtype": "default"}},
@@ -1223,13 +1395,13 @@ def build_image_edit_workflow(
         },
         "74": {
             "class_type": "LoraLoaderModelOnly",
-            "inputs": {"model": ["76", 0], "lora_name": IMAGE_EDIT_LIGHTNING_LORA, "strength_model": 1.0},
+            "inputs": {"model": lightning_model, "lora_name": IMAGE_EDIT_LIGHTNING_LORA, "strength_model": 1.0},
         },
         "67": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["74", 0], "shift": IMAGE_EDIT_SHIFT}},
         "41": {"class_type": "LoadImage", "inputs": {"image": image_name}},
         "68": {
             "class_type": "TextEncodeQwenImageEditPlus",
-            "inputs": {"clip": ["72", 0], "prompt": f"{IMAGE_EDIT_NSFW_LORA_TRIGGER} {prompt}", "vae": ["71", 0], "image1": ["41", 0]},
+            "inputs": {"clip": ["72", 0], "prompt": edit_prompt, "vae": ["71", 0], "image1": ["41", 0]},
         },
         "69": {
             "class_type": "TextEncodeQwenImageEditPlus",
@@ -1254,6 +1426,11 @@ def build_image_edit_workflow(
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["65", 0], "vae": ["71", 0]}},
         "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "tg_image_edit"}},
     }
+    if clean:
+        # Nothing references node 76 anymore (Lightning reads the base UNET directly), so drop
+        # the NSFW LoRA loader entirely rather than leave a dangling node in the graph.
+        wf.pop("76", None)
+    return wf
 
 
 def patch_ltx_sulphur_workflow(
@@ -1358,8 +1535,8 @@ def caption_photo(local_path: str, name_hint: str) -> str:
     return ""
 
 
-def expand_idea_with_ollama(idea: str, photo_caption: str = "") -> str:
-    prompt = f"{OLLAMA_SCENARIO_SYSTEM_PROMPT}"
+def expand_idea_with_ollama(idea: str, photo_caption: str = "", system_prompt: str | None = None) -> str:
+    prompt = f"{system_prompt or OLLAMA_SCENARIO_SYSTEM_PROMPT}"
     if photo_caption:
         # Florence-2's caption comes back in English; Qwen2.5 (heavily Chinese+English-tuned)
         # sometimes drifts into Chinese mid-generation if fed English text inside an otherwise
@@ -1422,20 +1599,28 @@ def patch_mopmix_workflow(
     *,
     prompt: str,
     resolution: str,
-    image_name: str,
+    image_name: str = "",
     seed: int,
     denoise: float = MOPMIX_DENOISE,
+    text_only: bool = False,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
     wf["109"]["inputs"]["text"] = prompt
     wf["18"]["inputs"]["resolution"] = resolution
-    wf["300"]["inputs"]["image"] = image_name
 
-    # img2img: node 168 (high-noise KSamplerAdvanced) now starts from the photo's encoded
-    # latent (node 302) instead of an empty one; partially skip its own step schedule so
-    # the photo survives instead of being fully redrawn from noise.
-    steps = int(wf["168"]["inputs"]["steps"])
-    wf["168"]["inputs"]["start_at_step"] = max(0, min(steps - 1, round(steps * (1 - float(denoise)))))
+    if text_only:
+        # txt2img: feed node 168 an empty latent (node 18) instead of the photo's encoded
+        # latent. The LoadImage/Resize/VAEEncode chain (300/301/302) becomes orphaned and
+        # ComfyUI simply skips it. Start from full noise so the image is built from scratch.
+        wf["168"]["inputs"]["latent_image"] = ["18", 0]
+        wf["168"]["inputs"]["start_at_step"] = 0
+    else:
+        wf["300"]["inputs"]["image"] = image_name
+        # img2img: node 168 (high-noise KSamplerAdvanced) now starts from the photo's encoded
+        # latent (node 302) instead of an empty one; partially skip its own step schedule so
+        # the photo survives instead of being fully redrawn from noise.
+        steps = int(wf["168"]["inputs"]["steps"])
+        wf["168"]["inputs"]["start_at_step"] = max(0, min(steps - 1, round(steps * (1 - float(denoise)))))
 
     seed = int(seed)
     wf["168"]["inputs"]["noise_seed"] = seed
@@ -1444,6 +1629,34 @@ def patch_mopmix_workflow(
     wf["193:137"]["inputs"]["seed"] = seed + 1
     wf["194:160"]["inputs"]["seed"] = seed + 2
     return wf
+
+
+def build_pony_furry_workflow(
+    *,
+    prompt: str,
+    width: int,
+    height: int,
+    seed: int,
+) -> dict[str, Any]:
+    """Clean standard SDXL txt2img graph on the Pony Realism base for anthro/furry NSFW.
+
+    Kept separate from workflow_mopmix.json because that graph is a bespoke two-stage
+    bigASP refiner setup whose lcm second pass produces garbage on a Pony checkpoint.
+    """
+    positive = PONY_FURRY_POS_PREFIX + (prompt or "")
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": PONY_FURRY_CHECKPOINT}},
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["1", 1]}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": PONY_FURRY_NEGATIVE, "clip": ["1", 1]}},
+        "4": {"class_type": "EmptyLatentImage", "inputs": {"width": int(width), "height": int(height), "batch_size": 1}},
+        "5": {"class_type": "KSampler", "inputs": {
+            "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0],
+            "seed": int(seed), "steps": PONY_FURRY_STEPS, "cfg": PONY_FURRY_CFG,
+            "sampler_name": "dpmpp_2m_sde", "scheduler": "karras", "denoise": 1.0,
+        }},
+        "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        "128": {"class_type": "SaveImage", "inputs": {"images": ["6", 0], "filename_prefix": "furry"}},
+    }
 
 
 def patch_mopmix_duo_workflow(
@@ -1595,6 +1808,7 @@ async def pick_result_from_history(prompt_id: str, mode: str) -> dict[str, Any] 
 
     preferred_nodes = {
         "video": "314",
+        "video_clean": "314",
         "ltx_sulphur": "61",
         "ltx_eros": "1135:597",
         "image": "9",
@@ -1642,11 +1856,22 @@ def is_system_idle() -> bool:
 
 
 
+def video_audio_model_for_mode(mode: str | None) -> str:
+    """The censored mode gets the stock MMAudio model; everything else the NSFW Foley one."""
+    return VIDEO_CLEAN_AUDIO_MODEL if mode == "video_clean" else VIDEO_AUDIO_MODEL
+
+
+def video_audio_negative_for_mode(mode: str | None) -> str:
+    return VIDEO_CLEAN_AUDIO_NEGATIVE if mode == "video_clean" else VIDEO_AUDIO_NEGATIVE_PROMPT
+
+
 def build_video_audio_workflow(
     *,
     video_name: str,
     prompt: str,
     seed: int,
+    model: str = VIDEO_AUDIO_MODEL,
+    negative_prompt: str = VIDEO_AUDIO_NEGATIVE_PROMPT,
 ) -> dict[str, Any]:
     return {
         "1": {
@@ -1671,7 +1896,7 @@ def build_video_audio_workflow(
         "3": {
             "class_type": "MMAudioModelLoader",
             "inputs": {
-                "mmaudio_model": VIDEO_AUDIO_MODEL,
+                "mmaudio_model": model,
                 "base_precision": "fp16",
             },
         },
@@ -1696,7 +1921,7 @@ def build_video_audio_workflow(
                 "cfg": VIDEO_AUDIO_CFG,
                 "seed": int(seed),
                 "prompt": prompt,
-                "negative_prompt": VIDEO_AUDIO_NEGATIVE_PROMPT,
+                "negative_prompt": negative_prompt,
                 "mask_away_clip": False,
                 "force_offload": True,
             },
@@ -1747,6 +1972,8 @@ async def run_video_audio_postprocess(blob: bytes, meta: dict[str, Any], filenam
             video_name=input_name,
             prompt=meta.get("prompt") or "",
             seed=make_seed(),
+            model=video_audio_model_for_mode(meta.get("mode")),
+            negative_prompt=video_audio_negative_for_mode(meta.get("mode")),
         )
         prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
         result = await wait_for_result_from_prompt(
@@ -1874,6 +2101,7 @@ async def run_video_tts_postprocess(blob: bytes, meta: dict[str, Any], filename:
 
 MODE_DISPLAY_NAMES = {
     "video": "Video",
+    "video_clean": "Clean Video",
     "image": "Edit Photo",
     "ltx_sulphur": "LTX Sulphur",
     "ltx_eros": "LTX Eros",
@@ -2180,6 +2408,47 @@ async def monitor_loop(app: Application) -> None:
         await asyncio.sleep(POLL_SECONDS)
 
 
+async def maybe_reroll_roulette(app: Application, job: Job) -> None:
+    """Lazily re-write the prompt for roulette batches, in the worker (not the UI handler).
+
+    Group boundaries: the first ROULETTE_GROUP_SIZE jobs keep the original prompt; each
+    following group gets a fresh Ollama variation, reused for the whole group.
+    """
+    if not job.roulette:
+        return
+
+    # Group continuation (e.g. 2nd job of a group): reuse whatever this batch last rolled.
+    is_group_start = (job.batch_index - 1) % ROULETTE_GROUP_SIZE == 0
+    if not is_group_start or job.batch_index <= ROULETTE_GROUP_SIZE:
+        if job.chat_id in ROULETTE_LAST_PROMPT:
+            job.prompt = ROULETTE_LAST_PROMPT[job.chat_id]
+        return
+
+    # New group → roll a fresh variation.
+    caption = ROULETTE_CAPTION.get(job.chat_id, "")
+    if not caption and job.video_source and job.video_source.get("path"):
+        try:
+            caption = await asyncio.to_thread(
+                caption_photo, job.video_source["path"], job.video_source.get("name", "photo")
+            )
+            ROULETTE_CAPTION[job.chat_id] = caption
+        except Exception:
+            log.exception("Roulette caption failed")
+            caption = ""
+
+    try:
+        new_prompt = await asyncio.to_thread(expand_idea_with_ollama, job.base_idea, caption)
+        ROULETTE_LAST_PROMPT[job.chat_id] = new_prompt
+        job.prompt = new_prompt
+        try:
+            await app.bot.send_message(job.chat_id, f"🎰 Новая вариация:\n{new_prompt[:600]}")
+        except Exception:
+            pass
+    except Exception:
+        log.exception("Roulette re-roll failed, reusing previous prompt")
+        job.prompt = ROULETTE_LAST_PROMPT.get(job.chat_id, job.prompt)
+
+
 async def submit_worker_loop(app: Application) -> None:
     global WORKER_STARTED
     if WORKER_STARTED:
@@ -2193,6 +2462,7 @@ async def submit_worker_loop(app: Application) -> None:
             await asyncio.sleep(POLL_SECONDS)
 
         job = await GEN_QUEUE.get()
+        await maybe_reroll_roulette(app, job)
         await update_chat_status(
             app.bot, job.chat_id,
             job_status_text(
@@ -2203,6 +2473,8 @@ async def submit_worker_loop(app: Application) -> None:
         try:
             if job.mode == "video":
                 await submit_video_job(app, job)
+            elif job.mode == "video_clean":
+                await submit_video_clean_job(app, job)
             elif job.mode == "ltx_sulphur":
                 await submit_ltx_sulphur_job(app, job)
             elif job.mode == "ltx_eros":
@@ -2320,6 +2592,15 @@ async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     st["mode"] = "video"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
     await send_ui_message(update.message, context, "Режим: photo → video", reply_markup=main_keyboard(st))
+
+
+async def video_clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update):
+        return
+    st = get_state(context)
+    st["mode"] = "video_clean"
+    st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
+    await send_ui_message(update.message, context, "Режим: photo → video (цензурный, WAN 2.2 — держит лицо)", reply_markup=main_keyboard(st))
 
 
 async def ltx_sulphur_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2925,6 +3206,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data == "do:furry":
+        st["furry"] = not st.get("furry")
+        state_text = "включён" if st["furry"] else "выключен"
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"🐾 Furry-режим {state_text}.\n"
+            f"Работает в MopMix. Вкл → база Pony Realism + авто-теги anthro/фурри (морда, шерсть, хвост). "
+            f"Выкл → обычный MopMix (bigASP, фотореалистичные люди).\n"
+            f"Это txt2img — генерит по тексту с нуля, фото не нужно.",
+            reply_markup=main_keyboard(st),
+        )
+        return
+
     if data == "do:dubvoice":
         st["dub_voice"] = not st.get("dub_voice")
         state_text = "включён" if st["dub_voice"] else "выключен"
@@ -2971,7 +3266,8 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if st["mode"] in SINGLE_PHOTO_MODES:
-        if not st["video_source"].get("path"):
+        # mopmix can run text-only (txt2img); a photo is optional there (img2img if present).
+        if st["mode"] != "mopmix" and not st["video_source"].get("path"):
             await send_ui_message(target, context, f"Для {st['mode']} сначала пришли фото.", reply_markup=main_keyboard(st))
             return
     elif st["mode"] in DUO_PHOTO_MODES:
@@ -2996,32 +3292,19 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update_chat_status(context.bot, target.chat_id, status_text)
 
     base_idea = st["prompt"]
-    current_prompt = st["prompt"]
-    variations = 1
+    # Reset per-chat roulette state so a fresh batch never reuses a previous batch's roll
+    ROULETTE_LAST_PROMPT.pop(target.chat_id, None)
+    ROULETTE_CAPTION.pop(target.chat_id, None)
 
-    roulette_photo_caption = ""
-    if roulette:
-        photo = st.get("video_source") if st["mode"] in SINGLE_PHOTO_MODES else None
-        if photo and photo.get("path"):
-            roulette_photo_caption = await asyncio.to_thread(caption_photo, photo["path"], photo["name"])
-
+    # Enqueue all jobs instantly; the worker re-rolls the prompt lazily per group.
+    # This keeps the handler from blocking on Ollama/caption, so Stop/Menu stay responsive.
     for i in range(repeat):
-        if roulette and i % ROULETTE_GROUP_SIZE == 0:
-            if i > 0:
-                try:
-                    current_prompt = await asyncio.to_thread(
-                        expand_idea_with_ollama, base_idea, roulette_photo_caption
-                    )
-                    variations += 1
-                except Exception:
-                    log.exception("Roulette re-roll failed, reusing previous prompt")
-
         JOB_SEQ += 1
         job = Job(
             job_id=JOB_SEQ,
             chat_id=target.chat_id,
             mode=st["mode"],
-            prompt=current_prompt,
+            prompt=st["prompt"],
             seconds=int(st["seconds"]),
             max_side=int(st["max_side"]),
             video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
@@ -3034,16 +3317,11 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             batch_total=repeat,
             dub_voice=bool(st.get("dub_voice")),
             dub_voice_name=st.get("dub_voice_name") or DEFAULT_VOICE_NAME,
+            roulette=roulette,
+            base_idea=base_idea,
+            furry=bool(st.get("furry")),
         )
         await GEN_QUEUE.put(job)
-
-    if roulette:
-        try:
-            await context.bot.send_message(
-                target.chat_id, f"🎰 Рулетка: подготовлено {variations} вариаций промта по {ROULETTE_GROUP_SIZE} видео."
-            )
-        except Exception:
-            log.exception("Failed to send roulette summary")
 
 
 async def submit_image_job(app: Application, job: Job) -> None:
@@ -3110,6 +3388,95 @@ async def submit_video_job(app: Application, job: Job) -> None:
         "quality": job.quality,
         "prompt": job.prompt,
         "video_loras": job.video_loras,
+    }
+
+
+async def submit_video_clean_job(app: Application, job: Job) -> None:
+    """Smart Clean Video: photo + idea in, finished clip out, no extra taps. Chains three local
+    models - Ollama (idea -> scenario), Qwen-Image-Edit (photo -> requested scene), clean WAN 2.2
+    (scene -> motion) - then the result poller adds MMAudio. The edit stage is what lets the user
+    ask for things absent from the source (a tiger, a plane, underwater); without it I2V can only
+    animate what's already in frame. Each stage degrades gracefully to the previous one on failure."""
+    src = job.video_source
+    if not src or not src.get("path"):
+        raise RuntimeError("Для video_clean сначала пришли фото.")
+
+    chat_id = job.chat_id
+    idea = (job.prompt or "").strip()
+
+    # 1) Ollama expands the short idea into a detailed motion scenario for WAN. Runs on CPU, so it
+    #    doesn't fight ComfyUI for VRAM. The raw idea (not this scenario) drives the Qwen edit.
+    video_prompt = job.prompt
+    if VIDEO_CLEAN_AUTO_EXPAND and idea:
+        try:
+            video_prompt = await asyncio.to_thread(
+                expand_idea_with_ollama, idea, "", OLLAMA_SCENARIO_SYSTEM_PROMPT_CLEAN
+            )
+        except Exception:
+            log.exception("video_clean: Ollama expansion failed; using raw prompt")
+            video_prompt = job.prompt
+
+    image_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+
+    # 2) Qwen-Image-Edit redraws the photo into the requested scene (clean=True: no NSFW LoRA).
+    #    Flush VRAM around it so Qwen and WAN don't have to coexist in 12GB.
+    if VIDEO_CLEAN_AUTO_EDIT and idea:
+        try:
+            await update_chat_status(app.bot, chat_id, "🎨 Рисую сцену под твой промт…")
+            edit_prompt = await asyncio.to_thread(translate_to_english, idea)
+            qw, qh = IMAGE_EDIT_QUALITY.get(job.quality, IMAGE_EDIT_QUALITY["medium"])
+            ew, eh = fit_to_pixel_budget(int(src["orig_width"]), int(src["orig_height"]), qw * qh)
+            await asyncio.to_thread(free_comfy_memory)
+            edit_wf = build_image_edit_workflow(
+                image_name=image_name, prompt=edit_prompt, width=ew, height=eh, seed=job.seed, clean=True
+            )
+            edit_pid = await asyncio.to_thread(queue_prompt, edit_wf, str(uuid.uuid4()))
+            edit_res = await wait_for_result_from_prompt(
+                edit_pid, preferred_node="9", timeout=VIDEO_CLEAN_EDIT_TIMEOUT
+            )
+            edit_blob = await asyncio.to_thread(
+                fetch_file, edit_res["filename"], edit_res.get("subfolder", ""), edit_res.get("type", "output")
+            )
+            edited_name = f"tg_clean_edit_{uuid.uuid4().hex}.png"
+            await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / edited_name, edit_blob)
+            image_name = edited_name
+            try:
+                await app.bot.send_photo(chat_id, edit_blob, caption="🎨 Сцена готова — оживляю в видео…")
+            except Exception:
+                log.warning("video_clean: failed to send edit preview", exc_info=True)
+            await asyncio.to_thread(free_comfy_memory)
+        except Exception:
+            log.exception("video_clean: Qwen edit failed; animating the source photo instead")
+            image_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+
+    # 3) Clean WAN 2.2 animates the (edited) frame. The result poller handles MMAudio + delivery.
+    wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
+    wf = await asyncio.to_thread(
+        patch_video_workflow,
+        wf,
+        prompt=video_prompt,
+        image_name=image_name,
+        width=src["fit_width"],
+        height=src["fit_height"],
+        seconds=job.seconds,
+        video_fps=job.video_fps,
+        seed=job.seed,
+        clean=True,
+    )
+
+    prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+
+    ACTIVE_PROMPTS[prompt_id] = {
+        "job_id": job.job_id,
+        "chat_id": job.chat_id,
+        "mode": "video_clean",
+        "preferred_node": "314",
+        "seconds": job.seconds,
+        "width": src["fit_width"],
+        "height": src["fit_height"],
+        "video_fps": job.video_fps,
+        "quality": job.quality,
+        "prompt": video_prompt,
     }
 
 
@@ -3192,24 +3559,35 @@ async def submit_ltx_eros_job(app: Application, job: Job) -> None:
 
 
 async def submit_mopmix_job(app: Application, job: Job) -> None:
-    src = job.video_source
-    if not src or not src.get("path"):
-        raise RuntimeError("Для mopmix сначала пришли фото.")
-
-    resolution = MOPMIX_RESOLUTIONS.get(job.quality, MOPMIX_RESOLUTIONS["medium"])
-
-    wf = await asyncio.to_thread(load_workflow, WORKFLOW_MOPMIX)
-    uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
     translated_prompt = await asyncio.to_thread(translate_to_english, job.prompt)
 
-    wf = await asyncio.to_thread(
-        patch_mopmix_workflow,
-        wf,
-        prompt=translated_prompt,
-        resolution=resolution,
-        image_name=uploaded_name,
-        seed=job.seed,
-    )
+    if job.furry:
+        # Furry mode: clean Pony txt2img graph (anthro/fur), ignores any uploaded photo.
+        width, height = PONY_FURRY_RESOLUTIONS.get(job.quality, PONY_FURRY_RESOLUTIONS["medium"])
+        wf = await asyncio.to_thread(
+            build_pony_furry_workflow,
+            prompt=translated_prompt,
+            width=width,
+            height=height,
+            seed=job.seed,
+        )
+    else:
+        src = job.video_source
+        text_only = not (src and src.get("path"))
+        resolution = MOPMIX_RESOLUTIONS.get(job.quality, MOPMIX_RESOLUTIONS["medium"])
+        wf = await asyncio.to_thread(load_workflow, WORKFLOW_MOPMIX)
+        uploaded_name = ""
+        if not text_only:
+            uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+        wf = await asyncio.to_thread(
+            patch_mopmix_workflow,
+            wf,
+            prompt=translated_prompt,
+            resolution=resolution,
+            image_name=uploaded_name,
+            seed=job.seed,
+            text_only=text_only,
+        )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
 
@@ -3308,7 +3686,13 @@ def main() -> None:
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_LTX_EROS}")
     if not Path(WORKFLOW_MOPMIX_DUO).exists():
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_MOPMIX_DUO}")
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -3316,6 +3700,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status_cmd))
 
     app.add_handler(CommandHandler("video", video_cmd))
+    app.add_handler(CommandHandler("videoclean", video_clean_cmd))
     app.add_handler(CommandHandler("ltxsulphur", ltx_sulphur_cmd))
     app.add_handler(CommandHandler("ltxeros", ltx_eros_cmd))
     app.add_handler(CommandHandler("image", image_cmd))
