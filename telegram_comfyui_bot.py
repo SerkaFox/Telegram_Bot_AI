@@ -78,26 +78,40 @@ MOPMIX_RESOLUTIONS = {
 # natively understands anthro anatomy (muzzle, full-body fur, tail). bigASP only knows humans,
 # so a furry LoRA can't push it there — the base model has to change. Pony does explicit NSFW.
 PONY_FURRY_CHECKPOINT = os.getenv("PONY_FURRY_CHECKPOINT", "ponyRealism_V23ULTRA.safetensors")
+# Alternate furry base (selectable via the 🧬 base toggle when Furry is ON). Yiffymix is a
+# Pony-based, furry-focused SDXL merge — same score/anthro tags apply — with a broader species
+# range and a more illustrative look than the photoreal ponyRealism. Empty file until downloaded.
+YIFFY_FURRY_CHECKPOINT = os.getenv("YIFFY_FURRY_CHECKPOINT", "yiffymix_v53Pony.safetensors")
 # Pixel buckets per quality for the Pony txt2img graph (SDXL ~1MP sweet spot, portrait).
 PONY_FURRY_RESOLUTIONS = {
     "low": (768, 1152),
     "medium": (832, 1216),
     "high": (1024, 1536),
 }
-# Prepended to the (English) user prompt: Pony quality score tags + anthro + fur, so the result
-# is reliably an anthro/furry. Nudity vs. clothing is deliberately NOT forced here — the user's
-# own prompt decides (e.g. "naked, nipples" → nude; "in a skirt and stockings" → clothed).
+# Prepended to the (English) user prompt: Pony quality score tags + anthro, so the result is a
+# humanoid-animal. Deliberately does NOT force fur, a species, character count, or clothing — the
+# user's own prompt decides: "fluffy cat" → fur, "dragon" → scales, "a couple" → two characters,
+# "naked" → nude, "in a skirt" → clothed. (Forcing `solo` used to drop the partner; forcing
+# `fluffy fur covering whole body` used to put fur on scaly dragons — both removed.)
 PONY_FURRY_POS_PREFIX = os.getenv(
     "PONY_FURRY_POS_PREFIX",
-    "score_9, score_8_up, score_7_up, source_furry, anthro, solo, fluffy fur covering whole body, ",
+    "score_9, score_8_up, score_7_up, source_furry, anthro, ",
 )
-# Negative keeps the result furry (anti-human) and clean of artifacts, but does NOT ban clothing
-# or nudity — both are user-controlled. Censorship terms stay so requested nudity isn't bar/mosaic'd.
+# Negative keeps it non-human and clean of artifacts, but does NOT ban clothing, nudity, fur, or
+# scales — all user-controlled. `hairless skin` was removed so scaly/reptile species aren't pushed
+# toward fur. Censorship terms stay so requested nudity isn't bar/mosaic'd.
 PONY_FURRY_NEGATIVE = os.getenv(
     "PONY_FURRY_NEGATIVE",
-    "score_4, score_5, score_6, human face, human skin, hairless skin, bald, censored, "
+    "score_4, score_5, score_6, human face, human skin, censored, "
     "mosaic censorship, bar censor, low quality, worst quality, bad anatomy, deformed, mutated, "
     "extra limbs, extra digits, watermark, text, signature",
+)
+# Booru count tags Pony responds to; auto-added when the prompt implies more than one character
+# (so "пара занимается сексом" actually renders two, not a lone confused subject).
+PONY_FURRY_MULTI_RE = re.compile(
+    r"\b(couple|two|both|each\s*other|together|duo|pair|partner|threesome|group|"
+    r"they|them|sex\s+with|fucking\s+\w+|2\s*(?:girls|boys|characters))\b",
+    re.IGNORECASE,
 )
 PONY_FURRY_STEPS = int(os.getenv("PONY_FURRY_STEPS", "28"))
 PONY_FURRY_CFG = float(os.getenv("PONY_FURRY_CFG", "7.0"))
@@ -125,6 +139,13 @@ LTX_EROS_KEYFRAME_DEFAULT_SECONDS = 12
 # this particular fp8 quantization scheme); substitute the gemma encoder already used
 # successfully by LTX Sulphur instead.
 LTX_EROS_CLIP_NAME1 = os.getenv("LTX_EROS_CLIP_NAME1", "gemma_3_12B_it_fp8_e4m3fn.safetensors")
+# A spoken line is voiced once by confining it to a single short timeline window sized to how
+# long the phrase naturally takes to say, instead of leaving the dialogue "active" across the
+# whole clip (which makes LTX Eros repeat the phrase 2-4x to fill the duration). Rest of the
+# clip (and the global prompt) carries only the visual action, so she speaks once then continues.
+LTX_EROS_SPEECH_WORDS_PER_SEC = float(os.getenv("LTX_EROS_SPEECH_WORDS_PER_SEC", "2.2"))
+LTX_EROS_SPEECH_PAD_SECONDS = float(os.getenv("LTX_EROS_SPEECH_PAD_SECONDS", "0.6"))
+LTX_EROS_SPEECH_MIN_SECONDS = float(os.getenv("LTX_EROS_SPEECH_MIN_SECONDS", "1.5"))
 
 # ReActor face-swap model/quality settings shared by mopmix_duo's two swap passes.
 REACTOR_SWAP_MODEL = os.getenv("REACTOR_SWAP_MODEL", "inswapper_128.onnx")
@@ -235,6 +256,18 @@ OLLAMA_SCENARIO_SYSTEM_PROMPT_CLEAN = (
     "всегда полностью одет, никакой наготы, эротики, секса, насилия или грубой лексики — это "
     "красивый, кинематографичный, безопасный ролик. Делай акцент на атмосфере, движении и "
     "визуальных деталях. Пиши только сам сценарий, без пояснений."
+)
+
+# "💬 Реплики" for LTX Eros: when the user hasn't written a spoken line, Ollama improvises ONE
+# short in-character line that fits the scene (her reaction), which LTX Eros then voices natively.
+# Kept to a single short line on purpose: LTX renders one on-screen speaker's lipsync well but
+# blurs multiple distinct voices, and the timeline confinement voices that one line exactly once.
+OLLAMA_DIALOGUE_SYSTEM_PROMPT = (
+    "Ты придумываешь ОДНУ короткую реплику прямой речи, которую персонаж на видео произносит "
+    "вслух в этот момент. Ответь ТОЛЬКО самой фразой — без кавычек, без имени говорящего, без "
+    "пояснений, без описания сцены. Одно предложение, 4-9 слов, от первого лица, разговорно и "
+    "в тему происходящего (реакция/эмоция/просьба). Русский язык. Без цензуры: если сцена "
+    "откровенная, используй грубую прямую лексику, а не литературные эвфемизмы. Никаких ремарок."
 )
 
 # Modes whose final ComfyUI output is a video, vs a still image.
@@ -398,6 +431,10 @@ class Job:
     base_idea: str = ""
     # Furry: MopMix uses the Pony base + anthro tags instead of bigASP
     furry: bool = False
+    # Auto-dialogue: LTX Eros lets Ollama improvise a spoken line when the user wrote none
+    auto_dialogue: bool = False
+    # Furry base checkpoint choice: "pony" (photoreal, default) or "yiffy" (Yiffymix)
+    furry_base: str = "pony"
 
 
 # ============================================================
@@ -559,7 +596,7 @@ def extract_speech_text(prompt: str) -> str:
         return ""
 
     quoted_after_speech = re.findall(
-        r"(?:говорит|говоря|сказала|скажет|произносит|шепчет|says|said|speaks|whispers)[^\n\"«”]{0,40}[\"«“](.{1,220}?)[\"»”]",
+        r"(?:говорит|говоря|сказала|скажет|скажи|говори|произнеси|произносит|шепчет|says|said|say|speaks|whispers|tell|tells)[^\n\"«”]{0,40}[\"«“](.{1,220}?)[\"»”]",
         text,
         flags=re.IGNORECASE,
     )
@@ -571,7 +608,7 @@ def extract_speech_text(prompt: str) -> str:
         return clean_speech_text(". ".join(quoted[:2]))
 
     match = re.search(
-        r"(?:говорит|говоря|сказала|скажет|произносит|шепчет|says|said|speaks|whispers)\s*[:\-—]?\s*(.{1,180}?)(?=$|[.!?;\n])",
+        r"(?:говорит|говоря|сказала|скажет|скажи|говори|произнеси|произносит|шепчет|says|said|say|speaks|whispers|tell|tells)\s*[:\-—]?\s*(.{1,180}?)(?=$|[.!?;\n])",
         text,
         flags=re.IGNORECASE,
     )
@@ -584,6 +621,45 @@ def clean_speech_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text or "").strip(" \t\r\n'\"«»“”.,;:-—")
     text = re.sub(r"\b(и|and)\s+(улыбается|смотрит|looks|smiles).*$", "", text, flags=re.IGNORECASE).strip()
     return text[:220]
+
+
+def strip_speech_from_text(text: str) -> str:
+    """Remove quoted dialogue (and its 'says/говорит' lead-in) from a prompt, leaving only the
+    visual/action description. Used for LTX Eros so the global prompt and the non-speech timeline
+    segments carry no dialogue — otherwise the model keeps re-voicing the line for the whole clip."""
+    text = text or ""
+    # Drop "говорит/says ..." lead-in verbs together with the quote that follows them.
+    text = re.sub(
+        r"(?:говорит|говоря|сказала|скажет|скажи|говори|произнеси|произносит|шепчет|says|said|say|speaks|whispers|tell|tells)"
+        r"[^\n\"«”]{0,40}[\"«“].*?[\"»”]",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Drop any remaining bare quoted spans.
+    text = re.sub(r"[\"«“].*?[\"»”]", " ", text)
+    # Drop a trailing dangling speech verb left with nothing to say.
+    text = re.sub(
+        r"\b(?:говорит|говоря|сказала|скажет|скажи|говори|произнеси|произносит|шепчет|says|said|say|speaks|whispers|tell|tells)\s*[:\-—]?\s*$",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s+([.!?,;:])", r"\1", text)
+    # A trailing bare subject pronoun left dangling after the quote was removed ("...раздевается. Она").
+    text = re.sub(r"[\s.,;:]+(?:она|он|она же|she|he)\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" \t\r\n.,;:-—")
+    return text
+
+
+def estimate_speech_frames(spoken: str, fps: int, max_frames: int) -> int:
+    """How many frames the phrase needs to be spoken once, at a natural pace (capped to the clip)."""
+    words = max(1, len(spoken.split()))
+    seconds = words / max(0.1, LTX_EROS_SPEECH_WORDS_PER_SEC) + LTX_EROS_SPEECH_PAD_SECONDS
+    seconds = max(LTX_EROS_SPEECH_MIN_SECONDS, seconds)
+    frames = int(round(seconds * fps))
+    # Always leave at least ~1s of non-speech tail so the model has room to stop talking.
+    return max(1, min(frames, max_frames - fps))
 
 
 def tts_voice_for_text(text: str) -> str:
@@ -706,6 +782,8 @@ def initial_state() -> dict[str, Any]:
         "dub_voice": False,
         "dub_voice_name": DEFAULT_VOICE_NAME,
         "furry": False,
+        "furry_base": "pony",
+        "auto_dialogue": False,
     }
 
 
@@ -723,6 +801,10 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["roulette"] = False
     if "furry" not in st:
         st["furry"] = False
+    if "furry_base" not in st:
+        st["furry_base"] = "pony"
+    if "auto_dialogue" not in st:
+        st["auto_dialogue"] = False
     if "dub_voice" not in st:
         st["dub_voice"] = False
     if "dub_voice_name" not in st:
@@ -872,9 +954,11 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
     roulette_on = bool(st.get("roulette")) if st else False
     dub_voice_on = bool(st.get("dub_voice")) if st else False
     furry_on = bool(st.get("furry")) if st else False
+    auto_dialogue_on = bool(st.get("auto_dialogue")) if st else False
     roulette_label = f"🎰 Рулетка: {'✅ ВКЛ' if roulette_on else '⬜ выкл'}"
     dub_voice_label = f"🎙 Дубляж: {'✅ ВКЛ' if dub_voice_on else '⬜ выкл'}"
     furry_label = f"🐾 Furry: {'✅ ВКЛ' if furry_on else '⬜ выкл'}"
+    auto_dialogue_label = f"💬 Реплики: {'✅ ВКЛ' if auto_dialogue_on else '⬜ выкл'}"
 
     rows = [
         [
@@ -918,8 +1002,13 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(furry_label, callback_data="do:furry"),
+            InlineKeyboardButton(auto_dialogue_label, callback_data="do:autodialogue"),
         ],
     ]
+    if furry_on:
+        base = (st.get("furry_base") if st else "pony") or "pony"
+        base_label = f"🧬 База: {'Yiffymix' if base == 'yiffy' else 'Pony (фото)'}"
+        rows.append([InlineKeyboardButton(base_label, callback_data="do:furrybase")])
     if dub_voice_on:
         voice_name = st.get("dub_voice_name", DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME
         rows.append([InlineKeyboardButton(f"🎙 Голос: {voice_name}", callback_data="voice:list")])
@@ -1072,7 +1161,8 @@ def help_text(st: dict[str, Any]) -> str:
         "Режимы:\n"
         "• video: 1 фото + промт + секунды + звук MMAudio\n"
         "• ltx_sulphur: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 Sulphur)\n"
-        "• ltx_eros: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 10Eros)\n"
+        "• ltx_eros: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 10Eros). "
+        "Реплику пиши в кавычках — произнесётся один раз. 💬 Реплики ВКЛ → фразу под сцену сочинит Ollama\n"
         "• image: 1 фото + промт-редактирование (поменять одежду/тело/фон/добавить или убрать кого-то, Qwen-Image-Edit)\n"
         "• mopmix: промт (+ фото опционально) → картинка. Без фото — txt2img с нуля; с фото — img2img\n"
         "• mopmix_duo: 2 фото (лица) + промт → сцена с обоими лицами (face swap)\n\n"
@@ -1570,6 +1660,37 @@ def expand_idea_with_ollama(idea: str, photo_caption: str = "", system_prompt: s
     return text or idea
 
 
+def generate_dialogue_line(scene: str, photo_caption: str = "") -> str:
+    """Ask Ollama for one short in-character spoken line that fits the scene, for LTX Eros to
+    voice. Returns a bare phrase (no quotes/narration), or "" on any failure so the caller can
+    fall back to a silent clip. Runs the same CPU-only 32B model as the scenario writer."""
+    prompt = OLLAMA_DIALOGUE_SYSTEM_PROMPT
+    if photo_caption:
+        prompt += f"\n\nНа фото видно: {translate_to_russian(photo_caption)}"
+    prompt += f"\n\nСцена: {scene}\n\nРеплика:"
+    try:
+        r = requests.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={
+                "model": OLLAMA_SCENARIO_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_gpu": 0},
+                "keep_alive": 0,
+            },
+            timeout=OLLAMA_SCENARIO_TIMEOUT,
+        )
+        r.raise_for_status()
+        text = (r.json().get("response") or "").strip()
+    except Exception:
+        log.warning("Dialogue-line generation failed, continuing without a spoken line", exc_info=True)
+        return ""
+    # Keep only the first line and strip any quotes/lead-in the model added despite instructions.
+    text = text.splitlines()[0] if text else ""
+    text = re.sub(r'^(?:реплика|она говорит|он говорит|говорит)\s*[:\-—]?\s*', "", text, flags=re.IGNORECASE)
+    return clean_speech_text(text)
+
+
 def translate_to_english(text: str) -> str:
     """MopMix's SDXL checkpoint uses a plain CLIPTextEncode (English-only training data);
     non-English prompts produce near-random conditioning instead of following the request.
@@ -1631,21 +1752,38 @@ def patch_mopmix_workflow(
     return wf
 
 
+def furry_checkpoint_for(job: "Job") -> str:
+    """Which furry base checkpoint this job uses: the default photoreal Pony, or Yiffymix."""
+    return YIFFY_FURRY_CHECKPOINT if getattr(job, "furry_base", "pony") == "yiffy" else PONY_FURRY_CHECKPOINT
+
+
 def build_pony_furry_workflow(
     *,
     prompt: str,
     width: int,
     height: int,
     seed: int,
+    checkpoint: str = "",
+    face_image_name: str = "",
 ) -> dict[str, Any]:
     """Clean standard SDXL txt2img graph on the Pony Realism base for anthro/furry NSFW.
 
     Kept separate from workflow_mopmix.json because that graph is a bespoke two-stage
     bigASP refiner setup whose lcm second pass produces garbage on a Pony checkpoint.
+
+    `checkpoint` overrides the default Pony base (e.g. Yiffymix). When `face_image_name` is set,
+    a ReActor pass swaps that face onto the male in the finished scene — the "hybrid" path: the
+    whole furry scene is composed in one clean pass (good composition), then only the human face
+    is replaced, instead of MopMix Duo's fragile human+furry composite (which collapsed the scene
+    and left no usable face to swap onto).
     """
-    positive = PONY_FURRY_POS_PREFIX + (prompt or "")
-    return {
-        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": PONY_FURRY_CHECKPOINT}},
+    prompt = prompt or ""
+    # If the prompt implies more than one character, add the booru `duo` tag so Pony actually
+    # renders both instead of defaulting to a single subject.
+    count_tag = "duo, " if PONY_FURRY_MULTI_RE.search(prompt) else ""
+    positive = PONY_FURRY_POS_PREFIX + count_tag + prompt
+    graph = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint or PONY_FURRY_CHECKPOINT}},
         "2": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["1", 1]}},
         "3": {"class_type": "CLIPTextEncode", "inputs": {"text": PONY_FURRY_NEGATIVE, "clip": ["1", 1]}},
         "4": {"class_type": "EmptyLatentImage", "inputs": {"width": int(width), "height": int(height), "batch_size": 1}},
@@ -1657,6 +1795,27 @@ def build_pony_furry_workflow(
         "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
         "128": {"class_type": "SaveImage", "inputs": {"images": ["6", 0], "filename_prefix": "furry"}},
     }
+    if face_image_name:
+        graph["7"] = {"class_type": "LoadImage", "inputs": {"image": face_image_name}}
+        graph["8"] = {"class_type": "ReActorFaceSwap", "inputs": {
+            "enabled": True,
+            "input_image": ["6", 0],
+            "source_image": ["7", 0],
+            "swap_model": REACTOR_SWAP_MODEL,
+            "facedetection": REACTOR_FACE_DETECTION,
+            "face_restore_model": REACTOR_FACE_RESTORE_MODEL,
+            "face_restore_visibility": 1,
+            "codeformer_weight": 0.5,
+            # Target the male in the scene so the swap lands on the man, not the anthro partner's
+            # muzzle (usually undetected anyway, but this makes it deterministic).
+            "detect_gender_input": "male",
+            "detect_gender_source": "no",
+            "input_faces_index": "0",
+            "source_faces_index": "0",
+            "console_log_level": 1,
+        }}
+        graph["128"]["inputs"]["images"] = ["8", 0]
+    return graph
 
 
 def patch_mopmix_duo_workflow(
@@ -1741,8 +1900,25 @@ def patch_ltx_eros_workflow(
 
     fps = 24
     max_frames = int(seconds) * fps + 1
-    segments, segment_lengths = split_prompt_into_timeline_segments(prompt, max_frames)
-    wf["1048"]["inputs"]["global_prompt"] = prompt
+
+    spoken = extract_speech_text(prompt)
+    if spoken:
+        # Confine the spoken line to one short window so it's voiced once; keep dialogue out of
+        # the global prompt and the tail segment so the model doesn't repeat it across the clip.
+        visual = strip_speech_from_text(prompt)
+        speech_frames = estimate_speech_frames(spoken, fps, max_frames)
+        tail_frames = max(1, max_frames - speech_frames)
+        # Speech segment keeps the user's original wording (a reliable trigger for LTX speech),
+        # just bounded to a short window. Tail + global are visual-only so the line isn't repeated.
+        tail_segment = visual or "she stays silent and keeps moving naturally"
+        segments = [prompt.strip(), tail_segment]
+        segment_lengths = [speech_frames, tail_frames]
+        global_prompt = visual or tail_segment
+    else:
+        segments, segment_lengths = split_prompt_into_timeline_segments(prompt, max_frames)
+        global_prompt = prompt
+
+    wf["1048"]["inputs"]["global_prompt"] = global_prompt
     wf["1048"]["inputs"]["max_frames"] = max_frames
     wf["1048"]["inputs"]["timeline_data"] = json.dumps(
         {
@@ -3215,7 +3391,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"🐾 Furry-режим {state_text}.\n"
             f"Работает в MopMix. Вкл → база Pony Realism + авто-теги anthro/фурри (морда, шерсть, хвост). "
             f"Выкл → обычный MopMix (bigASP, фотореалистичные люди).\n"
-            f"Это txt2img — генерит по тексту с нуля, фото не нужно.",
+            f"Это txt2img — генерит по тексту с нуля, фото не нужно. Базу можно переключить "
+            f"кнопкой 🧬 (Pony-фото / AutismMix-арт).",
+            reply_markup=main_keyboard(st),
+        )
+        return
+
+    if data == "do:furrybase":
+        st["furry_base"] = "pony" if st.get("furry_base") == "yiffy" else "yiffy"
+        chosen = "Yiffymix (фурри-арт, шире виды)" if st["furry_base"] == "yiffy" else "Pony Realism (фотореализм)"
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"🧬 База для Furry: {chosen}.\n"
+            f"Оба на Pony-тегах (score_9…, anthro) — промпты не меняются, отличается стиль/виды.",
+            reply_markup=main_keyboard(st),
+        )
+        return
+
+    if data == "do:autodialogue":
+        st["auto_dialogue"] = not st.get("auto_dialogue")
+        state_text = "включены" if st["auto_dialogue"] else "выключены"
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"💬 Авто-реплики {state_text}.\n"
+            f"Работает в LTX Eros. Вкл → если ты сам не написал реплику в кавычках, Ollama "
+            f"сочинит одну короткую фразу в характере под сцену, а LTX её озвучит (один раз, "
+            f"без повторов). Если реплика в кавычках уже есть — берётся твоя.\n"
+            f"⚠️ Ollama крутится на CPU и добавляет пару минут к каждому ролику.",
             reply_markup=main_keyboard(st),
         )
         return
@@ -3320,6 +3524,8 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             roulette=roulette,
             base_idea=base_idea,
             furry=bool(st.get("furry")),
+            furry_base=st.get("furry_base") or "pony",
+            auto_dialogue=bool(st.get("auto_dialogue")),
         )
         await GEN_QUEUE.put(job)
 
@@ -3530,10 +3736,28 @@ async def submit_ltx_eros_job(app: Application, job: Job) -> None:
     wf = await asyncio.to_thread(load_workflow, WORKFLOW_LTX_EROS)
     uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
 
+    eros_prompt = job.prompt
+    # 💬 Auto-dialogue: only improvise a line when the user didn't already write one (quotes /
+    # "говорит ..."). The generated line is appended as quoted speech so patch_ltx_eros_workflow's
+    # speech confinement voices it exactly once.
+    if job.auto_dialogue and not extract_speech_text(eros_prompt):
+        caption = ""
+        try:
+            caption = await asyncio.to_thread(caption_photo, src["path"], src.get("name", "photo"))
+        except Exception:
+            log.warning("Eros dialogue caption failed", exc_info=True)
+        line = await asyncio.to_thread(generate_dialogue_line, eros_prompt, caption)
+        if line:
+            eros_prompt = f'{eros_prompt.rstrip(". ")}. Она говорит: "{line}"'
+            try:
+                await app.bot.send_message(job.chat_id, f'💬 Реплика: «{line}»')
+            except Exception:
+                pass
+
     wf = await asyncio.to_thread(
         patch_ltx_eros_workflow,
         wf,
-        prompt=job.prompt,
+        prompt=eros_prompt,
         image_name=uploaded_name,
         width=width,
         height=height,
@@ -3562,7 +3786,11 @@ async def submit_mopmix_job(app: Application, job: Job) -> None:
     translated_prompt = await asyncio.to_thread(translate_to_english, job.prompt)
 
     if job.furry:
-        # Furry mode: clean Pony txt2img graph (anthro/fur), ignores any uploaded photo.
+        # Furry mode: clean Pony txt2img graph (anthro/fur), prompt-driven. NOTE: auto face-swap of
+        # an attached photo is DISABLED — ReActor can't reliably tell the human from the anthro in a
+        # mixed scene and kept swapping the real face onto the partner's muzzle (body-horror). The
+        # graph still supports a face swap (build_pony_furry_workflow face_image_name) for a future
+        # single-human-only variant, but it's not wired to the attached photo here.
         width, height = PONY_FURRY_RESOLUTIONS.get(job.quality, PONY_FURRY_RESOLUTIONS["medium"])
         wf = await asyncio.to_thread(
             build_pony_furry_workflow,
@@ -3570,6 +3798,7 @@ async def submit_mopmix_job(app: Application, job: Job) -> None:
             width=width,
             height=height,
             seed=job.seed,
+            checkpoint=furry_checkpoint_for(job),
         )
     else:
         src = job.video_source
