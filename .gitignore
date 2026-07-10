@@ -45,3 +45,4 @@ pose_retest.py
 rife_test.py
 story_proto.py
 story_proto2.py
+story_wire_test.py

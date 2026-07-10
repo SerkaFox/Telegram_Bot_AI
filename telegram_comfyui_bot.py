@@ -1182,6 +1182,9 @@ def blank_media() -> dict[str, Any]:
 MODE_MAX_SECONDS = {
     "ltx_sulphur": int(os.getenv("MAX_SECONDS_LTX_SULPHUR", str(MAX_SECONDS))),
     "ltx_eros": int(os.getenv("MAX_SECONDS_LTX_EROS", str(MAX_SECONDS))),
+    # 🎬 Video renders >6s as a chained WAN story (native 6s chunks), so allow more seconds
+    # here than the single-clip modes — each extra 6s is one more story part (36 → up to 6 parts).
+    "video": int(os.getenv("MAX_SECONDS_VIDEO", "36")),
 }
 
 
@@ -4433,10 +4436,104 @@ async def submit_image_job(app: Application, job: Job) -> None:
     }
 
 
+# Setup/scene drivers only belong in the FIRST story chunk — later chunks start from an
+# already-nude/relocated last frame, so re-running these would re-undress or re-teleport.
+STORY_DRIVER_KEYS = {"wan_scene_change", "wan_bg_change", "wan_set_reveal"}
+
+
+async def submit_video_story(app: Application, job: Job) -> None:
+    """🎬 Video >6s as a chain of native 6s WAN chunks (no RIFE slow-mo). Chunk 1 does the setup
+    (undress/scene-change + pose from the picked loras); each later chunk starts from the previous
+    chunk's LAST FRAME and runs only the act loras (setup drivers dropped), so its whole 6s is the
+    action rather than the undress ramp-up. Segments are concatenated, MMAudio adds sound, and the
+    film is delivered directly (no ACTIVE_PROMPTS/monitor), like submit_story_job."""
+    src = job.video_source
+    if not src or not src.get("path"):
+        raise RuntimeError("Для video сначала пришли фото.")
+    chat_id = job.chat_id
+    STORY_CANCEL.discard(chat_id)
+    chunk_secs = VIDEO_NATIVE_MAX_SECONDS
+    parts = max(2, round(job.seconds / chunk_secs))
+
+    loras = list(job.video_loras)
+    if job.auto_lora and not loras:
+        loras = await asyncio.to_thread(select_loras_for_scene, job.prompt, "WAN") or []
+    if loras:
+        try:
+            labels = ", ".join((video_lora_by_key(k) or {"label": k})["label"] for k in loras)
+            await app.bot.send_message(chat_id, f"🧠 Лоры под сцену: {labels}")
+        except Exception:
+            pass
+    act_loras = [k for k in loras if k not in STORY_DRIVER_KEYS]
+    eng = await asyncio.to_thread(translate_to_english, job.prompt)
+
+    current_image_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+    story_dir = TMP_DIR / f"vstory_{job.job_id}_{uuid.uuid4().hex[:8]}"
+    story_dir.mkdir(parents=True, exist_ok=True)
+    normalized: list[Path] = []
+    try:
+        for i in range(parts):
+            if chat_id in STORY_CANCEL:
+                await app.bot.send_message(chat_id, f"⛔ Остановлено на части {i+1}/{parts}.")
+                return
+            await update_chat_status(app.bot, chat_id, f"🎬 История {i+1}/{parts}: генерирую…")
+            if i == 0:
+                chunk_prompt, chunk_loras = eng, loras
+            else:
+                chunk_prompt, chunk_loras = f"{eng}, the action continues without stopping", act_loras
+            wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
+            wf = await asyncio.to_thread(
+                patch_video_workflow, wf,
+                prompt=chunk_prompt, image_name=current_image_name,
+                width=src["fit_width"], height=src["fit_height"],
+                seconds=chunk_secs, video_fps=job.video_fps, seed=make_seed(),
+                selected_loras=chunk_loras,
+            )
+            prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+            result = await wait_for_result_from_prompt(prompt_id, preferred_node="314", timeout=STORY_SEGMENT_TIMEOUT)
+            blob = await asyncio.to_thread(fetch_file, result["filename"], result.get("subfolder", ""), result.get("type", "output"))
+            await asyncio.to_thread(delete_comfy_result_file, result["filename"], result.get("subfolder", ""))
+            raw_ext = Path(result.get("filename", "seg.mp4")).suffix or ".mp4"
+            raw_path = story_dir / f"seg_{i:02d}_raw{raw_ext}"
+            await asyncio.to_thread(save_bytes, raw_path, blob)
+            norm_path = story_dir / f"seg_{i:02d}.mp4"
+            await asyncio.to_thread(normalize_story_segment, raw_path, norm_path, src["fit_width"], src["fit_height"], job.video_fps)
+            normalized.append(norm_path)
+            if i < parts - 1:
+                frame_path = story_dir / f"frame_{i:02d}.png"
+                await asyncio.to_thread(extract_last_frame, norm_path, frame_path)
+                current_image_name = await asyncio.to_thread(upload_image_to_comfy, str(frame_path), frame_path.name)
+
+        await update_chat_status(app.bot, chat_id, "🎬 Склеиваю…")
+        final_path = story_dir / "video_story.mp4"
+        await asyncio.to_thread(concat_story_segments, normalized, final_path, story_dir)
+        film = await asyncio.to_thread(final_path.read_bytes)
+        filename = "story.mp4"
+        if VIDEO_AUDIO:
+            try:
+                processed = await run_video_audio_postprocess(film, {"mode": "video", "job_id": job.job_id, "chat_id": chat_id}, filename)
+                if processed:
+                    film, filename = processed
+            except Exception:
+                log.exception("Story MMAudio postprocess failed; sending silent film")
+        caption_txt = f"🎬 История · {parts}×{chunk_secs}с ≈ {parts * chunk_secs}с"[:MAX_CAPTION]
+        await app.bot.send_video(chat_id=chat_id, video=InputFile(io.BytesIO(film), filename=filename), caption=caption_txt)
+        await mirror_to_admins(app, {"chat_id": chat_id, "prompt": job.prompt, "mode": "video"}, film, filename, caption_txt)
+        await finish_chat_status(app, chat_id, f"✅ История готова ({parts}×{chunk_secs}с)", show_menu=True)
+    finally:
+        STORY_CANCEL.discard(chat_id)
+        await asyncio.to_thread(shutil.rmtree, story_dir, True)
+
+
 async def submit_video_job(app: Application, job: Job) -> None:
     src = job.video_source
     if not src or not src.get("path"):
         raise RuntimeError("Для video сначала пришли фото.")
+
+    # >6s → chained WAN story (native 6s chunks) instead of RIFE slow-motion: real new content
+    # each chunk, no boomerang, and the act isn't eaten by the single-clip undress ramp-up.
+    if job.seconds > VIDEO_NATIVE_MAX_SECONDS:
+        return await submit_video_story(app, job)
 
     wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
     uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
