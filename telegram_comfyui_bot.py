@@ -388,6 +388,12 @@ VIDEO_NSFW_LORA_HIGH = os.getenv("VIDEO_NSFW_LORA_HIGH", "DR34ML4Y_I2V_14B_HIGH_
 VIDEO_NSFW_LORA_LOW = os.getenv("VIDEO_NSFW_LORA_LOW", "DR34ML4Y_I2V_14B_LOW_V2.safetensors")
 VIDEO_NSFW_LORA_STRENGTH = float(os.getenv("VIDEO_NSFW_LORA_STRENGTH", "1.0"))
 VIDEO_SIGMA_SHIFT = float(os.getenv("VIDEO_SIGMA_SHIFT", "5.0"))
+# WAN 2.2 I2V is natively trained for ~5-6s (~81-97 frames @16fps). Asking it for MORE frames makes
+# it loop/boomerang (replay the arc or repeat). So we cap the GENERATED length here and, when the
+# user asks for longer, RIFE-interpolate the native clip up to the requested duration (smooth
+# slow-motion, one continuous arc, no boomerang). Clean video mode is left untouched.
+VIDEO_NATIVE_MAX_SECONDS = int(os.getenv("VIDEO_NATIVE_MAX_SECONDS", "6"))
+VIDEO_RIFE_CKPT = os.getenv("VIDEO_RIFE_CKPT", "rife49.pth")
 # SageAttention mode (KJNodes PathchSageAttentionKJ): "auto" picks the best kernel for the GPU.
 VIDEO_SAGE_MODE = os.getenv("VIDEO_SAGE_MODE", "auto")
 VIDEO_FP16_ACCUM = os.getenv("VIDEO_FP16_ACCUM", "1") == "1"
@@ -487,6 +493,14 @@ VIDEO_LORA_OPTIONS = [
     # выключен), кладём его на оба эксперта. Триггер НАМЕРЕННО без «completely naked» — уровень одежды
     # задаёт промпт (голая / в чулках / в бюстгальтере). Держать ~0.4 эфф., выбирать С позовой лорой.
     {"key": "wan_scene_change", "label": "Смена сцены (раздевание)", "origin": "WAN", "high": "scene_change_nsfw_v2.0_high_noise.safetensors", "low": "scene_change_nsfw_v2.0_high_noise.safetensors", "trigger": "the scene changes, her clothes come off, revealing her body", "strength": 0.2},
+    # Смена ФОНА/локации (i2v держит фон входного фото; эти драйверы позволяют перенести сцену).
+    # Локация задаётся промптом («on a beach / in a restaurant»); лора поднимает надёжность переноса.
+    {"key": "wan_bg_change", "label": "Смена фона/локации", "origin": "WAN", "high": "wan_background_change.safetensors", "low": "wan_background_change.safetensors", "trigger": "the background changes to a new location", "strength": 0.25},
+    {"key": "wan_set_reveal", "label": "Смена сцены (Set Reveal)", "origin": "WAN", "high": "wan_set_reveal_high.safetensors", "low": "wan_set_reveal_high.safetensors", "trigger": "the set changes, the scene transitions to a new place", "strength": 0.25},
+    # — нежность/эмоции/оральное (стакаются под позу; триггеры только про действие) —
+    {"key": "wan_kiss", "label": "Поцелуй (French Kiss)", "origin": "WAN", "high": "WAN2.2-FrenchKiss_HighNoise.safetensors", "low": "WAN2.2-FrenchKiss_LowNoise.safetensors", "trigger": "they kiss passionately, french kissing with tongue", "strength": 0.35},
+    {"key": "wan_lick", "label": "Ласки языком (лизать)", "origin": "WAN", "high": "LipL-high-60.safetensors", "low": "LipL-low-60.safetensors", "trigger": "she licks with her tongue, licking and caressing", "strength": 0.35},
+    {"key": "wan_emotion", "label": "Эмоции лица", "origin": "WAN", "high": "sigma_face_expression_high.safetensors", "low": "sigma_face_expression_high.safetensors", "trigger": "expressive emotional face, moaning with pleasure, smiling", "strength": 0.25},
     # — MQ Lab transition-позы (dedicated «одетая→акт», high/low пары) — под Seko-V1 базу, эфф. 0.7.
     # Триггеры описывают только ДЕЙСТВИЕ (без принудительной наготы), чтобы промпт рулил одеждой/сценой.
     {"key": "wan_missionary", "label": "Поза: миссионерская (MQ)", "origin": "WAN", "high": "mql_missionary_b_v1_high_noise.safetensors", "low": "mql_missionary_b_v1_low_noise.safetensors", "trigger": "she lies on her back and he has missionary sex with her, thrusting into her", "strength": 0.35},
@@ -1945,10 +1959,35 @@ def patch_video_workflow(
     wf["164"]["inputs"]["value"] = int(width)
     wf["165"]["inputs"]["value"] = int(height)
     fps = max(1, int(video_fps))
-    frame_count = max(1, int(seconds) * fps + 1)
-    wf["243"]["inputs"]["value"] = int(seconds)
-    wf["373:359"]["inputs"]["value"] = str(frame_count)
-    wf["314"]["inputs"]["frame_rate"] = fps
+    req_seconds = max(1, int(seconds))
+    # Cap generated frames at the native window; RIFE-stretch beyond it (see VIDEO_NATIVE_MAX_SECONDS).
+    native_seconds = min(req_seconds, VIDEO_NATIVE_MAX_SECONDS)
+    gen_frames = max(1, native_seconds * fps + 1)
+    wf["243"]["inputs"]["value"] = native_seconds
+    wf["373:359"]["inputs"]["value"] = str(gen_frames)
+    out_fps = fps
+    if not clean and req_seconds > native_seconds:
+        mult = -(-req_seconds // native_seconds)  # ceil division
+        img_src = wf["314"]["inputs"].get("images", ["373:363", 0])
+        wf["tg_rife"] = {
+            "class_type": "RIFE VFI",
+            "inputs": {
+                "frames": img_src,
+                "ckpt_name": VIDEO_RIFE_CKPT,
+                "clear_cache_after_n_frames": 8,
+                "multiplier": int(mult),
+                "fast_mode": True,
+                "ensemble": True,
+                "scale_factor": 1.0,
+                "dtype": "float16",
+                "torch_compile": False,
+                "batch_size": 1,
+            },
+        }
+        wf["314"]["inputs"]["images"] = ["tg_rife", 0]
+        total_frames = (gen_frames - 1) * int(mult) + 1
+        out_fps = max(1, round(total_frames / req_seconds))
+    wf["314"]["inputs"]["frame_rate"] = out_fps
     wf["141"]["inputs"]["seed"] = int(seed)
     if clean:
         apply_clean_video_base(wf)
