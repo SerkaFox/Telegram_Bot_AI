@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 import requests
@@ -23,6 +24,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    PicklePersistence,
     filters,
 )
 
@@ -41,23 +43,41 @@ WORKFLOW_MOPMIX_DUO = os.getenv("COMFY_WORKFLOW_MOPMIX_DUO", "./workflow_mopmix_
 TMP_DIR = Path(os.getenv("BOT_TMP_DIR", "./tmp_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
+# Per-user settings (mode, toggles, prompt, last photo, chosen loras/voice) survive a reboot:
+# PTB's PicklePersistence flushes user_data (which holds each user's job_state) to this file on
+# a timer + on graceful shutdown, and reloads it on startup, so nothing resets to defaults.
+PERSIST_FILE = Path(os.getenv("BOT_PERSIST_FILE", "./bot_state.pkl"))
+
+# OpenVoice's se_extractor dumps a disposable per-clip cache here; it and the story/dub
+# scratch below pile up forever, so a background loop prunes anything older than the cutoff.
+PROCESSED_DIR = Path(os.getenv("PROCESSED_DIR", "./processed"))
+CLEANUP_MAX_AGE_H = float(os.getenv("CLEANUP_MAX_AGE_HOURS", "24"))
+CLEANUP_INTERVAL_H = float(os.getenv("CLEANUP_INTERVAL_HOURS", "6"))
+
 COMFY_INPUT_DIR = Path(os.getenv("COMFY_INPUT_DIR", "/home/iaadmin/ComfyUI/input"))
 COMFY_OUTPUT_DIR = Path(os.getenv("COMFY_OUTPUT_DIR", "/home/iaadmin/ComfyUI/output"))
 
 MAX_CAPTION = 1000
 
+# Admins can always use the bot AND manage who else may. Default = the owner's id;
+# override with the ADMIN_USER_IDS env (comma-separated) if needed.
+ADMIN_USER_IDS = {
+    int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "517188056").split(",") if x.strip().lstrip("-").isdigit()
+}
+# Seed list from the old ALLOWED_USER_IDS env (backward compat); the live list lives on disk.
 ALLOWED_USER_IDS = {
     int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
 }
+ALLOWLIST_FILE = Path(os.getenv("ALLOWLIST_FILE", "./allowlist.json"))
 
 DEFAULT_SECONDS = int(os.getenv("DEFAULT_SECONDS", "8"))
 MIN_SECONDS = int(os.getenv("MIN_SECONDS", "2"))
 MAX_SECONDS = int(os.getenv("MAX_SECONDS", "12"))
 DEFAULT_QUALITY = os.getenv("DEFAULT_QUALITY", "medium").strip().lower()
 QUALITY_PRESETS = {
-    "low": {"max_side": 480, "video_fps": 16},
-    "medium": {"max_side": 640, "video_fps": 16},
-    "high": {"max_side": 768, "video_fps": 16},
+    "low": {"max_side": 512, "video_fps": 16},
+    "medium": {"max_side": 704, "video_fps": 16},
+    "high": {"max_side": 832, "video_fps": 16},
 }
 ROUND_TO = int(os.getenv("ROUND_TO", "64"))
 
@@ -81,7 +101,7 @@ PONY_FURRY_CHECKPOINT = os.getenv("PONY_FURRY_CHECKPOINT", "ponyRealism_V23ULTRA
 # Alternate furry base (selectable via the 🧬 base toggle when Furry is ON). Yiffymix is a
 # Pony-based, furry-focused SDXL merge — same score/anthro tags apply — with a broader species
 # range and a more illustrative look than the photoreal ponyRealism. Empty file until downloaded.
-YIFFY_FURRY_CHECKPOINT = os.getenv("YIFFY_FURRY_CHECKPOINT", "yiffymix_v53Pony.safetensors")
+YIFFY_FURRY_CHECKPOINT = os.getenv("YIFFY_FURRY_CHECKPOINT", "autismmixSDXL_autismmixConfetti.safetensors")
 # Pixel buckets per quality for the Pony txt2img graph (SDXL ~1MP sweet spot, portrait).
 PONY_FURRY_RESOLUTIONS = {
     "low": (768, 1152),
@@ -270,8 +290,51 @@ OLLAMA_DIALOGUE_SYSTEM_PROMPT = (
     "откровенная, используй грубую прямую лексику, а не литературные эвфемизмы. Никаких ремарок."
 )
 
+# "🧠 Авто-лоры" for LTX Eros: Ollama reads the scene and picks the matching LoRAs from the catalog
+# (same CPU 32B as dialogue). Keeps it to 1-3 so stacked loras don't fight (one action + optional
+# finish). Cum loras are grouped so only one is ever chosen.
+CUM_LORA_KEYS = {"eros_joyshot", "eros_facials", "eros_epic_cum", "eros_creampie", "eros_cumsplash",
+                 "wan_cumshot", "wan_facial"}
+OLLAMA_LORA_SYSTEM_PROMPT = (
+    "Ты подбираешь видео-лоры (LoRA) для эротической видео-сцены по её описанию. "
+    "Доступные лоры (ключ: назначение):\n{catalog}\n\n"
+    "Правила: выбери от 1 до 3 ключей, максимально подходящих сцене. Обычно одно главное действие "
+    "(поза или оральное) плюс при желании одна лора-финиш (камшот/кремпай). НЕ более одной cum-лоры. "
+    "НЕ совмещай две разные позы. "
+    "Если по сюжету одежда СНИМАЕТСЯ или сцена резко меняется (одетая→голая, «раздевается», "
+    "«голая танцует») — добавь лору смены сцены/раздевания, если такая есть в списке. Если по "
+    "сюжету человек ОСТАЁТСЯ одетым (секс в одежде) — НЕ добавляй лору раздевания. "
+    "Если сцены секса и раздевания нет — верни пустой массив. "
+    'Ответь ТОЛЬКО JSON-массивом ключей, например ["eros_riding","eros_creampie"]. Без пояснений.'
+)
+
+# "📖 История V1": Ollama breaks one idea into N connected beats, each rendered as a separate LTX
+# Eros clip chained off the previous clip's last frame, then concatenated into one film. Each beat
+# is ONE self-contained scene sentence (like the scenario writer's sentences, but here each beat is
+# a WHOLE 12s clip on its own). Beat 1 must lock the character's look so identity survives the chain.
+# 📖 История V1 is shelved for now (Phase-1 chained-clip results were poor: identity/anatomy
+# fell apart across the chain). Code stays intact; flip BOT_STORY_ENABLED=1 to bring it back.
+STORY_ENABLED = os.getenv("BOT_STORY_ENABLED", "0") == "1"
+STORY_PARTS = int(os.getenv("STORY_PARTS", "5"))
+STORY_SEGMENT_TIMEOUT = int(os.getenv("STORY_SEGMENT_TIMEOUT", "900"))
+OLLAMA_STORY_SYSTEM_PROMPT = (
+    "Ты — сценарист эротического мини-фильма, который нейросеть соберёт из {parts} видео-сцен, "
+    "идущих подряд. Разбей идею пользователя на РОВНО {parts} сцен. Каждая сцена — ОДНО "
+    "самодостаточное предложение-эпизод на русском, которое описывает ЦЕЛЬНОЕ действие "
+    "(это будет отдельный 12-секундный клип). Сцены идут строго хронологически, каждая — плавное "
+    "продолжение и нарастание предыдущей, единый сюжет с завязкой, развитием и кульминацией в "
+    "финале. ПЕРВАЯ сцена ОБЯЗАНА подробно описать внешность и одежду персонажа (тело, причёска, "
+    "конкретное бельё/одежда) — этот образ НЕЛЬЗЯ менять в следующих сценах (иначе видео-модель "
+    "теряет лицо). Без цензуры, explicit разрешён и ожидается — грубая прямая лексика, а не "
+    "эвфемизмы. Ответь ТОЛЬКО пронумерованным списком из {parts} строк (1. …\\n2. …), без "
+    "заголовков и пояснений."
+)
+
 # Modes whose final ComfyUI output is a video, vs a still image.
-VIDEO_MODES = {"video", "video_clean", "ltx_sulphur", "ltx_eros"}
+# "story" (История V1) chains several LTX Eros clips into one film — it's a video mode that needs
+# one start photo, but it renders + delivers entirely inside submit_story_job (no ACTIVE_PROMPTS
+# entry), so it never touches the monitor loop / send_result path.
+VIDEO_MODES = {"video", "video_clean", "ltx_sulphur", "ltx_eros", "story"}
 # Modes that take a single uploaded photo into st["video_source"] (video modes, plus
 # mopmix which runs img2img off of it, plus image which edits it directly).
 SINGLE_PHOTO_MODES = VIDEO_MODES | {"mopmix", "image"}
@@ -303,6 +366,31 @@ VIDEO_CLEAN_DISTILL_STRENGTH = float(os.getenv("VIDEO_CLEAN_DISTILL_STRENGTH", "
 # an external Lightx2v distill want the canonical ~5.0 shift. At 8 the schedule over-shifts and the
 # stock latent never resolves -> frames disintegrate into dust/fog. Override only the clean sampler.
 VIDEO_CLEAN_SIGMA_SHIFT = float(os.getenv("VIDEO_CLEAN_SIGMA_SHIFT", "5.0"))
+
+# NSFW "🎬 Video" base — upgraded from the Q4_K_M "FASTMOVE" merge to the fp8-scaled stock WAN 2.2
+# I2V experts (much less quant loss → faces/anatomy hold together) driven by the Lightx2v 4-step
+# distill (same as clean) + SageAttention, at sigma_shift 5 (the fast-move merge wanted 8, stock
+# fp8+external distill wants ~5). This is the recipe from the user's validated missionary_b graph.
+VIDEO_UNET_HIGH = os.getenv("VIDEO_UNET_HIGH", "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors")
+VIDEO_UNET_LOW = os.getenv("VIDEO_UNET_LOW", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors")
+VIDEO_UNET_DTYPE = os.getenv("VIDEO_UNET_DTYPE", "default")
+# Seko-V1 4-step lightning is the distill the MQ Lab transition loras (mql_*) were validated with
+# (the user's reference missionary_b graph). Swapping in from lightx2v killed the color-burn /
+# epilepsy-jitter / broken-anatomy artifacts those loras produced on the lightx2v base.
+VIDEO_DISTILL_HIGH = os.getenv("VIDEO_DISTILL_HIGH", "Wan2_2-I2V-A14B-4steps-lora-rank64-Seko-V1_High.safetensors")
+VIDEO_DISTILL_LOW = os.getenv("VIDEO_DISTILL_LOW", "Wan2_2-I2V-A14B-4steps-lora-rank64-Seko-V1_Low.safetensors")
+VIDEO_DISTILL_STRENGTH = float(os.getenv("VIDEO_DISTILL_STRENGTH", "1.0"))
+# The vanilla fp8 base is CLEAN (unlike the old Q4 "FASTMOVE" NSFW merge) — so it just animates the
+# face and never initiates sex. To restore the baked-in porn drive, always-apply DR34ML4Y (the top
+# all-in-one NSFW motion lora, 442k dl) on top of the distill, exactly like the user's validated
+# missionary_b graph did. Set VIDEO_NSFW_LORA_STRENGTH=0 to fall back to the clean vanilla base.
+VIDEO_NSFW_LORA_HIGH = os.getenv("VIDEO_NSFW_LORA_HIGH", "DR34ML4Y_I2V_14B_HIGH_V2.safetensors")
+VIDEO_NSFW_LORA_LOW = os.getenv("VIDEO_NSFW_LORA_LOW", "DR34ML4Y_I2V_14B_LOW_V2.safetensors")
+VIDEO_NSFW_LORA_STRENGTH = float(os.getenv("VIDEO_NSFW_LORA_STRENGTH", "1.0"))
+VIDEO_SIGMA_SHIFT = float(os.getenv("VIDEO_SIGMA_SHIFT", "5.0"))
+# SageAttention mode (KJNodes PathchSageAttentionKJ): "auto" picks the best kernel for the GPU.
+VIDEO_SAGE_MODE = os.getenv("VIDEO_SAGE_MODE", "auto")
+VIDEO_FP16_ACCUM = os.getenv("VIDEO_FP16_ACCUM", "1") == "1"
 VIDEO_CLEAN_NEGATIVE = (
     "nudity, nude, naked, nsfw, explicit, sexual, genitals, nipples, exposed breasts, "
     "underwear, lingerie, suggestive, erotic, pornographic, gore, blood"
@@ -356,24 +444,69 @@ VIDEO_MAX_LORAS = int(os.getenv("VIDEO_MAX_LORAS", "8"))
 VIDEO_LORA_STRENGTH_DEFAULT = float(os.getenv("VIDEO_LORA_STRENGTH_DEFAULT", "0.35"))
 VIDEO_LORA_STRENGTH_MULTIPLIER = float(os.getenv("VIDEO_LORA_STRENGTH_MULTIPLIER", "2.0"))
 VIDEO_LORA_STRENGTH_MAX = float(os.getenv("VIDEO_LORA_STRENGTH_MAX", "1.0"))
+# All-LTX lora catalog (migrated off WAN — Eros is the primary video model). Every entry is a
+# single-file LTX-2.3 lora applied to the LTX Eros graph via apply_eros_loras (LTX2LoraLoaderAdvanced).
+# `trigger` is appended to the Eros prompt so the effect fires; `strength` is the raw model strength.
+# The WAN 2.2 I2V graph no longer has selectable loras (its Power Lora nodes stay empty).
 VIDEO_LORA_OPTIONS = [
-    {"key": "lightx2v", "label": "LightX2V", "high": "Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_high.safetensors", "low": "Wan2.2-I2V-A14B-Moe-Distill-Lightx2v_low.safetensors", "strength": 0.25},
-    {"key": "bounce", "label": "Bounce", "high": "BounceHighWan2_2.safetensors", "low": "BounceLowWan2_2.safetensors", "strength": 0.35},
-    {"key": "dr34m", "label": "DR34M I2V", "high": "DR34MJOB_I2V_14b_HighNoise.safetensors", "low": "DR34MJOB_I2V_14b_LowNoise.safetensors", "strength": 0.35},
-    {"key": "dreamlay", "label": "Dreamlay I2V", "high": "DR34ML4Y_I2V_14B_HIGH_V2.safetensors", "low": "DR34ML4Y_I2V_14B_LOW_V2.safetensors", "strength": 0.35},
-    {"key": "hands_body", "label": "Hands/Body", "high": "HIGH_hands_trace_body.safetensors", "low": "LOW_hands_trace_body.safetensors", "strength": 0.30},
-    {"key": "pen_insert", "label": "Pen Insert", "high": "PenInsert_high_noise.safetensors", "low": "PenInsert_low_noise.safetensors", "strength": 0.35},
-    {"key": "pubic_hair", "label": "Pubic Hair", "high": "PubicHair_wan22_high_e40.safetensors", "low": "PubicHair_wan22_low_e50.safetensors", "strength": 0.30},
-    {"key": "smooth_anim", "label": "Smooth Animation", "high": "SmoothXXXAnimation_High.safetensors", "low": "SmoothXXXAnimation_Low.safetensors", "strength": 0.25},
-    {"key": "handjob", "label": "Handjob", "high": "WAN-2.2-I2V-Handjob-HIGH-v1.safetensors", "low": "WAN-2.2-I2V-Handjob-LOW-v1.safetensors", "strength": 0.35},
-    {"key": "handjob_combo", "label": "Handjob+Blowjob", "high": "WAN-2.2-I2V-HandjobBlowjobCombo-HIGH-v1.safetensors", "low": "WAN-2.2-I2V-HandjobBlowjobCombo-LOW-v1.safetensors", "strength": 0.35},
-    {"key": "teasing", "label": "Sensual Teasing", "high": "WAN-2.2-I2V-SensualTeasingBlowjob-HIGH-v1.safetensors", "low": "WAN-2.2-I2V-SensualTeasingBlowjob-LOW-v1.safetensors", "strength": 0.35},
-    {"key": "breast_play", "label": "Breast Play", "high": "Wan2.2_BreastPlay-v1-HighNoise-I2V_T2V.safetensors", "low": "Wan2.2_BreastPlay-v1-LowNoise-I2V_T2V.safetensors", "strength": 0.35},
-    {"key": "cum_v2", "label": "Cum V2", "high": "Wan22_CumV2_High.safetensors", "low": "Wan22_CumV2_Low.safetensors", "strength": 0.35},
-    {"key": "ffgo", "label": "FFGO", "high": "Wan22_FFGO-LoRA-HIGH_bf16.safetensors", "low": "Wan22_FFGO-LoRA-LOW_bf16.safetensors", "strength": 0.35},
-    {"key": "deepthroat", "label": "Deepthroat", "high": "jfj-deepthroat-W22-I2V-HN.safetensors", "low": "jfj-deepthroat-W22-I2V-LN.safetensors", "strength": 0.35},
-    {"key": "pov_contact", "label": "POV Contact", "high": "povintimatecontact_WAN22_I2V_high_noise.safetensors", "low": "povintimatecontact_WAN22_I2V_low_noise.safetensors", "strength": 0.35},
+    # — cum / finish —
+    {"key": "eros_joyshot", "label": "Cumshot/Facial", "origin": "Eros", "lora": "DaSiWa_LTX23_Cumshot_Joyshot-v01.safetensors", "trigger": "he ejaculates on her face, thick white cum splashing onto her face", "strength": 1.0},
+    {"key": "eros_facials", "label": "Cum on Face/Mouth", "origin": "Eros", "lora": "cumonface_inmouth_LTX23.safetensors", "trigger": "cum on her face, cum in her mouth", "strength": 1.0},
+    {"key": "eros_epic_cum", "label": "Epic Cumshots", "origin": "Eros", "lora": "epic_cumshots_LTX23.safetensors", "trigger": "cumshot, thick cum", "strength": 1.0},
+    {"key": "eros_creampie", "label": "Creampie", "origin": "Eros", "lora": "LTX23_Creampie_Animation-v01.safetensors", "trigger": "cum, creampie, thick white cum dripping out", "strength": 1.0},
+    {"key": "eros_cumsplash", "label": "Cum Splash POV", "origin": "Eros", "lora": "cumsplash_LTX2_v1.safetensors", "trigger": "cumsplash, cum splashing onto her face", "strength": 1.0},
+    # — oral —
+    {"key": "eros_blowjob", "label": "Blowjob", "origin": "Eros", "lora": "LTX23_blowjob_animation_I2V_v1.safetensors", "trigger": "blowjob animation, her mouth is wrapped around the penis", "strength": 0.9},
+    {"key": "eros_deepthroat", "label": "Deepthroat", "origin": "Eros", "lora": "ltxdeepthroat_v01.safetensors", "trigger": "LTXdeepthroat", "strength": 0.9},
+    {"key": "eros_ult_dt", "label": "Ultimate Deepthroat", "origin": "Eros", "lora": "ltx23-ultimatedt-NSFW_k3nk.safetensors", "trigger": "", "strength": 0.9},
+    # — positions —
+    {"key": "eros_allinone", "label": "General NSFW (multi)", "origin": "Eros", "lora": "Penile_Praxis_V4_LTX23.safetensors", "trigger": "", "strength": 0.85},
+    {"key": "eros_riding", "label": "Riding/Cowgirl", "origin": "Eros", "lora": "riding_fbs_10Eros_i2v_v1.safetensors", "trigger": "Riding frontshot animation", "strength": 0.9},
+    {"key": "eros_doggy", "label": "Doggystyle", "origin": "Eros", "lora": "SexGod_LTX23_DoggyStyle_v2_5.safetensors", "trigger": "", "strength": 0.9},
+    {"key": "eros_thrust", "label": "Sex Thrust", "origin": "Eros", "lora": "LTX2-i2v-SexThrust.safetensors", "trigger": "", "strength": 0.85},
+    {"key": "eros_anal", "label": "Anal Insertion", "origin": "Eros", "lora": "nsfw_anal_insertion_ltx23_v1.safetensors", "trigger": "anal insertion, being penetrated by the man's large penis", "strength": 0.9},
+    {"key": "eros_takerpov", "label": "Taker POV", "origin": "Eros", "lora": "LTX2_takerpov_v1.2.safetensors", "trigger": "taker pov", "strength": 0.85},
+    # — hands / body —
+    {"key": "eros_handjob", "label": "Handjob", "origin": "Eros", "lora": "SexGod_Handjobs_LTX23_v1.safetensors", "trigger": "", "strength": 0.9},
+    {"key": "eros_bounce", "label": "Bouncing Boobs", "origin": "Eros", "lora": "bounceV2_5_LTX23_I2V.safetensors", "trigger": "her breasts bouncing up and down", "strength": 0.8},
+    {"key": "eros_orgasm", "label": "Real Orgasm", "origin": "Eros", "lora": "Ltx23_RemoteOrgasm_v1.safetensors", "trigger": "", "strength": 0.85},
+    {"key": "eros_facepunch", "label": "Face Punch/Slap", "origin": "Eros", "lora": "FacePunch_LTX_comfy.safetensors", "trigger": "FacePunch", "strength": 0.9},
+    # — enhancers (keep low, stack under an action) —
+    {"key": "eros_smooth", "label": "Smooth Motion", "origin": "Eros", "lora": "SmoothMix_Animations_LTX2.safetensors", "trigger": "smoothmixrealism, realistic style", "strength": 0.6},
+    {"key": "eros_physics", "label": "Body Physics/Fluid", "origin": "Eros", "lora": "DaSiWa_LTX23_Bodyphysics_Fluid_v01.safetensors", "trigger": "D4S1W4_NSFWSME", "strength": 0.6},
+    # — furry —
+    {"key": "eros_furry_cum", "label": "Furry 2D + Cum", "origin": "Eros", "lora": "LTX23_Furry_2D_NSFW_Multi+Cum-v1.safetensors", "trigger": "cum", "strength": 0.85},
+    {"key": "eros_furry_sex", "label": "Фурри секс (звериный член)", "origin": "Eros", "lora": "LTX2_3_NSFW_furry_concat_v2.safetensors", "trigger": "anthro, furry, animal penis, animal genitalia, tapered penis, knotted penis, sheath", "strength": 0.9},
+    # — WAN (только для обычного 🎬 Video; на 🌸 Clean Video лоры не применяются). WAN 2.2 A14B —
+    # MoE с двумя экспертами, поэтому нужны high/low файлы; у одиночной 2.1-лоры один файл на оба.
+    {"key": "wan_furry", "label": "ВАН лора фурри", "origin": "WAN", "high": "furry_nsfw_1.1_e22.safetensors", "low": "furry_nsfw_1.1_e22.safetensors", "trigger": "anthro, furry, animal penis, feral penis, knotted penis, sheath", "strength": 0.45},
+    # Native WAN 2.2 A14B pair (proper high/low split) — cleaner anthro anatomy/fur than the 2.1 file above.
+    {"key": "wan_furry_enh", "label": "ВАН фурри 2.2 (нативная)", "origin": "WAN", "high": "Furry Enhancer Wan2.2 V3 High Noise I2V.safetensors", "low": "Furry Enhancer Wan2.2 V3 Low Noise I2V .safetensors", "trigger": "anthro, furry, fur detail, animal penis, feral penis, knotted penis, sheath", "strength": 0.45},
+    # scene_change (MQ Lab, nsfw_v2) — драйвер смены сцены: разрешает i2v раздеть/переставить ВНУТРИ
+    # одного клипа (одетый оригинал → секс), как в референс-воркфлоу. Только high-файл (low в референсе
+    # выключен), кладём его на оба эксперта. Триггер НАМЕРЕННО без «completely naked» — уровень одежды
+    # задаёт промпт (голая / в чулках / в бюстгальтере). Держать ~0.4 эфф., выбирать С позовой лорой.
+    {"key": "wan_scene_change", "label": "Смена сцены (раздевание)", "origin": "WAN", "high": "scene_change_nsfw_v2.0_high_noise.safetensors", "low": "scene_change_nsfw_v2.0_high_noise.safetensors", "trigger": "the scene changes, her clothes come off, revealing her body", "strength": 0.2},
+    # — MQ Lab transition-позы (dedicated «одетая→акт», high/low пары) — под Seko-V1 базу, эфф. 0.7.
+    # Триггеры описывают только ДЕЙСТВИЕ (без принудительной наготы), чтобы промпт рулил одеждой/сценой.
+    {"key": "wan_missionary", "label": "Поза: миссионерская (MQ)", "origin": "WAN", "high": "mql_missionary_b_v1_high_noise.safetensors", "low": "mql_missionary_b_v1_low_noise.safetensors", "trigger": "she lies on her back and he has missionary sex with her, thrusting into her", "strength": 0.35},
+    {"key": "wan_doggy", "label": "Поза: раком (MQ)", "origin": "WAN", "high": "mql_doggy_b_v1_high_noise.safetensors", "low": "mql_doggy_b_v1_low_noise.safetensors", "trigger": "she is on all fours and he fucks her doggystyle from behind", "strength": 0.35},
+    {"key": "wan_revcowgirl", "label": "Поза: наездница спиной (MQ)", "origin": "WAN", "high": "mql_reverse_cowgirl_a_v1_high_noise.safetensors", "low": "mql_reverse_cowgirl_a_v1_low_noise.safetensors", "trigger": "she straddles him in reverse cowgirl and rides his cock with her back to him", "strength": 0.35},
+    {"key": "wan_standing", "label": "Поза: стоя (MQ)", "origin": "WAN", "high": "mql_standing_a_v1_high_noise.safetensors", "low": "mql_standing_a_v1_low_noise.safetensors", "trigger": "he fucks her standing up, penetrating her", "strength": 0.35},
+    {"key": "wan_spoon", "label": "Поза: ложка (MQ)", "origin": "WAN", "high": "mql_spoon_a_v2_low_noise.safetensors", "low": "mql_spoon_a_v2_low_noise.safetensors", "trigger": "she lies on her side and he spoons her, penetrating her from behind", "strength": 0.35},
+    {"key": "wan_dp", "label": "Двойное проникновение (MQ)", "origin": "WAN", "high": "mql_dp_a_v1_high_noise.safetensors", "low": "mql_dp_a_v1_low_noise.safetensors", "trigger": "two men penetrate her at once, double penetration", "strength": 0.35},
+    {"key": "wan_atm", "label": "АТМ: минет→секс (MQ)", "origin": "WAN", "high": "mql_atm_a_high_noise.safetensors", "low": "mql_atm_a_low_noise.safetensors", "trigger": "she sucks his cock then he penetrates her", "strength": 0.35},
+    {"key": "wan_double", "label": "Двойной минет (MQ)", "origin": "WAN", "high": "mql_double_blowjob_a_v1_high_noise.safetensors", "low": "mql_double_blowjob_a_v1_high_noise.safetensors", "trigger": "two men stand in front of her and she sucks their two cocks, double blowjob", "strength": 0.35},
+    {"key": "wan_cowgirl", "label": "Поза: наездница лицом", "origin": "WAN", "high": "WAN-2.2-I2V-POV-Cowgirl-HIGH-v1.0-fixed.safetensors", "low": "WAN-2.2-I2V-POV-Cowgirl-LOW-v1.0-fixed.safetensors", "trigger": "cowgirl position, she rides his cock facing him, bouncing up and down", "strength": 0.4},
+    {"key": "wan_anal", "label": "Анал", "origin": "WAN", "high": "wan22_i2v_anal_v1_high_noise.safetensors", "low": "wan22_i2v_anal_v1_low_noise.safetensors", "trigger": "anal sex, he penetrates her ass, anal insertion", "strength": 0.4},
+    {"key": "wan_deepthroat", "label": "Дипгорло", "origin": "WAN", "high": "jfj-deepthroat-W22-I2V-HN.safetensors", "low": "jfj-deepthroat-W22-I2V-LN.safetensors", "trigger": "deepthroat, she takes his cock deep in her throat", "strength": 0.4},
+    {"key": "wan_cumshot", "label": "Камшот/сперма", "origin": "WAN", "high": "Wan22_CumV3_High.safetensors", "low": "Wan22_CumV3_Low.safetensors", "trigger": "cumshot, he cums, thick white cum", "strength": 0.45},
+    {"key": "wan_facial", "label": "Камшот на лицо", "origin": "WAN", "high": "wan22-f4c3spl4sh-100epoc-high-k3nk.safetensors", "low": "wan22-f4c3spl4sh-154epoc-low-k3nk.safetensors", "trigger": "f4c3spl4sh, he cums on her face, facial cumshot", "strength": 0.45},
 ]
+# Origin tag for a lora option. All catalog entries are now LTX ("Eros"); the helper is kept so
+# apply_video_loras (WAN path) safely skips everything and future WAN entries would default to "WAN".
+def lora_origin(opt: dict[str, Any]) -> str:
+    return str(opt.get("origin", "WAN"))
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -391,6 +524,9 @@ ROULETTE_LAST_PROMPT: dict[int, str] = {}
 ROULETTE_CAPTION: dict[int, str] = {}
 JOB_SEQ = 0
 ACTIVE_PROMPTS: dict[str, dict] = {}
+# Chat ids that asked to stop a running 📖 История — checked between segments so a long
+# multi-clip film can be aborted (the current segment finishes, then the chain bails).
+STORY_CANCEL: set[int] = set()
 
 # Live progress status message per chat, edited in place while a job is generating so the
 # user doesn't think the bot/server hung. Rolling average duration per mode (seconds) used
@@ -401,6 +537,7 @@ MODE_AVG_DURATION: dict[str, float] = {
     "video_clean": 300.0,
     "ltx_sulphur": 230.0,
     "ltx_eros": 230.0,
+    "story": 1400.0,
     "mopmix": 60.0,
     "mopmix_duo": 90.0,
     "image": 30.0,
@@ -433,6 +570,8 @@ class Job:
     furry: bool = False
     # Auto-dialogue: LTX Eros lets Ollama improvise a spoken line when the user wrote none
     auto_dialogue: bool = False
+    # Auto-loras: LTX Eros lets Ollama pick matching catalog loras from the scene when none chosen
+    auto_lora: bool = False
     # Furry base checkpoint choice: "pony" (photoreal, default) or "yiffy" (Yiffymix)
     furry_base: str = "pony"
 
@@ -590,6 +729,56 @@ def mux_video_with_audio(video_path: Path, audio_source_path: Path, output_path:
     ])
 
 
+def _segment_has_audio(path: Path) -> bool:
+    """ffprobe check: does the file carry an audio stream? Story segments must all match
+    (audio-or-not) or the concat -c copy step fails, so we add silence to the ones that lack it."""
+    try:
+        p = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+             "stream=index", "-of", "csv=p=0", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
+        )
+        return bool(p.stdout.strip())
+    except Exception:
+        return False
+
+
+def normalize_story_segment(raw_path: Path, out_path: Path, width: int, height: int, fps: int = 24) -> None:
+    """Re-encode a story clip to canonical H.264/yuv420p at fixed size+fps WITH an AAC audio track
+    (real if present, else silent), so every segment is byte-compatible for concat -c copy. LTX Eros
+    voices natively, so keeping the real audio preserves the per-scene dialogue in the final film."""
+    common_v = ["-vf", f"scale={int(width)}:{int(height)},fps={int(fps)}",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast"]
+    if _segment_has_audio(raw_path):
+        run_cmd(["ffmpeg", "-y", "-i", str(raw_path), *common_v,
+                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                 "-movflags", "+faststart", str(out_path)])
+    else:
+        run_cmd(["ffmpeg", "-y", "-i", str(raw_path),
+                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                 *common_v, "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                 "-movflags", "+faststart", str(out_path)])
+
+
+def extract_last_frame(video_path: Path, out_png: Path) -> None:
+    """Grab a frame ~0.2s before the end as the init image for the next story clip. A hair before
+    the very end dodges any trailing fade/black frame that would poison the next generation."""
+    run_cmd(["ffmpeg", "-y", "-sseof", "-0.2", "-i", str(video_path),
+             "-frames:v", "1", "-q:v", "2", str(out_png)])
+    if not out_png.exists():
+        # Very short clip: -sseof overshot the start; just take the first frame instead.
+        run_cmd(["ffmpeg", "-y", "-i", str(video_path), "-frames:v", "1", "-q:v", "2", str(out_png)])
+
+
+def concat_story_segments(segment_paths: list[Path], out_path: Path, workdir: Path) -> None:
+    """Stitch the normalized segments into one film via the ffmpeg concat demuxer (-c copy: no
+    re-encode, since normalize_story_segment already made them uniform)."""
+    list_file = workdir / "concat_list.txt"
+    list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in segment_paths))
+    run_cmd(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+             "-c", "copy", "-movflags", "+faststart", str(out_path)])
+
+
 def extract_speech_text(prompt: str) -> str:
     text = (prompt or "").strip()
     if not text:
@@ -718,21 +907,245 @@ def mix_video_with_tts(video_path: Path, speech_path: Path, output_path: Path) -
 # ============================================================
 # ACCESS CONTROL
 # ============================================================
-def allowed(update: Update) -> bool:
-    if not ALLOWED_USER_IDS:
-        return True
-    user = update.effective_user
-    return bool(user and user.id in ALLOWED_USER_IDS)
+# The live allowlist: {user_id: {"name": str, "added_at": iso, "by": admin_id}}.
+# Admins are implicitly allowed and can add/remove others from Telegram at runtime.
+ALLOWED_USERS: dict[int, dict[str, Any]] = {}
+# Users we've already pinged the admin about, so one stranger doesn't spam every message.
+PENDING_REQUESTS: set[int] = set()
+# Display names captured at request time, so on approval we store a human name (not just an id).
+PENDING_NAMES: dict[int, str] = {}
 
 
-async def reject_if_needed(update: Update) -> bool:
-    if allowed(update):
+def _user_display_name(user) -> str:
+    """Human-friendly name for the allowlist: 'Full Name (@username)' / falls back to id."""
+    if not user:
+        return ""
+    name = (user.full_name or "").strip()
+    if user.username:
+        name = f"{name} (@{user.username})".strip() if name else f"@{user.username}"
+    return name
+
+
+def load_allowlist() -> None:
+    ALLOWED_USERS.clear()
+    if ALLOWLIST_FILE.exists():
+        try:
+            data = json.loads(ALLOWLIST_FILE.read_text())
+            for uid, meta in (data or {}).items():
+                ALLOWED_USERS[int(uid)] = dict(meta or {})
+        except Exception:
+            log.exception("Failed to read allowlist %s", ALLOWLIST_FILE)
+    # Seed from the legacy env var so nothing is lost on first migration.
+    for uid in ALLOWED_USER_IDS:
+        ALLOWED_USERS.setdefault(uid, {"name": "", "added_at": "", "by": 0})
+
+
+def save_allowlist() -> None:
+    try:
+        ALLOWLIST_FILE.write_text(json.dumps({str(k): v for k, v in ALLOWED_USERS.items()}, ensure_ascii=False, indent=2))
+    except Exception:
+        log.exception("Failed to write allowlist %s", ALLOWLIST_FILE)
+
+
+def is_admin(user_id: int | None) -> bool:
+    return bool(user_id) and user_id in ADMIN_USER_IDS
+
+
+def add_allowed(user_id: int, name: str = "", by: int = 0) -> None:
+    ALLOWED_USERS[user_id] = {
+        "name": name,
+        "added_at": datetime.now().isoformat(timespec="seconds"),
+        "by": by,
+    }
+    PENDING_REQUESTS.discard(user_id)
+    save_allowlist()
+
+
+def remove_allowed(user_id: int) -> bool:
+    existed = ALLOWED_USERS.pop(user_id, None) is not None
+    PENDING_REQUESTS.discard(user_id)
+    if existed:
+        save_allowlist()
+    return existed
+
+
+def is_paused(user_id: int) -> bool:
+    return bool(ALLOWED_USERS.get(user_id, {}).get("paused"))
+
+
+def set_paused(user_id: int, paused: bool) -> bool:
+    """Toggle a known user's pause flag. Returns True if the user is in the allowlist."""
+    entry = ALLOWED_USERS.get(user_id)
+    if entry is None:
         return False
-    if update.message:
-        await update.message.reply_text("Нет доступа.")
-    elif update.callback_query:
-        await update.callback_query.answer("Нет доступа.", show_alert=True)
+    entry["paused"] = bool(paused)
+    save_allowlist()
     return True
+
+
+def allowed(update: Update) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    if is_admin(user.id):
+        return True
+    # Paused users stay in the list but are blocked until the admin resumes them.
+    return user.id in ALLOWED_USERS and not is_paused(user.id)
+
+
+def _describe_user(user) -> str:
+    parts = [user.full_name or ""]
+    if user.username:
+        parts.append(f"@{user.username}")
+    parts.append(f"id={user.id}")
+    return " ".join(p for p in parts if p).strip()
+
+
+async def reject_if_needed(update: Update, context: ContextTypes.DEFAULT_TYPE | None = None) -> bool:
+    if allowed(update):
+        # Stamp admin-ness onto this user's state so the menu can show owner-only buttons.
+        # Every gated handler calls this first, so it's the natural single point to do it.
+        if context is not None and getattr(context, "user_data", None) is not None and update.effective_user:
+            try:
+                get_state(context)["is_admin"] = is_admin(update.effective_user.id)
+            except Exception:
+                pass
+        return False
+    user = update.effective_user
+    # Known-but-paused user: tell them they're on hold and DON'T re-ping the admin (they're
+    # already approved, just temporarily suspended — the admin resumes them from the 👥 menu).
+    if user and user.id in ALLOWED_USERS and is_paused(user.id):
+        paused_msg = "⏸ Твой доступ к боту временно приостановлен владельцем. Дождись возобновления."
+        if update.message:
+            await update.message.reply_text(paused_msg)
+        elif update.callback_query:
+            await update.callback_query.answer(paused_msg, show_alert=True)
+        return True
+    # Tell the person they're waiting on approval.
+    if update.message:
+        await update.message.reply_text("⛔ Доступ только по разрешению владельца. Запрос отправлен, подожди одобрения.")
+    elif update.callback_query:
+        await update.callback_query.answer("⛔ Нет доступа. Запрос владельцу отправлен.", show_alert=True)
+    # Ping the admin once per unknown user with approve/deny buttons.
+    if context and user and user.id not in PENDING_REQUESTS and not is_admin(user.id):
+        PENDING_REQUESTS.add(user.id)
+        PENDING_NAMES[user.id] = _user_display_name(user)
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Разрешить", callback_data=f"acl:allow:{user.id}"),
+            InlineKeyboardButton("🚫 Отклонить", callback_data=f"acl:deny:{user.id}"),
+        ]])
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await context.bot.send_message(
+                    admin_id,
+                    f"🔔 Запрос доступа к боту:\n{_describe_user(user)}",
+                    reply_markup=kb,
+                )
+            except Exception:
+                log.exception("Failed to notify admin %s about access request", admin_id)
+    return True
+
+
+def users_manage_text() -> str:
+    lines = ["👥 *Пользователи бота*", "", "👑 Владельцы: " + ", ".join(str(a) for a in sorted(ADMIN_USER_IDS))]
+    if ALLOWED_USERS:
+        lines.append("")
+        lines.append(f"✅ С доступом ({len(ALLOWED_USERS)}):")
+        for uid, meta in sorted(ALLOWED_USERS.items()):
+            nm = meta.get("name") or "(без имени)"
+            flag = " ⏸ на паузе" if meta.get("paused") else ""
+            lines.append(f"• {nm} — id `{uid}`{flag}")
+        lines.append("")
+        lines.append("⏸ — временно приостановить (человек остаётся в списке), 🚮 — выкинуть совсем.")
+    else:
+        lines.append("")
+        lines.append("Пока никого — только ты. Люди появятся здесь, когда попросят доступ и ты одобришь.")
+    return "\n".join(lines)
+
+
+def users_manage_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for uid, meta in sorted(ALLOWED_USERS.items()):
+        nm = meta.get("name") or str(uid)
+        label = nm if len(nm) <= 20 else nm[:19] + "…"
+        if meta.get("paused"):
+            pause_btn = InlineKeyboardButton(f"▶️ Возобновить: {label}", callback_data=f"acl:resume:{uid}")
+        else:
+            pause_btn = InlineKeyboardButton(f"⏸ Пауза: {label}", callback_data=f"acl:pause:{uid}")
+        rows.append([pause_btn, InlineKeyboardButton("🚮", callback_data=f"acl:kick:{uid}")])
+    rows.append([InlineKeyboardButton("🔄 Обновить", callback_data="acl:list"), InlineKeyboardButton("↩️ Назад", callback_data="show:status")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_users_manager(query) -> None:
+    try:
+        await query.edit_message_text(users_manage_text(), reply_markup=users_manage_keyboard(), parse_mode="Markdown")
+    except Exception:
+        # Fall back to a fresh message if the original can't be edited (e.g. it was a photo).
+        await query.message.reply_text(users_manage_text(), reply_markup=users_manage_keyboard(), parse_mode="Markdown")
+
+
+async def handle_acl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    query = update.callback_query
+    actor = update.effective_user
+    if not is_admin(actor.id if actor else None):
+        await query.answer("Только владелец может это делать.", show_alert=True)
+        return
+    parts = data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "list":
+        await query.answer()
+        await show_users_manager(query)
+        return
+    raw_id = parts[2] if len(parts) > 2 else ""
+    try:
+        uid = int(raw_id)
+    except ValueError:
+        await query.answer("Плохой id.", show_alert=True)
+        return
+    if action == "allow":
+        add_allowed(uid, name=PENDING_NAMES.pop(uid, ""), by=actor.id)
+        nm = ALLOWED_USERS.get(uid, {}).get("name") or ""
+        await query.edit_message_text(f"✅ Доступ выдан: {nm} id={uid}".replace("  ", " ").strip())
+        try:
+            await context.bot.send_message(uid, "✅ Владелец открыл тебе доступ к боту. Напиши /start.")
+        except Exception:
+            log.exception("Failed to notify newly allowed user %s", uid)
+    elif action == "deny":
+        remove_allowed(uid)
+        PENDING_NAMES.pop(uid, None)
+        await query.edit_message_text(f"🚫 Отклонено / доступ закрыт: id={uid}")
+    elif action == "kick":
+        nm = ALLOWED_USERS.get(uid, {}).get("name") or str(uid)
+        remove_allowed(uid)
+        await query.answer(f"Выкинут: {nm}", show_alert=False)
+        await show_users_manager(query)
+        try:
+            await context.bot.send_message(uid, "⛔ Владелец закрыл тебе доступ к боту.")
+        except Exception:
+            log.exception("Failed to notify kicked user %s", uid)
+    elif action == "pause":
+        nm = ALLOWED_USERS.get(uid, {}).get("name") or str(uid)
+        if set_paused(uid, True):
+            await query.answer(f"На паузе: {nm}", show_alert=False)
+            await show_users_manager(query)
+            try:
+                await context.bot.send_message(uid, "⏸ Твой доступ к боту временно приостановлен владельцем.")
+            except Exception:
+                log.exception("Failed to notify paused user %s", uid)
+        else:
+            await query.answer("Такого нет в списке.", show_alert=True)
+    elif action == "resume":
+        nm = ALLOWED_USERS.get(uid, {}).get("name") or str(uid)
+        if set_paused(uid, False):
+            await query.answer(f"Возобновлён: {nm}", show_alert=False)
+            await show_users_manager(query)
+            try:
+                await context.bot.send_message(uid, "▶️ Владелец возобновил тебе доступ к боту. Можешь пользоваться снова.")
+            except Exception:
+                log.exception("Failed to notify resumed user %s", uid)
+        else:
+            await query.answer("Такого нет в списке.", show_alert=True)
 
 
 # ============================================================
@@ -784,6 +1197,7 @@ def initial_state() -> dict[str, Any]:
         "furry": False,
         "furry_base": "pony",
         "auto_dialogue": False,
+        "auto_lora": False,
     }
 
 
@@ -805,6 +1219,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["furry_base"] = "pony"
     if "auto_dialogue" not in st:
         st["auto_dialogue"] = False
+    if "auto_lora" not in st:
+        st["auto_lora"] = False
     if "dub_voice" not in st:
         st["dub_voice"] = False
     if "dub_voice_name" not in st:
@@ -955,10 +1371,12 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
     dub_voice_on = bool(st.get("dub_voice")) if st else False
     furry_on = bool(st.get("furry")) if st else False
     auto_dialogue_on = bool(st.get("auto_dialogue")) if st else False
+    auto_lora_on = bool(st.get("auto_lora")) if st else False
     roulette_label = f"🎰 Рулетка: {'✅ ВКЛ' if roulette_on else '⬜ выкл'}"
     dub_voice_label = f"🎙 Дубляж: {'✅ ВКЛ' if dub_voice_on else '⬜ выкл'}"
     furry_label = f"🐾 Furry: {'✅ ВКЛ' if furry_on else '⬜ выкл'}"
     auto_dialogue_label = f"💬 Реплики: {'✅ ВКЛ' if auto_dialogue_on else '⬜ выкл'}"
+    auto_lora_label = f"🧠 Авто-лоры: {'✅ ВКЛ' if auto_lora_on else '⬜ выкл'}"
 
     rows = [
         [
@@ -972,6 +1390,7 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧪 LTX Sulphur", callback_data="mode:ltx_sulphur"),
             InlineKeyboardButton("🔥 LTX Eros", callback_data="mode:ltx_eros"),
         ],
+        *([[InlineKeyboardButton(f"📖 История V1 ({STORY_PARTS} сцен)", callback_data="mode:story")]] if STORY_ENABLED else []),
         [
             InlineKeyboardButton("🎨 MopMix", callback_data="mode:mopmix"),
             InlineKeyboardButton("👯 MopMix Duo", callback_data="mode:mopmix_duo"),
@@ -1004,14 +1423,20 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(furry_label, callback_data="do:furry"),
             InlineKeyboardButton(auto_dialogue_label, callback_data="do:autodialogue"),
         ],
+        [
+            InlineKeyboardButton(auto_lora_label, callback_data="do:autolora"),
+        ],
     ]
     if furry_on:
         base = (st.get("furry_base") if st else "pony") or "pony"
-        base_label = f"🧬 База: {'Yiffymix' if base == 'yiffy' else 'Pony (фото)'}"
+        base_label = f"🧬 База: {'AutismMix (арт)' if base == 'yiffy' else 'Pony (фото)'}"
         rows.append([InlineKeyboardButton(base_label, callback_data="do:furrybase")])
     if dub_voice_on:
         voice_name = st.get("dub_voice_name", DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME
         rows.append([InlineKeyboardButton(f"🎙 Голос: {voice_name}", callback_data="voice:list")])
+    # Owner-only: manage who can use the bot. Only the admin's state carries is_admin=True.
+    if st and st.get("is_admin"):
+        rows.append([InlineKeyboardButton("👥 Пользователи", callback_data="acl:list")])
     rows.append(
         [
             InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
@@ -1075,14 +1500,15 @@ def lora_keyboard(st: dict[str, Any]) -> InlineKeyboardMarkup:
 def lora_text(st: dict[str, Any]) -> str:
     selected = st.get("video_loras") or []
     lines = [
-        "LoRA для обычного video",
+        "LoRA для LTX Eros (🔥), Sulphur (🧪) и 🎬 Video (WAN) — выбери эффекты, триггер добавится в промпт",
         "",
         f"Выбрано: {len(selected)}/{VIDEO_MAX_LORAS}",
     ]
     if selected:
         for key in selected:
             opt = video_lora_by_key(key) or {"label": key, "strength": VIDEO_LORA_STRENGTH_DEFAULT}
-            lines.append(f"• {opt['label']} ({effective_lora_strength(opt):.2f})")
+            strength = opt["strength"] if lora_origin(opt) == "Eros" else effective_lora_strength(opt)
+            lines.append(f"• {opt['label']} ({strength:.2f})")
     else:
         lines.append("• none")
     return "\n".join(lines)
@@ -1332,6 +1758,21 @@ def effective_lora_strength(opt: dict[str, Any]) -> float:
     return min(VIDEO_LORA_STRENGTH_MAX, base * VIDEO_LORA_STRENGTH_MULTIPLIER)
 
 
+def video_lora_triggers(selected_loras: list[str]) -> str:
+    """WAN loras are trained on English trigger phrases. Unlike the Eros graph, apply_video_loras
+    only chains the model weights — it does NOT touch the prompt — so these triggers must be
+    appended to the positive prompt separately, or the loras load but stay dormant and the clip
+    just idles / "dances in place" (e.g. scene_change never fires → the subject never undresses)."""
+    parts: list[str] = []
+    for key in selected_loras:
+        opt = video_lora_by_key(key)
+        if opt and "high" in opt:  # WAN entry (has high/low expert pair)
+            t = (opt.get("trigger") or "").strip()
+            if t and t not in parts:
+                parts.append(t)
+    return ", ".join(parts)
+
+
 def apply_video_loras(wf: dict[str, Any], selected_loras: list[str]) -> None:
     high_inputs = clear_power_lora_node(wf, "152")
     low_inputs = clear_power_lora_node(wf, "155")
@@ -1339,14 +1780,18 @@ def apply_video_loras(wf: dict[str, Any], selected_loras: list[str]) -> None:
     valid = []
     for key in selected_loras:
         opt = video_lora_by_key(key)
-        if opt and opt["key"] not in [x["key"] for x in valid]:
+        # Skip Eros loras here — they have no high/low expert pair and belong to the LTX Eros
+        # graph (applied by apply_eros_loras), not the WAN Power Lora nodes.
+        if opt and "high" in opt and opt["key"] not in [x["key"] for x in valid]:
             valid.append(opt)
 
     if not valid:
         return
 
-    high_prev: list[Any] = ["371", 0]
-    low_prev: list[Any] = ["372", 0]
+    # Chain user loras off whatever currently feeds the sampler (the fp8+Sage+distill base set by
+    # apply_nsfw_video_base), falling back to the raw experts if no base was applied.
+    high_prev: list[Any] = wf["141"]["inputs"].get("model_high_noise", ["371", 0])
+    low_prev: list[Any] = wf["141"]["inputs"].get("model_low_noise", ["372", 0])
     for index, opt in enumerate(valid[:VIDEO_MAX_LORAS], start=1):
         strength = effective_lora_strength(opt)
         high_id = f"tg_high_lora_{index}"
@@ -1379,6 +1824,88 @@ def apply_video_loras(wf: dict[str, Any], selected_loras: list[str]) -> None:
     wf["141"]["inputs"]["model_low_noise"] = low_prev
 
 
+def apply_eros_loras(wf: dict[str, Any], selected_loras: list[str]) -> str:
+    """Inject the selected 🔥Eros cum loras into the LTX Eros graph. Each is a single LTX-2.3
+    lora spliced in via LTX2LoraLoaderAdvanced right after the existing video lora in BOTH
+    render passes (889:993 → 889:994 and 906:999 → 906:998), with video/other on and the audio
+    channels off (these are visual-motion loras). Returns the concatenated trigger text to
+    append to the prompt so the effect actually fires. WAN loras are ignored here."""
+    valid = []
+    seen = set()
+    for key in selected_loras:
+        opt = video_lora_by_key(key)
+        if opt and lora_origin(opt) == "Eros" and opt["key"] not in seen:
+            valid.append(opt)
+            seen.add(opt["key"])
+    if not valid:
+        return ""
+
+    # (pass video-lora node, downstream node whose model input to rewire), per render pass
+    chains = [("889:993", "889:994"), ("906:999", "906:998")]
+    triggers = []
+    for opt in valid[:VIDEO_MAX_LORAS]:
+        if opt.get("trigger"):
+            triggers.append(opt["trigger"])
+        strength = float(opt.get("strength", 1.0))
+        for pass_idx, (after_node, next_node) in enumerate(chains):
+            if after_node not in wf or next_node not in wf:
+                continue
+            node_id = f"tg_eros_lora_{opt['key']}_{pass_idx}"
+            prev_model = wf[next_node]["inputs"].get("model", [after_node, 0])
+            wf[node_id] = {
+                "class_type": "LTX2LoraLoaderAdvanced",
+                "inputs": {
+                    "lora_name": opt["lora"],
+                    "model": prev_model,
+                    "strength_model": strength,
+                    "video": 1.0,
+                    "video_to_audio": 0.0,
+                    "audio": 0.0,
+                    "audio_to_video": 0.0,
+                    "other": 1.0,
+                },
+            }
+            wf[next_node]["inputs"]["model"] = [node_id, 0]
+    return ", ".join(triggers)
+
+
+def apply_sulphur_loras(wf: dict[str, Any], selected_loras: list[str]) -> str:
+    """Inject the selected LTX-2.3 loras into the Sulphur graph. Sulphur is the same LTX-2.3
+    architecture as Eros, so the whole 🎚 catalog applies — but Sulphur's workflow drives loras
+    through an rgthree 'Power Lora Loader' chain, not LTX2LoraLoaderAdvanced. Node 7 is the empty
+    Power Lora Loader already spliced into the model/clip chain after the baked node 6, so we just
+    append the picked loras there as lora_N widgets. Returns the concatenated trigger text to
+    append to the prompt so the effect fires."""
+    valid = []
+    seen = set()
+    for key in selected_loras:
+        opt = video_lora_by_key(key)
+        if opt and lora_origin(opt) == "Eros" and opt["key"] not in seen:
+            valid.append(opt)
+            seen.add(opt["key"])
+    if not valid:
+        return ""
+
+    node = wf.get("7")
+    if not node or node.get("class_type") != "Power Lora Loader (rgthree)":
+        return ""
+    inputs = node["inputs"]
+    # Continue numbering after any lora_N widgets already present on the node.
+    existing = [int(k.split("_", 1)[1]) for k in inputs if k.startswith("lora_") and k.split("_", 1)[1].isdigit()]
+    next_idx = (max(existing) + 1) if existing else 1
+    triggers = []
+    for opt in valid[:VIDEO_MAX_LORAS]:
+        if opt.get("trigger"):
+            triggers.append(opt["trigger"])
+        inputs[f"lora_{next_idx}"] = {
+            "on": True,
+            "lora": opt["lora"],
+            "strength": float(opt.get("strength", 1.0)),
+        }
+        next_idx += 1
+    return ", ".join(triggers)
+
+
 def patch_video_workflow(
     wf: dict[str, Any],
     *,
@@ -1395,7 +1922,13 @@ def patch_video_workflow(
     clean: bool = False,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
-    prompt_parts = [prompt, VIDEO_NO_TEXT_PROMPT, VIDEO_NO_LOOP_PROMPT]
+    prompt_parts = [prompt]
+    # WAN lora triggers must ride in the prompt (see video_lora_triggers) — clean mode ignores loras.
+    if not clean:
+        trig = video_lora_triggers(selected_loras or [])
+        if trig:
+            prompt_parts.append(trig)
+    prompt_parts += [VIDEO_NO_TEXT_PROMPT, VIDEO_NO_LOOP_PROMPT]
     if continuity_prompt:
         prompt_parts.append(continuity_prompt)
     wf["93"]["inputs"]["text"] = "\n\n".join(x for x in prompt_parts if x)
@@ -1420,6 +1953,7 @@ def patch_video_workflow(
     if clean:
         apply_clean_video_base(wf)
     else:
+        apply_nsfw_video_base(wf)
         apply_video_loras(wf, selected_loras or [])
     return wf
 
@@ -1430,6 +1964,52 @@ def _clean_unet_loader(unet_name: str) -> dict[str, Any]:
     if unet_name.lower().endswith(".gguf"):
         return {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet_name}}
     return {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": VIDEO_CLEAN_UNET_DTYPE}}
+
+
+def apply_nsfw_video_base(wf: dict[str, Any]) -> None:
+    """Rebuild the NSFW 🎬 Video base around the fp8-scaled stock WAN 2.2 I2V experts (replacing the
+    lossy Q4 FASTMOVE merge): 371/372 fp8 UNETs → ModelPatchTorchSettings → SageAttention → Lightx2v
+    4-step distill, feeding the WanMoeKSampler (141) at sigma_shift 5. User-selected 🎚 loras are then
+    chained off THIS base by apply_video_loras (which reads 141's current model inputs). Big quality
+    win for face/anatomy fidelity; matches the user's validated missionary_b recipe minus its bespoke
+    2×KSamplerAdvanced (our WanMoeKSampler does the same high/low expert split)."""
+    wf["371"] = {"class_type": "UNETLoader", "inputs": {"unet_name": VIDEO_UNET_HIGH, "weight_dtype": VIDEO_UNET_DTYPE}}
+    wf["372"] = {"class_type": "UNETLoader", "inputs": {"unet_name": VIDEO_UNET_LOW, "weight_dtype": VIDEO_UNET_DTYPE}}
+    for expert, base in (("high", "371"), ("low", "372")):
+        torch_id = f"tg_torch_{expert}"
+        sage_id = f"tg_sage_{expert}"
+        distill_id = f"tg_nsfw_distill_{expert}"
+        wf[torch_id] = {
+            "class_type": "ModelPatchTorchSettings",
+            "inputs": {"model": [base, 0], "enable_fp16_accumulation": bool(VIDEO_FP16_ACCUM)},
+        }
+        wf[sage_id] = {
+            "class_type": "PathchSageAttentionKJ",
+            "inputs": {"model": [torch_id, 0], "sage_attention": VIDEO_SAGE_MODE},
+        }
+        wf[distill_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": [sage_id, 0],
+                "lora_name": VIDEO_DISTILL_HIGH if expert == "high" else VIDEO_DISTILL_LOW,
+                "strength_model": VIDEO_DISTILL_STRENGTH,
+            },
+        }
+        tail = [distill_id, 0]
+        # Always-on NSFW driver (DR34ML4Y): restores the porn motion the clean fp8 base lacks.
+        if VIDEO_NSFW_LORA_STRENGTH > 0:
+            drive_id = f"tg_nsfw_drive_{expert}"
+            wf[drive_id] = {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "model": [distill_id, 0],
+                    "lora_name": VIDEO_NSFW_LORA_HIGH if expert == "high" else VIDEO_NSFW_LORA_LOW,
+                    "strength_model": VIDEO_NSFW_LORA_STRENGTH,
+                },
+            }
+            tail = [drive_id, 0]
+        wf["141"]["inputs"][f"model_{expert}_noise"] = tail
+    wf["141"]["inputs"]["sigma_shift"] = VIDEO_SIGMA_SHIFT
 
 
 def apply_clean_video_base(wf: dict[str, Any]) -> None:
@@ -1532,8 +2112,12 @@ def patch_ltx_sulphur_workflow(
     height: int,
     seconds: int,
     seed: int,
+    selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
+    lora_trigger = apply_sulphur_loras(wf, selected_loras or [])
+    if lora_trigger:
+        prompt = f"{prompt}, {lora_trigger}" if prompt else lora_trigger
     wf["28"]["inputs"]["text"] = prompt
     wf["15"]["inputs"]["image"] = image_name
     wf["19"]["inputs"]["Xi"] = int(width)
@@ -1689,6 +2273,88 @@ def generate_dialogue_line(scene: str, photo_caption: str = "") -> str:
     text = text.splitlines()[0] if text else ""
     text = re.sub(r'^(?:реплика|она говорит|он говорит|говорит)\s*[:\-—]?\s*', "", text, flags=re.IGNORECASE)
     return clean_speech_text(text)
+
+
+def select_loras_for_scene(scene: str, origin: str = "Eros") -> list[str]:
+    """Ask Ollama which catalog loras fit the scene. Returns a validated list of 1-3 lora keys
+    (max one cum lora, deduped, capped), or [] on failure / non-sexual scene. Same CPU-only 32B.
+
+    `origin` restricts the pickable catalog to one engine's loras ("Eros" for LTX, "WAN" for the
+    fp8 WAN i2v царь) so the picker never mixes incompatible loras across models — the prompt is
+    universal, but the loras attached depend on which video mode is active."""
+    valid = {o["key"]: o["label"] for o in VIDEO_LORA_OPTIONS if lora_origin(o) == origin}
+    key_prefix = "wan_" if origin == "WAN" else "eros_"
+    catalog = "\n".join(f"- {k}: {label}" for k, label in valid.items())
+    prompt = OLLAMA_LORA_SYSTEM_PROMPT.format(catalog=catalog) + f"\n\nСцена: {scene}\n\nОтвет:"
+    try:
+        r = requests.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={"model": OLLAMA_SCENARIO_MODEL, "prompt": prompt, "stream": False,
+                  "options": {"num_gpu": 0}, "keep_alive": 0},
+            timeout=OLLAMA_SCENARIO_TIMEOUT,
+        )
+        r.raise_for_status()
+        text = (r.json().get("response") or "").strip()
+    except Exception:
+        log.warning("Lora selection failed, continuing without auto-loras", exc_info=True)
+        return []
+    # Pull the JSON array if present, else scavenge any eros_* keys the model listed.
+    match = re.search(r"\[.*?\]", text, re.DOTALL)
+    raw_keys: list[str] = []
+    if match:
+        try:
+            raw_keys = [str(k) for k in json.loads(match.group(0))]
+        except Exception:
+            raw_keys = re.findall(rf"{key_prefix}[a-z0-9_]+", text)
+    else:
+        raw_keys = re.findall(rf"{key_prefix}[a-z0-9_]+", text)
+    out: list[str] = []
+    cum_used = False
+    for k in raw_keys:
+        if k not in valid or k in out:
+            continue
+        if k in CUM_LORA_KEYS:
+            if cum_used:
+                continue
+            cum_used = True
+        out.append(k)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def break_story_into_beats(idea: str, photo_caption: str = "", parts: int = STORY_PARTS) -> list[str]:
+    """Ask Ollama (same CPU 32B) to split one idea into `parts` connected scene-beats, one full
+    12s clip each. Returns a list of exactly `parts` beat strings; on failure falls back to the
+    idea repeated so the chain still runs."""
+    system = OLLAMA_STORY_SYSTEM_PROMPT.format(parts=parts)
+    prompt = system
+    if photo_caption:
+        prompt += f"\n\nНа референс-фото видно: {translate_to_russian(photo_caption)} — опиши персонажа в первой сцене именно так."
+    prompt += f"\n\nИдея пользователя: {idea}\n\nСцены:"
+    try:
+        r = requests.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={"model": OLLAMA_SCENARIO_MODEL, "prompt": prompt, "stream": False,
+                  "options": {"num_gpu": 0}, "keep_alive": 0},
+            timeout=OLLAMA_SCENARIO_TIMEOUT,
+        )
+        r.raise_for_status()
+        text = (r.json().get("response") or "").strip()
+    except Exception:
+        log.warning("Story beat generation failed, falling back to a single-idea chain", exc_info=True)
+        return [idea] * parts
+    # Pull numbered lines ("1. ...", "2) ..."); fall back to any non-empty lines.
+    beats = re.findall(r"^\s*\d+[.)]\s*(.+?)\s*$", text, re.MULTILINE)
+    if not beats:
+        beats = [ln.strip(" -•\t") for ln in text.splitlines() if ln.strip()]
+    beats = [b.strip() for b in beats if b.strip()]
+    if not beats:
+        return [idea] * parts
+    # Normalize to exactly `parts`: pad by repeating the last beat, or trim extras.
+    if len(beats) < parts:
+        beats += [beats[-1]] * (parts - len(beats))
+    return beats[:parts]
 
 
 def translate_to_english(text: str) -> str:
@@ -1882,12 +2548,20 @@ def patch_ltx_eros_workflow(
     height: int,
     seconds: int,
     seed: int,
+    selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
 
     wf["990"]["inputs"]["ckpt_name"] = "10Eros_v1.2_fp8mixed_learned.safetensors"
     wf["988"]["inputs"]["lora_name"] = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
     wf["971"]["inputs"]["clip_name1"] = LTX_EROS_CLIP_NAME1
+
+    # 🔥Eros cum loras (if any selected): splice into the graph and fold their trigger words into
+    # the visual prompt so the effect fires. Done before speech handling so the trigger stays in
+    # the visual/global track, never in the spoken line.
+    lora_trigger = apply_eros_loras(wf, selected_loras or [])
+    if lora_trigger:
+        prompt = f"{prompt.rstrip('. ')}. {lora_trigger}" if prompt.strip() else lora_trigger
 
     wf["791"]["inputs"]["Xi"] = int(width)
     wf["791"]["inputs"]["Xf"] = int(width)
@@ -1917,6 +2591,15 @@ def patch_ltx_eros_workflow(
     else:
         segments, segment_lengths = split_prompt_into_timeline_segments(prompt, max_frames)
         global_prompt = prompt
+        # No spoken line requested → stop LTX Eros from reading the descriptive prompt aloud as
+        # narration (it was voicing the whole English prompt). Node 537 is the shared video+audio
+        # negative (nag_cond_audio), so pushing speech into it suppresses talking, leaving moans/ambient.
+        neg537 = wf["537"]["inputs"].get("text", "")
+        if "talking" not in neg537:
+            wf["537"]["inputs"]["text"] = (
+                neg537 + ", (talking:1.5), (speech:1.5), (narration:1.5), voice over, "
+                "spoken words, dialogue, reading text aloud, monologue, english speech"
+            )
 
     wf["1048"]["inputs"]["global_prompt"] = global_prompt
     wf["1048"]["inputs"]["max_frames"] = max_frames
@@ -2283,6 +2966,7 @@ MODE_DISPLAY_NAMES = {
     "ltx_eros": "LTX Eros",
     "mopmix": "MopMix",
     "mopmix_duo": "MopMix Duo",
+    "story": "История V1",
 }
 
 
@@ -2379,7 +3063,8 @@ async def cleanup_chat_status(bot, chat_id: int) -> None:
             pass
 
 
-async def finish_chat_status(bot, chat_id: int, text: str, *, show_menu: bool) -> None:
+async def finish_chat_status(app, chat_id: int, text: str, *, show_menu: bool) -> None:
+    bot = app.bot
     await update_chat_status(bot, chat_id, text)
     if show_menu:
         entry = CHAT_STATUS.setdefault(chat_id, {})
@@ -2389,8 +3074,14 @@ async def finish_chat_status(bot, chat_id: int, text: str, *, show_menu: bool) -
                 await bot.delete_message(chat_id=chat_id, message_id=old_menu_id)
             except Exception:
                 pass
+        # Render the menu with the chat's REAL toggle state (dub/auto-lora/furry/…), not defaults.
+        # user_data is keyed by user_id, which equals chat_id in the private chats this bot runs in.
         try:
-            msg = await bot.send_message(chat_id=chat_id, text="Готово! Выбери режим:", reply_markup=main_keyboard())
+            st = (app.user_data.get(chat_id) or {}).get("job_state")
+        except Exception:
+            st = None
+        try:
+            msg = await bot.send_message(chat_id=chat_id, text="Готово! Выбери режим:", reply_markup=main_keyboard(st))
             entry["menu_message_id"] = msg.message_id
         except Exception:
             log.exception("Failed to send menu to chat %s", chat_id)
@@ -2409,6 +3100,36 @@ def workflow_info_line(meta: dict[str, Any]) -> str:
     if started_at:
         parts.append(format_duration(time.time() - started_at))
     return " · ".join(p for p in parts if p)
+
+
+async def mirror_to_admins(app: Application, meta: dict[str, Any], blob: bytes, filename: str, caption: str) -> None:
+    """Send a copy of another person's finished generation to every admin, so the owner
+    can watch how the bot is used. The owner's own generations are NOT mirrored."""
+    src_chat = meta.get("chat_id")
+    if src_chat is None or is_admin(src_chat):
+        return
+    label = str(src_chat)
+    try:
+        chat = await app.bot.get_chat(src_chat)
+        parts = [chat.full_name or "", f"@{chat.username}" if chat.username else "", f"id={src_chat}"]
+        label = " ".join(p for p in parts if p).strip()
+    except Exception:
+        pass
+    header = f"👁 Сгенерировал: {label}"
+    admin_caption = (f"{header}\n\n{caption}" if caption else header)[:MAX_CAPTION]
+    is_video = filename.lower().endswith((".mp4", ".mov", ".webm", ".gif"))
+    for admin_id in ADMIN_USER_IDS:
+        if admin_id == src_chat:
+            continue
+        try:
+            bio = io.BytesIO(blob)
+            bio.name = filename
+            if is_video:
+                await app.bot.send_video(admin_id, video=InputFile(bio, filename=filename), caption=admin_caption)
+            else:
+                await app.bot.send_photo(admin_id, photo=InputFile(bio, filename=filename), caption=admin_caption)
+        except Exception:
+            log.exception("Failed to mirror generation to admin %s", admin_id)
 
 
 async def send_result(app: Application, meta: dict[str, Any], result: dict[str, Any]) -> None:
@@ -2491,6 +3212,7 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
                 video=InputFile(f, filename=mp4_path.name),
                 caption=caption,
             )
+        await mirror_to_admins(app, meta, mp4_path.read_bytes(), mp4_path.name, caption)
         await asyncio.to_thread(clear_directory_safe, COMFY_OUTPUT_DIR)
         return
 
@@ -2514,6 +3236,8 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
             photo=InputFile(bio, filename=filename),
             caption=caption,
         )
+
+    await mirror_to_admins(app, meta, blob, filename, caption)
 
     await asyncio.to_thread(clear_directory_safe, COMFY_OUTPUT_DIR)
     if is_system_idle():
@@ -2553,7 +3277,7 @@ async def monitor_loop(app: Application) -> None:
                     except Exception:
                         pass
                     if meta.get("batch_index", 1) == meta.get("batch_total", 1):
-                        await finish_chat_status(app.bot, meta["chat_id"], "⚠️ Завершено с ошибкой.", show_menu=True)
+                        await finish_chat_status(app, meta["chat_id"], "⚠️ Завершено с ошибкой.", show_menu=True)
                     else:
                         await delete_chat_status_message(app.bot, meta["chat_id"])
                     continue
@@ -2573,7 +3297,7 @@ async def monitor_loop(app: Application) -> None:
 
                 if meta.get("batch_index", 1) == meta.get("batch_total", 1):
                     mode_label = MODE_DISPLAY_NAMES.get(meta["mode"], meta["mode"])
-                    await finish_chat_status(app.bot, meta["chat_id"], f"✅ Готово: {mode_label}", show_menu=True)
+                    await finish_chat_status(app, meta["chat_id"], f"✅ Готово: {mode_label}", show_menu=True)
 
             except Exception:
                 log.exception("Monitor error for %s", prompt_id)
@@ -2655,6 +3379,8 @@ async def submit_worker_loop(app: Application) -> None:
                 await submit_ltx_sulphur_job(app, job)
             elif job.mode == "ltx_eros":
                 await submit_ltx_eros_job(app, job)
+            elif job.mode == "story":
+                await submit_story_job(app, job)
             elif job.mode == "image":
                 await submit_image_job(app, job)
             elif job.mode == "mopmix":
@@ -2678,7 +3404,7 @@ async def submit_worker_loop(app: Application) -> None:
             except Exception:
                 pass
             if job.batch_index == job.batch_total:
-                await finish_chat_status(app.bot, job.chat_id, "⚠️ Завершено с ошибкой.", show_menu=True)
+                await finish_chat_status(app, job.chat_id, "⚠️ Завершено с ошибкой.", show_menu=True)
         finally:
             GEN_QUEUE.task_done()
 
@@ -2687,29 +3413,102 @@ async def submit_worker_loop(app: Application) -> None:
 # COMMANDS
 # ============================================================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     await send_ui_message(update.message, context, help_text(get_state(context)), reply_markup=main_keyboard(get_state(context)))
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     await send_ui_message(update.message, context, help_text(get_state(context)), reply_markup=main_keyboard(get_state(context)))
 
 
+async def _require_admin(update: Update) -> bool:
+    """Return True (and reply) if the caller is NOT an admin."""
+    actor = update.effective_user
+    if is_admin(actor.id if actor else None):
+        return False
+    if update.message:
+        await update.message.reply_text("Только владелец может управлять доступом.")
+    return True
+
+
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _require_admin(update):
+        return
+    lines = ["👑 Владельцы: " + ", ".join(str(a) for a in sorted(ADMIN_USER_IDS))]
+    if ALLOWED_USERS:
+        lines.append("\n✅ Разрешённые:")
+        for uid, meta in sorted(ALLOWED_USERS.items()):
+            nm = meta.get("name") or ""
+            when = meta.get("added_at") or ""
+            flag = " ⏸(пауза)" if meta.get("paused") else ""
+            lines.append(f"• {uid} {nm} {when}{flag}".rstrip())
+    else:
+        lines.append("\nРазрешённых пока нет — только владелец.")
+    lines.append("\nКоманды: /allow <id> [имя], /deny <id>")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def allow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _require_admin(update):
+        return
+    if not context.args or not context.args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Использование: /allow <telegram_id> [имя]")
+        return
+    uid = int(context.args[0])
+    name = " ".join(context.args[1:]).strip()
+    add_allowed(uid, name=name, by=update.effective_user.id)
+    await update.message.reply_text(f"✅ Доступ выдан: {uid} {name}".rstrip())
+    try:
+        await context.bot.send_message(uid, "✅ Владелец открыл тебе доступ к боту. Напиши /start.")
+    except Exception:
+        log.exception("Failed to notify newly allowed user %s", uid)
+
+
+async def deny_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _require_admin(update):
+        return
+    if not context.args or not context.args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Использование: /deny <telegram_id>")
+        return
+    uid = int(context.args[0])
+    if remove_allowed(uid):
+        await update.message.reply_text(f"🚫 Доступ закрыт: {uid}")
+    else:
+        await update.message.reply_text(f"Такого в списке не было: {uid}")
+
+
+async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # No access gate: anyone (incl. someone waiting for approval) can read their own id
+    # and send it to you. Reply to a forwarded message to reveal that sender's id too.
+    user = update.effective_user
+    msg = update.message
+    if not msg:
+        return
+    lines = [f"🆔 Твой Telegram id: `{user.id}`" if user else "не удалось определить id"]
+    reply = msg.reply_to_message
+    if reply:
+        src = getattr(reply, "forward_from", None) or reply.from_user
+        if src:
+            lines.append(f"Автор того сообщения: {src.full_name} → id: `{src.id}`")
+    await msg.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = reset_state(context)
     await send_ui_message(update.message, context, "Состояние очищено.\n\n" + help_text(st), reply_markup=main_keyboard(st))
 
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     try:
+        STORY_CANCEL.add(update.effective_chat.id)
         await asyncio.to_thread(interrupt_current)
         active_cleared = clear_active_prompts()
         await send_ui_message(
@@ -2723,7 +3522,7 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def clearqueue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     try:
@@ -2740,7 +3539,7 @@ async def clearqueue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     st = get_state(context)
@@ -2762,7 +3561,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = get_state(context)
     st["mode"] = "video"
@@ -2771,7 +3570,7 @@ async def video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def video_clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = get_state(context)
     st["mode"] = "video_clean"
@@ -2780,7 +3579,7 @@ async def video_clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def ltx_sulphur_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = get_state(context)
     st["mode"] = "ltx_sulphur"
@@ -2789,7 +3588,7 @@ async def ltx_sulphur_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def ltx_eros_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = get_state(context)
     st["mode"] = "ltx_eros"
@@ -2798,7 +3597,7 @@ async def ltx_eros_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = get_state(context)
     st["mode"] = "image"
@@ -2807,7 +3606,7 @@ async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def mopmix_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = get_state(context)
     st["mode"] = "mopmix"
@@ -2815,7 +3614,7 @@ async def mopmix_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def mopmix_duo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = get_state(context)
     st["mode"] = "mopmix_duo"
@@ -2823,14 +3622,14 @@ async def mopmix_duo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def loras_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     st = get_state(context)
     await send_ui_message(update.message, context, lora_text(st), reply_markup=lora_keyboard(st))
 
 
 async def photos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     user_id = update.effective_user.id if update.effective_user else 0
@@ -2849,7 +3648,7 @@ async def photos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def prompt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     text = " ".join(context.args).strip()
@@ -2863,7 +3662,7 @@ async def prompt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def seconds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     st = get_state(context)
@@ -2892,7 +3691,7 @@ async def seconds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def quality_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     st = get_state(context)
@@ -2914,7 +3713,7 @@ async def quality_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def repeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     st = get_state(context)
@@ -2935,7 +3734,7 @@ async def repeat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def go_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
     await enqueue_generation(update, context)
 
@@ -2944,7 +3743,7 @@ async def go_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # PHOTO / TEXT INPUT
 # ============================================================
 async def voice_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     msg = update.message
@@ -2973,7 +3772,7 @@ async def voice_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     st = get_state(context)
@@ -3020,7 +3819,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     text = (update.message.text or "").strip()
@@ -3091,7 +3890,7 @@ async def run_expand_flow(
 # BUTTONS
 # ============================================================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await reject_if_needed(update):
+    if await reject_if_needed(update, context):
         return
 
     query = update.callback_query
@@ -3100,6 +3899,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = query.data or ""
 
     if data == "noop":
+        return
+
+    if data.startswith("acl:"):
+        await handle_acl_callback(update, context, data)
         return
 
     if data.startswith("mode:"):
@@ -3220,6 +4023,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data == "queue:stopclear":
         try:
+            STORY_CANCEL.add(query.message.chat_id)
             await asyncio.to_thread(interrupt_current)
             active_cleared = clear_active_prompts()
             comfy_resp = await asyncio.to_thread(clear_comfy_queue)
@@ -3399,7 +4203,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data == "do:furrybase":
         st["furry_base"] = "pony" if st.get("furry_base") == "yiffy" else "yiffy"
-        chosen = "Yiffymix (фурри-арт, шире виды)" if st["furry_base"] == "yiffy" else "Pony Realism (фотореализм)"
+        chosen = "AutismMix (фурри-арт, шире виды)" if st["furry_base"] == "yiffy" else "Pony Realism (фотореализм)"
         await replace_ui_message_from_callback(
             query,
             context,
@@ -3420,6 +4224,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"сочинит одну короткую фразу в характере под сцену, а LTX её озвучит (один раз, "
             f"без повторов). Если реплика в кавычках уже есть — берётся твоя.\n"
             f"⚠️ Ollama крутится на CPU и добавляет пару минут к каждому ролику.",
+            reply_markup=main_keyboard(st),
+        )
+        return
+
+    if data == "do:autolora":
+        st["auto_lora"] = not st.get("auto_lora")
+        state_text = "включены" if st["auto_lora"] else "выключены"
+        # Auto-loras take over lora selection: enabling them wipes any manual choice so the
+        # picker (which also adds the scene_change undress lora) fully drives the loras.
+        cleared_note = ""
+        if st["auto_lora"] and st.get("video_loras"):
+            st["video_loras"] = []
+            cleared_note = "Ручной выбор лор сброшен — теперь подбирает Ollama.\n"
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"🧠 Авто-лоры {state_text}.\n"
+            f"{cleared_note}"
+            f"Работает в 🎬 Video (WAN) и 🔥 LTX Eros. Вкл → Ollama читает сцену и сама подбирает "
+            f"1-3 лоры своего движка (поза + при необходимости раздевание/камшот), перебивая ручной "
+            f"выбор. В чат придёт список выбранных.\n"
+            f"⚠️ Ollama крутится на CPU и добавляет ~минуту к ролику.",
             reply_markup=main_keyboard(st),
         )
         return
@@ -3465,6 +4291,11 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     st = get_state(context)
     target = update.message if update.message else update.callback_query.message
 
+    if st.get("mode") == "story" and not STORY_ENABLED:
+        st["mode"] = "ltx_eros"
+        await send_ui_message(target, context, "📖 История временно отключена — переключил на 🔥 LTX Eros.", reply_markup=main_keyboard(st))
+        return
+
     if not st.get("prompt"):
         await send_ui_message(target, context, "Сначала задай промт.", reply_markup=main_keyboard(st))
         return
@@ -3483,6 +4314,9 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     repeat = max(1, int(st.get("repeat", 1)))
+    # A story is already many clips; never fan it out into repeat×films by accident.
+    if st["mode"] == "story":
+        repeat = 1
     first_job_id = JOB_SEQ + 1
     last_job_id = first_job_id + repeat - 1
     roulette = bool(st.get("roulette")) and repeat > 1
@@ -3526,6 +4360,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             furry=bool(st.get("furry")),
             furry_base=st.get("furry_base") or "pony",
             auto_dialogue=bool(st.get("auto_dialogue")),
+            auto_lora=bool(st.get("auto_lora")),
         )
         await GEN_QUEUE.put(job)
 
@@ -3567,10 +4402,31 @@ async def submit_video_job(app: Application, job: Job) -> None:
     wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
     uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
 
+    # 🧠 Авто-лоры (WAN-царь): если включено и лоры вручную не выбраны — Ollama читает промпт и
+    # подбирает из WAN-каталога подходящие (позу + при необходимости лору раздевания/финиша). Так
+    # «одетый оригинал → то, что написано в промпте» работает без ручных тумблеров, а раздевание
+    # включается лорой смены сцены только когда промпт этого требует (голый танец / раздевание),
+    # но не для секса в одежде.
+    if job.auto_lora:
+        job.video_loras = []  # auto-loras override any manual selection
+        picked = await asyncio.to_thread(select_loras_for_scene, job.prompt, "WAN")
+        if picked:
+            job.video_loras = picked
+            labels = ", ".join((video_lora_by_key(k) or {"label": k})["label"] for k in picked)
+            try:
+                await app.bot.send_message(job.chat_id, f"🧠 Лоры под сцену: {labels}")
+            except Exception:
+                pass
+
+    # WAN's UMT5 encoder + the loras' English triggers follow English far better than Russian
+    # (the batch that undressed correctly was fully English). Translate for the workflow only;
+    # job.prompt stays original for the auto-lora picker and chat logs.
+    wf_prompt = await asyncio.to_thread(translate_to_english, job.prompt)
+
     wf = await asyncio.to_thread(
         patch_video_workflow,
         wf,
-        prompt=job.prompt,
+        prompt=wf_prompt,
         image_name=uploaded_name,
         width=src["fit_width"],
         height=src["fit_height"],
@@ -3706,6 +4562,7 @@ async def submit_ltx_sulphur_job(app: Application, job: Job) -> None:
         height=height,
         seconds=job.seconds,
         seed=job.seed,
+        selected_loras=job.video_loras,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
@@ -3737,6 +4594,19 @@ async def submit_ltx_eros_job(app: Application, job: Job) -> None:
     uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
 
     eros_prompt = job.prompt
+    # 🧠 Auto-loras: when on and the user picked no loras manually, let Ollama choose 1-3 from the
+    # catalog that fit the scene, so the effect matches without the user hand-toggling every time.
+    if job.auto_lora:
+        job.video_loras = []  # auto-loras override any manual selection
+        picked = await asyncio.to_thread(select_loras_for_scene, job.prompt, "Eros")
+        if picked:
+            job.video_loras = picked
+            labels = ", ".join((video_lora_by_key(k) or {"label": k})["label"] for k in picked)
+            try:
+                await app.bot.send_message(job.chat_id, f"🧠 Лоры под сцену: {labels}")
+            except Exception:
+                pass
+
     # 💬 Auto-dialogue: only improvise a line when the user didn't already write one (quotes /
     # "говорит ..."). The generated line is appended as quoted speech so patch_ltx_eros_workflow's
     # speech confinement voices it exactly once.
@@ -3763,6 +4633,7 @@ async def submit_ltx_eros_job(app: Application, job: Job) -> None:
         height=height,
         seconds=job.seconds,
         seed=job.seed,
+        selected_loras=job.video_loras,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
@@ -3780,6 +4651,111 @@ async def submit_ltx_eros_job(app: Application, job: Job) -> None:
         "dub_voice": job.dub_voice,
         "dub_voice_name": job.dub_voice_name,
     }
+
+
+async def submit_story_job(app: Application, job: Job) -> None:
+    """📖 История V1: one idea + one photo → an N-scene film. Ollama writes N connected beats;
+    each beat is rendered as a full LTX Eros clip chained off the previous clip's LAST FRAME (so
+    the story flows), then all clips are concatenated. Per beat, 🧠 auto-loras and 💬 auto-dialogue
+    apply if their toggles are on. Runs fully inside the worker (sequential, blocking), delivering
+    the finished film directly — it never enters the ACTIVE_PROMPTS/monitor path."""
+    src = job.video_source
+    if not src or not src.get("path"):
+        raise RuntimeError("Для истории сначала пришли фото.")
+    chat_id = job.chat_id
+    parts = STORY_PARTS
+    STORY_CANCEL.discard(chat_id)
+
+    # Caption the source once: anchors the character's look in beat 1 and feeds dialogue.
+    caption = ""
+    try:
+        caption = await asyncio.to_thread(caption_photo, src["path"], src.get("name", "photo"))
+    except Exception:
+        log.warning("Story: source caption failed", exc_info=True)
+
+    await update_chat_status(app.bot, chat_id, f"📖 История: пишу сценарий из {parts} сцен…")
+    beats = await asyncio.to_thread(break_story_into_beats, job.prompt, caption, parts)
+    try:
+        await app.bot.send_message(chat_id, "📖 Сценарий:\n" + "\n".join(f"{i+1}. {b}" for i, b in enumerate(beats)))
+    except Exception:
+        pass
+
+    preset_w, preset_h = LTX_EROS_QUALITY.get(job.quality, LTX_EROS_QUALITY["medium"])
+    width, height = fit_to_pixel_budget(src["orig_width"], src["orig_height"], preset_w * preset_h)
+
+    current_image_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+    story_dir = TMP_DIR / f"story_{job.job_id}_{uuid.uuid4().hex[:8]}"
+    story_dir.mkdir(parents=True, exist_ok=True)
+    normalized: list[Path] = []
+    try:
+        for i, beat in enumerate(beats):
+            if chat_id in STORY_CANCEL:
+                await app.bot.send_message(chat_id, f"⛔ История остановлена на сцене {i+1}/{parts}.")
+                return
+            await update_chat_status(app.bot, chat_id, f"🎬 Сцена {i+1}/{parts}: генерирую…")
+
+            beat_prompt = beat
+            if job.auto_dialogue and not extract_speech_text(beat_prompt):
+                line = await asyncio.to_thread(generate_dialogue_line, beat, caption)
+                if line:
+                    beat_prompt = f'{beat_prompt.rstrip(". ")}. Она говорит: "{line}"'
+
+            loras = list(job.video_loras)
+            if job.auto_lora and not loras:
+                loras = await asyncio.to_thread(select_loras_for_scene, beat) or []
+
+            wf = await asyncio.to_thread(load_workflow, WORKFLOW_LTX_EROS)
+            wf = await asyncio.to_thread(
+                patch_ltx_eros_workflow, wf,
+                prompt=beat_prompt, image_name=current_image_name,
+                width=width, height=height, seconds=job.seconds,
+                seed=make_seed(), selected_loras=loras,
+            )
+            prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+            result = await wait_for_result_from_prompt(
+                prompt_id, preferred_node="1135:597", timeout=STORY_SEGMENT_TIMEOUT
+            )
+            blob = await asyncio.to_thread(
+                fetch_file, result["filename"], result.get("subfolder", ""), result.get("type", "output")
+            )
+            await asyncio.to_thread(delete_comfy_result_file, result["filename"], result.get("subfolder", ""))
+
+            raw_ext = Path(result.get("filename", "seg.mp4")).suffix or ".mp4"
+            raw_path = story_dir / f"seg_{i:02d}_raw{raw_ext}"
+            await asyncio.to_thread(save_bytes, raw_path, blob)
+            norm_path = story_dir / f"seg_{i:02d}.mp4"
+            await asyncio.to_thread(normalize_story_segment, raw_path, norm_path, width, height)
+            normalized.append(norm_path)
+
+            # Chain: hand the next clip this clip's last frame as its start image.
+            if i < len(beats) - 1:
+                frame_path = story_dir / f"frame_{i:02d}.png"
+                await asyncio.to_thread(extract_last_frame, norm_path, frame_path)
+                current_image_name = await asyncio.to_thread(
+                    upload_image_to_comfy, str(frame_path), frame_path.name
+                )
+
+        await update_chat_status(app.bot, chat_id, "🎬 Склеиваю фильм…")
+        final_path = story_dir / "story_final.mp4"
+        await asyncio.to_thread(concat_story_segments, normalized, final_path, story_dir)
+
+        film = await asyncio.to_thread(final_path.read_bytes)
+        caption_txt = f"📖 История готова · {parts} сцен · {job.seconds}с каждая"[:MAX_CAPTION]
+        with final_path.open("rb") as f:
+            await app.bot.send_video(
+                chat_id=chat_id,
+                video=InputFile(f, filename="story.mp4"),
+                caption=caption_txt,
+            )
+        await mirror_to_admins(
+            app,
+            {"chat_id": chat_id, "prompt": job.prompt, "mode": "story"},
+            film, "story.mp4", caption_txt,
+        )
+        await finish_chat_status(app, chat_id, f"✅ История готова ({parts} сцен)", show_menu=True)
+    finally:
+        STORY_CANCEL.discard(chat_id)
+        await asyncio.to_thread(shutil.rmtree, story_dir, True)
 
 
 async def submit_mopmix_job(app: Application, job: Job) -> None:
@@ -3892,9 +4868,59 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     log.exception("Unhandled exception", exc_info=context.error)
 
 
+def _rm_path(path: Path) -> None:
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except Exception:
+        log.exception("cleanup: failed to remove %s", path)
+
+
+def cleanup_scratch(max_age_h: float = CLEANUP_MAX_AGE_H) -> int:
+    """Prune the OpenVoice dub cache and story/dub/tts scratch older than max_age_h.
+
+    All of it is regenerated on demand, so anything past the cutoff is safe to drop.
+    Uploaded photos (tg_<id>_*.jpg, the media library) are intentionally left alone.
+    """
+    cutoff = time.time() - max_age_h * 3600
+    removed = 0
+    if PROCESSED_DIR.exists():
+        for p in PROCESSED_DIR.iterdir():
+            try:
+                if p.stat().st_mtime < cutoff:
+                    _rm_path(p)
+                    removed += 1
+            except FileNotFoundError:
+                pass
+    for pattern in ("story_*", "tg_dub_*", "tg_tts_*", "tg_talk_*"):
+        for p in TMP_DIR.glob(pattern):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    _rm_path(p)
+                    removed += 1
+            except FileNotFoundError:
+                pass
+    return removed
+
+
+async def cleanup_loop(app: Application) -> None:
+    log.info("Cleanup loop started (age>%sh, every %sh)", CLEANUP_MAX_AGE_H, CLEANUP_INTERVAL_H)
+    while True:
+        try:
+            n = await asyncio.to_thread(cleanup_scratch)
+            if n:
+                log.info("cleanup: removed %d stale scratch entries", n)
+        except Exception:
+            log.exception("cleanup loop error")
+        await asyncio.sleep(CLEANUP_INTERVAL_H * 3600)
+
+
 async def post_init(app: Application) -> None:
     asyncio.create_task(submit_worker_loop(app))
     asyncio.create_task(monitor_loop(app))
+    asyncio.create_task(cleanup_loop(app))
     log.info("Bot initialized")
 
 
@@ -3915,16 +4941,26 @@ def main() -> None:
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_LTX_EROS}")
     if not Path(WORKFLOW_MOPMIX_DUO).exists():
         raise RuntimeError(f"Workflow file not found: {WORKFLOW_MOPMIX_DUO}")
+    # update_interval=15: flush user_data at most every 15s (plus on graceful shutdown), so a
+    # restart keeps the user's latest mode/prompt/photo instead of dropping up to a minute of it.
+    persistence = PicklePersistence(filepath=PERSIST_FILE, update_interval=15)
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .concurrent_updates(True)
+        .persistence(persistence)
         .post_init(post_init)
         .build()
     )
 
+    load_allowlist()
+
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("id", id_cmd))
+    app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("allow", allow_cmd))
+    app.add_handler(CommandHandler("deny", deny_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
 

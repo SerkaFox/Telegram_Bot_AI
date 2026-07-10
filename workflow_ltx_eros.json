@@ -55,7 +55,7 @@
   "990": {
     "class_type": "CheckpointLoaderSimple",
     "inputs": {
-      "ckpt_name": "Ltx2.3\\10Eros_v1.2_fp8mixed_learned.safetensors"
+      "ckpt_name": "10Eros_v1.2_fp8mixed_learned.safetensors"
     }
   },
   "936": {
@@ -121,7 +121,7 @@
   "988": {
     "class_type": "easy loraNames",
     "inputs": {
-      "lora_name": "Ltx2.3\\ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
+      "lora_name": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
     }
   },
   "1121": {

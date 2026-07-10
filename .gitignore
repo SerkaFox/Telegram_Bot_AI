@@ -23,3 +23,19 @@ voices/
 # OpenVoice se_extractor's default scratch dir (split reference-audio segments)
 processed/
 
+bot_state.pkl
+
+# Runtime allowlist (contains Telegram user IDs / PII)
+allowlist.json
+# Personal audio sample
+tati.mp3
+# Scratch experiment scripts (contain a hardcoded bot token — never commit)
+animate_scene.py
+doggy_pipeline.py
+newlora_test.py
+scene_build.py
+scene_change_batch.py
+seko_test.py
+story_pose_test.py
+undress_test.py
+mql_batch.py
