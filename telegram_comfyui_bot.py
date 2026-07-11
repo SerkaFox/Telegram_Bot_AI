@@ -4458,14 +4458,22 @@ async def submit_video_story(app: Application, job: Job) -> None:
     loras = list(job.video_loras)
     if job.auto_lora and not loras:
         loras = await asyncio.to_thread(select_loras_for_scene, job.prompt, "WAN") or []
-    if loras:
-        try:
-            labels = ", ".join((video_lora_by_key(k) or {"label": k})["label"] for k in loras)
-            await app.bot.send_message(chat_id, f"🧠 Лоры под сцену: {labels}")
-        except Exception:
-            pass
-    act_loras = [k for k in loras if k not in STORY_DRIVER_KEYS]
-    eng = await asyncio.to_thread(translate_to_english, job.prompt)
+    # Drivers (undress/scene-change) belong only on chunk 0; the rest carry act loras.
+    driver_loras = [k for k in loras if k in STORY_DRIVER_KEYS]
+    if job.auto_lora and not driver_loras:
+        driver_loras = ["wan_scene_change"]  # ensure the first chunk actually undresses her
+    manual_act = [k for k in loras if k not in STORY_DRIVER_KEYS]
+
+    # Split the prompt into `parts` chronological beats so EACH 6s chunk advances the story with
+    # its own action (and, under 🧠 auto-loras, its own pose lora) — instead of the whole prompt
+    # collapsing to one looped action for every chunk. This is why 36s used to be "kiss then 30s
+    # of the same missionary": the full prompt + one act lora were reused verbatim per chunk.
+    beats = await asyncio.to_thread(break_story_into_beats, job.prompt, "", parts)
+    try:
+        board = "\n".join(f"{i+1}. {b}" for i, b in enumerate(beats))
+        await app.bot.send_message(chat_id, f"📝 Раскадровка ({parts}×{chunk_secs}с):\n{board}"[:MAX_CAPTION])
+    except Exception:
+        pass
 
     current_image_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
     story_dir = TMP_DIR / f"vstory_{job.job_id}_{uuid.uuid4().hex[:8]}"
@@ -4477,10 +4485,25 @@ async def submit_video_story(app: Application, job: Job) -> None:
                 await app.bot.send_message(chat_id, f"⛔ Остановлено на части {i+1}/{parts}.")
                 return
             await update_chat_status(app.bot, chat_id, f"🎬 История {i+1}/{parts}: генерирую…")
-            if i == 0:
-                chunk_prompt, chunk_loras = eng, loras
+            beat_ru = beats[i]
+            chunk_prompt = await asyncio.to_thread(translate_to_english, beat_ru)
+            # Per-beat pose lora under auto-loras (kiss → missionary → doggy → facial …); otherwise
+            # keep the user's manually chosen act loras across the story.
+            if job.auto_lora:
+                picked = await asyncio.to_thread(select_loras_for_scene, beat_ru, "WAN") or []
+                beat_act = [k for k in picked if k not in STORY_DRIVER_KEYS] or manual_act
             else:
-                chunk_prompt, chunk_loras = f"{eng}, the action continues without stopping", act_loras
+                beat_act = manual_act
+            if i == 0:
+                chunk_loras = driver_loras + beat_act
+            else:
+                chunk_loras = beat_act
+                chunk_prompt += ", the action continues smoothly from the previous shot without a cut"
+            try:
+                lbls = ", ".join((video_lora_by_key(k) or {"label": k})["label"] for k in chunk_loras) or "—"
+                await app.bot.send_message(chat_id, f"🎬 {i+1}/{parts} · {beat_ru}\n🧠 {lbls}"[:MAX_CAPTION])
+            except Exception:
+                pass
             wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
             wf = await asyncio.to_thread(
                 patch_video_workflow, wf,
@@ -4500,8 +4523,11 @@ async def submit_video_story(app: Application, job: Job) -> None:
             await asyncio.to_thread(normalize_story_segment, raw_path, norm_path, src["fit_width"], src["fit_height"], job.video_fps)
             normalized.append(norm_path)
             if i < parts - 1:
+                # Chain from the RAW WAN output, not the re-encoded norm segment, so the next
+                # chunk starts from the least-degraded frame (curbs the accumulating blur/color
+                # drift over a long story).
                 frame_path = story_dir / f"frame_{i:02d}.png"
-                await asyncio.to_thread(extract_last_frame, norm_path, frame_path)
+                await asyncio.to_thread(extract_last_frame, raw_path, frame_path)
                 current_image_name = await asyncio.to_thread(upload_image_to_comfy, str(frame_path), frame_path.name)
 
         await update_chat_status(app.bot, chat_id, "🎬 Склеиваю…")
