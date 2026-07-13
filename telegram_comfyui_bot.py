@@ -2365,6 +2365,58 @@ def select_loras_for_scene(scene: str, origin: str = "Eros") -> list[str]:
     return out
 
 
+OLLAMA_SCENE_EDIT_SYSTEM_PROMPT = (
+    "You convert an erotic video request into ONE short image-editing instruction that edits a "
+    "reference PHOTO of two real people (a woman and an older man) into the STARTING frame of the "
+    "video. Output ONE English sentence only. HARD RULES: keep BOTH people and their exact faces, "
+    "ages, hair and identities UNCHANGED — never swap them for different-looking people. You may "
+    "change ONLY two things: (a) the woman's OUTFIT to what the request describes (e.g. black "
+    "stockings, a short skirt, lingerie, a sheer top) — she stays DRESSED, not naked; (b) the "
+    "LOCATION / background to what the request describes (e.g. a sunny green park, a sandy beach, a "
+    "bedroom). Keep it NON-explicit and non-sexual: just the same two people standing dressed in "
+    "that place. Always produce an instruction whenever the request mentions ANY clothing item OR "
+    "ANY place. Reply exactly NONE only when the request truly names no clothing and no place at "
+    "all. Reply with only the sentence or NONE, no quotes, no explanation.\n\n"
+    "Examples:\n"
+    "Request: на ней короткая юбка и чулки, они в парке, он трахает её раком\n"
+    "Instruction: Change the woman's outfit to a short skirt and black stockings, and place the two "
+    "of them standing in a sunny green park.\n"
+    "Request: на ней прозрачный топ и чёрные чулки с поясом, она на кровати в спальне, миссионерская поза\n"
+    "Instruction: Change the woman's outfit to a sheer top and black stockings with a garter belt, "
+    "and change the location to a bedroom with a bed.\n"
+    "Request: они занимаются сексом\n"
+    "Instruction: NONE"
+)
+
+
+def build_scene_edit_instruction(prompt: str) -> str:
+    """Ask Ollama for a single Qwen-Image-Edit instruction that puts the requested wardrobe +
+    location onto the start photo while preserving both faces. Returns '' when there's nothing
+    specific to change (so we skip the edit and animate the original photo)."""
+    # Deterministic (temperature 0) so the same request always yields the same instruction, and
+    # retry once — the 32B is cold-loaded per call (keep_alive:0) and occasionally emits an empty
+    # first token, which used to silently skip the whole pre-edit (stockings/location never baked in).
+    for attempt in range(2):
+        try:
+            r = requests.post(
+                f"{OLLAMA_BASE}/api/generate",
+                json={"model": OLLAMA_SCENARIO_MODEL,
+                      "prompt": OLLAMA_SCENE_EDIT_SYSTEM_PROMPT + f"\n\nRequest: {prompt}\n\nInstruction:",
+                      "stream": False, "options": {"num_gpu": 0, "temperature": 0.0}, "keep_alive": 0},
+                timeout=OLLAMA_SCENARIO_TIMEOUT,
+            )
+            r.raise_for_status()
+            text = (r.json().get("response") or "").strip().strip('"').strip()
+        except Exception:
+            log.warning("Scene edit instruction failed; skipping pre-edit", exc_info=True)
+            return ""
+        if text.upper().startswith("NONE"):
+            return ""
+        if text:
+            return text.splitlines()[0].strip()
+    return ""
+
+
 def break_story_into_beats(idea: str, photo_caption: str = "", parts: int = STORY_PARTS) -> list[str]:
     """Ask Ollama (same CPU 32B) to split one idea into `parts` connected scene-beats, one full
     12s clip each. Returns a list of exactly `parts` beat strings; on failure falls back to the
@@ -4439,6 +4491,24 @@ async def submit_image_job(app: Application, job: Job) -> None:
 # Setup/scene drivers only belong in the FIRST story chunk — later chunks start from an
 # already-nude/relocated last frame, so re-running these would re-undress or re-teleport.
 STORY_DRIVER_KEYS = {"wan_scene_change", "wan_bg_change", "wan_set_reveal"}
+# Pre-edit the start frame (Qwen) to bake wardrobe + location in before animating; on by default.
+STORY_PRE_EDIT = os.getenv("STORY_PRE_EDIT", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+# Rolling log of the last few video generations (prompt, beats, per-chunk loras/seeds, audio, paths)
+# so the bot doesn't spam the chat with scenario/lora details the user can't act on — instead they
+# land here for later analysis. The matching story working dir (vstory_*) is kept on disk too.
+GEN_LOG_PATH = TMP_DIR / "gen_history.jsonl"
+GEN_LOG_KEEP = 5
+
+
+def log_generation(entry: dict[str, Any]) -> None:
+    try:
+        entry = {"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **entry}
+        lines = GEN_LOG_PATH.read_text(encoding="utf-8").splitlines() if GEN_LOG_PATH.exists() else []
+        lines.append(json.dumps(entry, ensure_ascii=False))
+        GEN_LOG_PATH.write_text("\n".join(lines[-GEN_LOG_KEEP:]) + "\n", encoding="utf-8")
+    except Exception:
+        log.exception("log_generation failed")
 
 
 async def submit_video_story(app: Application, job: Job) -> None:
@@ -4464,21 +4534,64 @@ async def submit_video_story(app: Application, job: Job) -> None:
         driver_loras = ["wan_scene_change"]  # ensure the first chunk actually undresses her
     manual_act = [k for k in loras if k not in STORY_DRIVER_KEYS]
 
-    # Split the prompt into `parts` chronological beats so EACH 6s chunk advances the story with
-    # its own action (and, under 🧠 auto-loras, its own pose lora) — instead of the whole prompt
-    # collapsing to one looped action for every chunk. This is why 36s used to be "kiss then 30s
-    # of the same missionary": the full prompt + one act lora were reused verbatim per chunk.
-    beats = await asyncio.to_thread(break_story_into_beats, job.prompt, "", parts)
-    try:
-        board = "\n".join(f"{i+1}. {b}" for i, b in enumerate(beats))
-        await app.bot.send_message(chat_id, f"📝 Раскадровка ({parts}×{chunk_secs}с):\n{board}"[:MAX_CAPTION])
-    except Exception:
-        pass
-
-    current_image_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+    # Keep ONLY the most recent story's working dir on disk (segments + final + edited start frame)
+    # for later analysis; purge older ones instead of deleting this one in `finally`.
+    for old in TMP_DIR.glob("vstory_*"):
+        await asyncio.to_thread(shutil.rmtree, old, True)
     story_dir = TMP_DIR / f"vstory_{job.job_id}_{uuid.uuid4().hex[:8]}"
     story_dir.mkdir(parents=True, exist_ok=True)
     normalized: list[Path] = []
+    chunk_log: list[dict[str, Any]] = []
+    t_start = time.time()
+
+    # 1) Pre-edit the START frame: bake the requested wardrobe (stockings/skirt) + location
+    #    (park/beach/bedroom) into the still via Qwen-Image-Edit, keeping both faces. i2v then
+    #    PRESERVES them (it locks whatever is in the input frame), so wardrobe + location + identity
+    #    finally hold — instead of being fought from the prompt/loras mid-video, which stripped the
+    #    clothes, kept the original room, or regenerated a different girl on a location change.
+    start_path, start_name = src["path"], src["name"]
+    pre_edited = False
+    if STORY_PRE_EDIT:
+        try:
+            instr = await asyncio.to_thread(build_scene_edit_instruction, job.prompt)
+            if instr:
+                await update_chat_status(app.bot, chat_id, "🎨 Готовлю кадр (одежда/локация)…")
+                base_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+                qw, qh = IMAGE_EDIT_QUALITY.get(job.quality, IMAGE_EDIT_QUALITY["medium"])
+                ew, eh = fit_to_pixel_budget(int(src["orig_width"]), int(src["orig_height"]), qw * qh)
+                await asyncio.to_thread(free_comfy_memory)
+                edit_wf = await asyncio.to_thread(
+                    build_image_edit_workflow, image_name=base_name, prompt=instr,
+                    width=ew, height=eh, seed=make_seed(), clean=True)
+                epid = await asyncio.to_thread(queue_prompt, edit_wf, str(uuid.uuid4()))
+                eres = await wait_for_result_from_prompt(epid, preferred_node="9", timeout=VIDEO_CLEAN_EDIT_TIMEOUT)
+                eblob = await asyncio.to_thread(fetch_file, eres["filename"], eres.get("subfolder", ""), eres.get("type", "output"))
+                edited_path = story_dir / "start_edited.png"
+                await asyncio.to_thread(save_bytes, edited_path, eblob)
+                await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / edited_path.name, eblob)
+                start_path, start_name = str(edited_path), edited_path.name
+                pre_edited = True
+                await asyncio.to_thread(free_comfy_memory)
+        except Exception:
+            log.exception("Story pre-edit failed; animating the original photo")
+            start_path, start_name = src["path"], src["name"]
+
+    # With wardrobe + scene baked into the start frame, DON'T run scene_change/bg_change on chunk 0
+    # — they'd strip the stockings / fight the baked location. Pose/act loras still drive the act.
+    if pre_edited:
+        driver_loras = []
+
+    # 2) Identity anchor: caption the (edited) start frame (appearance only; strip_scene_details
+    #    drops the location) and prepend it to EVERY chunk's prompt + feed it to the beat splitter,
+    #    so she keeps the same face/hair/body across chunks instead of morphing into another woman.
+    identity = await asyncio.to_thread(caption_photo, start_path, "story_identity.png")
+    await asyncio.to_thread(free_comfy_memory)
+
+    # Split the prompt into `parts` chronological beats so EACH 6s chunk advances the story with
+    # its own action + pose lora, instead of the whole prompt collapsing to one looped action.
+    # (Not announced in chat — the user can't act on it; it goes to the gen log for analysis.)
+    beats = await asyncio.to_thread(break_story_into_beats, job.prompt, identity, parts)
+    current_image_name = await asyncio.to_thread(upload_image_to_comfy, start_path, start_name)
     try:
         for i in range(parts):
             if chat_id in STORY_CANCEL:
@@ -4487,6 +4600,8 @@ async def submit_video_story(app: Application, job: Job) -> None:
             await update_chat_status(app.bot, chat_id, f"🎬 История {i+1}/{parts}: генерирую…")
             beat_ru = beats[i]
             chunk_prompt = await asyncio.to_thread(translate_to_english, beat_ru)
+            if identity:  # keep her the same person every chunk
+                chunk_prompt = f"{identity}. {chunk_prompt}"
             # Per-beat pose lora under auto-loras (kiss → missionary → doggy → facial …); otherwise
             # keep the user's manually chosen act loras across the story.
             if job.auto_lora:
@@ -4499,17 +4614,13 @@ async def submit_video_story(app: Application, job: Job) -> None:
             else:
                 chunk_loras = beat_act
                 chunk_prompt += ", the action continues smoothly from the previous shot without a cut"
-            try:
-                lbls = ", ".join((video_lora_by_key(k) or {"label": k})["label"] for k in chunk_loras) or "—"
-                await app.bot.send_message(chat_id, f"🎬 {i+1}/{parts} · {beat_ru}\n🧠 {lbls}"[:MAX_CAPTION])
-            except Exception:
-                pass
             wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
+            seed = make_seed()
             wf = await asyncio.to_thread(
                 patch_video_workflow, wf,
                 prompt=chunk_prompt, image_name=current_image_name,
                 width=src["fit_width"], height=src["fit_height"],
-                seconds=chunk_secs, video_fps=job.video_fps, seed=make_seed(),
+                seconds=chunk_secs, video_fps=job.video_fps, seed=seed,
                 selected_loras=chunk_loras,
             )
             prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
@@ -4519,9 +4630,26 @@ async def submit_video_story(app: Application, job: Job) -> None:
             raw_ext = Path(result.get("filename", "seg.mp4")).suffix or ".mp4"
             raw_path = story_dir / f"seg_{i:02d}_raw{raw_ext}"
             await asyncio.to_thread(save_bytes, raw_path, blob)
+            # Sound: run MMAudio per 6s segment (the proven single-clip path) instead of once on the
+            # whole 36s film — a single long MMAudio pass was timing out / yielding a silent film.
+            # Each voiced segment then carries real audio through normalize + concat -c copy.
+            seg_source, seg_blob, audio_ok = raw_path, blob, False
+            if VIDEO_AUDIO:
+                try:
+                    voiced = await run_video_audio_postprocess(
+                        blob, {"mode": "video", "job_id": job.job_id, "chat_id": chat_id, "prompt": chunk_prompt}, raw_path.name)
+                    if voiced:
+                        seg_blob, _ = voiced
+                        seg_source = story_dir / f"seg_{i:02d}_voiced.mp4"
+                        await asyncio.to_thread(save_bytes, seg_source, seg_blob)
+                        audio_ok = True
+                except Exception:
+                    log.exception("Story segment %d MMAudio failed; segment stays silent", i)
             norm_path = story_dir / f"seg_{i:02d}.mp4"
-            await asyncio.to_thread(normalize_story_segment, raw_path, norm_path, src["fit_width"], src["fit_height"], job.video_fps)
+            await asyncio.to_thread(normalize_story_segment, seg_source, norm_path, src["fit_width"], src["fit_height"], job.video_fps)
             normalized.append(norm_path)
+            chunk_log.append({"i": i, "beat_ru": beat_ru, "prompt_en": chunk_prompt,
+                              "loras": chunk_loras, "seed": seed, "audio": audio_ok})
             if i < parts - 1:
                 # Chain from the RAW WAN output, not the re-encoded norm segment, so the next
                 # chunk starts from the least-degraded frame (curbs the accumulating blur/color
@@ -4532,23 +4660,25 @@ async def submit_video_story(app: Application, job: Job) -> None:
 
         await update_chat_status(app.bot, chat_id, "🎬 Склеиваю…")
         final_path = story_dir / "video_story.mp4"
+        # Segments already carry per-chunk MMAudio, so concat -c copy keeps continuous sound;
+        # no second whole-film MMAudio pass (that one timed out and produced a silent 36s film).
         await asyncio.to_thread(concat_story_segments, normalized, final_path, story_dir)
         film = await asyncio.to_thread(final_path.read_bytes)
         filename = "story.mp4"
-        if VIDEO_AUDIO:
-            try:
-                processed = await run_video_audio_postprocess(film, {"mode": "video", "job_id": job.job_id, "chat_id": chat_id}, filename)
-                if processed:
-                    film, filename = processed
-            except Exception:
-                log.exception("Story MMAudio postprocess failed; sending silent film")
         caption_txt = f"🎬 История · {parts}×{chunk_secs}с ≈ {parts * chunk_secs}с"[:MAX_CAPTION]
         await app.bot.send_video(chat_id=chat_id, video=InputFile(io.BytesIO(film), filename=filename), caption=caption_txt)
         await mirror_to_admins(app, {"chat_id": chat_id, "prompt": job.prompt, "mode": "video"}, film, filename, caption_txt)
         await finish_chat_status(app, chat_id, f"✅ История готова ({parts}×{chunk_secs}с)", show_menu=True)
+        await asyncio.to_thread(log_generation, {
+            "mode": "video_story", "chat_id": chat_id, "job_id": job.job_id,
+            "prompt": job.prompt, "seconds": job.seconds, "parts": parts,
+            "auto_lora": job.auto_lora, "audio_all": all(c["audio"] for c in chunk_log),
+            "pre_edited": pre_edited, "identity": identity,
+            "elapsed_s": round(time.time() - t_start), "final": str(final_path),
+            "chunks": chunk_log,
+        })
     finally:
         STORY_CANCEL.discard(chat_id)
-        await asyncio.to_thread(shutil.rmtree, story_dir, True)
 
 
 async def submit_video_job(app: Application, job: Job) -> None:
