@@ -2203,6 +2203,19 @@ def strip_scene_details(caption: str) -> str:
     return ". ".join(s.strip(" .") for s in kept_sentences if s.strip(" ."))
 
 
+def guess_gender(caption: str) -> str:
+    """Coarse gender read of a Florence caption so ReActor can route each source face onto the
+    matching person. Returns 'female' / 'male' / 'no' (no = ambiguous → fall back to face index)."""
+    c = f" {caption.lower()} "
+    fem = sum(c.count(w) for w in (" woman", " women", " female", " girl", " lady", " she ", " her "))
+    masc = sum(c.count(w) for w in (" man", " men", " male", " boy", " guy", " he ", " his ", " him "))
+    if fem > masc:
+        return "female"
+    if masc > fem:
+        return "male"
+    return "no"
+
+
 def build_caption_workflow(image_name: str) -> dict[str, Any]:
     return {
         "1": {"class_type": "LoadImage", "inputs": {"image": image_name}},
@@ -2588,6 +2601,8 @@ def patch_mopmix_duo_workflow(
     composite_image_name: str,
     seed: int,
     denoise: float = MOPMIX_DUO_DENOISE,
+    gender_a: str = "no",
+    gender_b: str = "no",
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
     wf["109"]["inputs"]["text"] = prompt
@@ -2601,11 +2616,21 @@ def patch_mopmix_duo_workflow(
     steps = int(wf["168"]["inputs"]["steps"])
     wf["168"]["inputs"]["start_at_step"] = max(0, min(steps - 1, round(steps * (1 - float(denoise)))))
 
+    # Route each source face to the correct target by GENDER, not by positional face index.
+    # The old fixed input_faces_index (0 for A, 1 for B) is ordered left-to-right by the detector,
+    # which flips seed-to-seed — so photo B (e.g. the man) kept landing on the woman's body. When
+    # the two people are of different genders, detect_gender pins each swap to the right person
+    # regardless of where they stand; index stays as a stable fallback when genders match/unknown.
+    genders = {"402": gender_a, "403": gender_b}
     for node_id in ("402", "403"):
         inputs = wf[node_id]["inputs"]
         inputs["swap_model"] = REACTOR_SWAP_MODEL
         inputs["facedetection"] = REACTOR_FACE_DETECTION
         inputs["face_restore_model"] = REACTOR_FACE_RESTORE_MODEL
+        g = genders[node_id] if genders[node_id] in ("female", "male") else "no"
+        if g != "no" and gender_a != gender_b:
+            inputs["detect_gender_input"] = g
+            inputs["detect_gender_source"] = g
 
     seed = int(seed)
     wf["168"]["inputs"]["noise_seed"] = seed
@@ -5122,6 +5147,10 @@ async def submit_mopmix_duo_job(app: Application, job: Job) -> None:
     if appearance_notes:
         translated_prompt = translated_prompt + ". " + ". ".join(appearance_notes)
 
+    # Infer each source's gender from its caption so ReActor can route each face onto the
+    # matching-gender person in the scene instead of a flip-prone positional index.
+    gender_a, gender_b = guess_gender(caption_a), guess_gender(caption_b)
+
     composite = await asyncio.to_thread(build_duo_composite, photo_a["path"], photo_b["path"])
     composite_path = TMP_DIR / f"tg_duo_composite_{uuid.uuid4().hex}.jpg"
     await asyncio.to_thread(composite.save, composite_path, "JPEG", quality=95)
@@ -5139,6 +5168,8 @@ async def submit_mopmix_duo_job(app: Application, job: Job) -> None:
         image_name_b=uploaded_b,
         composite_image_name=uploaded_composite,
         seed=job.seed,
+        gender_a=gender_a,
+        gender_b=gender_b,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
