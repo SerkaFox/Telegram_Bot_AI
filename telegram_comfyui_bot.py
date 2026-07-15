@@ -408,15 +408,8 @@ VIDEO_MODELS: dict[str, dict[str, Any]] = {
         "low": "wan22EnhancedNSFWSVICamera_nsfwFASTMOVEV2FP8L.safetensors",
         "loader": "fp8", "distill": False, "driver": False, "shift": 8.0,
     },
-    # Direct successor in the same SVI lineage — SVI 2 PRO 8-step, fp8 I2V. NSFW baked (no driver), but
-    # unlike FASTMOVE its lightning isn't fully self-sufficient: without the external 4-step distill it
-    # under-resolves the latent into a milky fog late in the clip (tested 2026-07-15). distill ON fixes it.
-    "svi2pro": {
-        "label": "SVI 2 PRO (8 шагов)",
-        "high": "wan22_svi2pro_i2v_fp8_high.safetensors",
-        "low": "wan22_svi2pro_i2v_fp8_low.safetensors",
-        "loader": "fp8", "distill": True, "driver": False, "shift": 8.0,
-    },
+    # (SVI 2 PRO was tested and removed 2026-07-15: milky fog + dropped the action on complex prompts,
+    # even with the 4-step distill — not worth keeping next to FASTMOVE/Remix.)
     # Wan2.2-Remix I2V GGUF v3.0 — a different NSFW merge (not SVI). Q6_K. Not a baked-lightning
     # model, so it rides the external Seko-V1 4-step distill; already NSFW so no DR34ML4Y driver.
     "remix_v3": {
@@ -432,7 +425,7 @@ VIDEO_MODELS: dict[str, dict[str, Any]] = {
         "loader": "fp8", "distill": True, "driver": True, "shift": 5.0,
     },
 }
-VIDEO_MODEL_ORDER = ["svi_fastmove", "svi2pro", "remix_v3", "stock_dr34"]
+VIDEO_MODEL_ORDER = ["svi_fastmove", "remix_v3", "stock_dr34"]
 VIDEO_MODEL_DEFAULT = os.getenv("VIDEO_MODEL_DEFAULT", "svi_fastmove")
 
 
