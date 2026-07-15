@@ -88,6 +88,36 @@ LTX_SULPHUR_QUALITY = {
     "high": (1152, 648),
 }
 
+# HunyuanVideo 1.5 I2V. Kept as a separate mode while we compare it against LTX Sulphur/Eros:
+# the graph is core ComfyUI Hunyuan 1.5 I2V, not an LTX checkpoint swap.
+# Resolutions are pixel budgets fed to fit_to_pixel_budget, not fixed buckets. The 720p_i2v model
+# is trained at ~720p; running it far below that (the old 360-480 short side) was the main fidelity
+# loss. The fp16 UNet is 16GB and streams on the 12GB card, so higher res needs the VRAM freed by
+# loading it as fp8 (HUNYUAN_WEIGHT_DTYPE). 576x1024 was validated at the 4s max: peak ~11.75GB.
+HUNYUAN_QUALITY = {
+    "low": (448, 768),
+    "medium": (512, 896),
+    "high": (576, 1024),
+}
+# fp8_e4m3fn halves the streamed 16GB fp16 UNet to ~8GB in VRAM, which is what makes the higher
+# resolutions above fit under 12GB (and speeds sampling). Frame quality is visually unchanged.
+# Set HUNYUAN_WEIGHT_DTYPE=default to fall back to full fp16 streaming (slower, lower max res).
+HUNYUAN_WEIGHT_DTYPE = os.getenv("HUNYUAN_WEIGHT_DTYPE", "fp8_e4m3fn")
+HUNYUAN_UNET = os.getenv("HUNYUAN_UNET", "hunyuanvideo1.5_720p_i2v_fp16.safetensors")
+HUNYUAN_CLIP_1 = os.getenv("HUNYUAN_CLIP_1", "qwen_2.5_vl_7b_fp8_scaled.safetensors")
+HUNYUAN_CLIP_2 = os.getenv("HUNYUAN_CLIP_2", "byt5_small_glyphxl_fp16.safetensors")
+HUNYUAN_VAE = os.getenv("HUNYUAN_VAE", "hunyuanvideo15_vae_fp16.safetensors")
+HUNYUAN_CLIP_VISION = os.getenv("HUNYUAN_CLIP_VISION", "sigclip_vision_patch14_384.safetensors")
+HUNYUAN_STEPS = int(os.getenv("HUNYUAN_STEPS", "12"))
+HUNYUAN_CFG = float(os.getenv("HUNYUAN_CFG", "6.0"))
+HUNYUAN_SHIFT = float(os.getenv("HUNYUAN_SHIFT", "7.0"))
+HUNYUAN_FPS = int(os.getenv("HUNYUAN_FPS", "16"))
+HUNYUAN_IMAGE_INTERLEAVE = int(os.getenv("HUNYUAN_IMAGE_INTERLEAVE", "2"))
+HUNYUAN_NEGATIVE = os.getenv(
+    "HUNYUAN_NEGATIVE",
+    "low quality, worst quality, blurry, distorted face, inconsistent face, deformed, text, watermark",
+)
+
 # MopMix (workflow_mopmix.json) SDXL bucket resolution per quality level.
 MOPMIX_RESOLUTIONS = {
     "low": "768x1280 (0.6)",
@@ -334,7 +364,7 @@ OLLAMA_STORY_SYSTEM_PROMPT = (
 # "story" (История V1) chains several LTX Eros clips into one film — it's a video mode that needs
 # one start photo, but it renders + delivers entirely inside submit_story_job (no ACTIVE_PROMPTS
 # entry), so it never touches the monitor loop / send_result path.
-VIDEO_MODES = {"video", "video_clean", "ltx_sulphur", "ltx_eros", "story"}
+VIDEO_MODES = {"video", "video_clean", "ltx_sulphur", "ltx_eros", "hunyuan", "story"}
 # Modes that take a single uploaded photo into st["video_source"] (video modes, plus
 # mopmix which runs img2img off of it, plus image which edits it directly).
 SINGLE_PHOTO_MODES = VIDEO_MODES | {"mopmix", "image"}
@@ -623,6 +653,9 @@ def quality_status(st: dict[str, Any]) -> str:
         return f"{quality} ({w}x{h})"
     if mode == "ltx_eros":
         w, h = LTX_EROS_QUALITY.get(quality, LTX_EROS_QUALITY["medium"])
+        return f"{quality} ({w}x{h})"
+    if mode == "hunyuan":
+        w, h = HUNYUAN_QUALITY.get(quality, HUNYUAN_QUALITY["medium"])
         return f"{quality} ({w}x{h})"
     if mode in {"mopmix", "mopmix_duo"}:
         return f"{quality} ({MOPMIX_RESOLUTIONS.get(quality, MOPMIX_RESOLUTIONS['medium'])})"
@@ -1182,6 +1215,7 @@ def blank_media() -> dict[str, Any]:
 MODE_MAX_SECONDS = {
     "ltx_sulphur": int(os.getenv("MAX_SECONDS_LTX_SULPHUR", str(MAX_SECONDS))),
     "ltx_eros": int(os.getenv("MAX_SECONDS_LTX_EROS", str(MAX_SECONDS))),
+    "hunyuan": int(os.getenv("MAX_SECONDS_HUNYUAN", "4")),
     # 🎬 Video renders >6s as a chained WAN story (native 6s chunks), so allow more seconds
     # here than the single-clip modes — each extra 6s is one more story part (36 → up to 6 parts).
     "video": int(os.getenv("MAX_SECONDS_VIDEO", "36")),
@@ -1407,6 +1441,9 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧪 LTX Sulphur", callback_data="mode:ltx_sulphur"),
             InlineKeyboardButton("🔥 LTX Eros", callback_data="mode:ltx_eros"),
         ],
+        [
+            InlineKeyboardButton("🧬 Hunyuan", callback_data="mode:hunyuan"),
+        ],
         *([[InlineKeyboardButton(f"📖 История V1 ({STORY_PARTS} сцен)", callback_data="mode:story")]] if STORY_ENABLED else []),
         [
             InlineKeyboardButton("🎨 MopMix", callback_data="mode:mopmix"),
@@ -1606,6 +1643,7 @@ def help_text(st: dict[str, Any]) -> str:
         "• ltx_sulphur: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 Sulphur)\n"
         "• ltx_eros: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 10Eros). "
         "Реплику пиши в кавычках — произнесётся один раз. 💬 Реплики ВКЛ → фразу под сцену сочинит Ollama\n"
+        "• hunyuan: 1 фото + промт + секунды, HunyuanVideo 1.5 I2V без нативного звука\n"
         "• image: 1 фото + промт-редактирование (поменять одежду/тело/фон/добавить или убрать кого-то, Qwen-Image-Edit)\n"
         "• mopmix: промт (+ фото опционально) → картинка. Без фото — txt2img с нуля; с фото — img2img\n"
         "• mopmix_duo: 2 фото (лица) + промт → сцена с обоими лицами (face swap)\n\n"
@@ -1613,11 +1651,12 @@ def help_text(st: dict[str, Any]) -> str:
         "/video — обычный photo → video\n"
         "/ltxsulphur — photo → video+audio (LTX2.3 Sulphur)\n"
         "/ltxeros — photo → video+audio (LTX2.3 10Eros)\n"
+        "/hunyuan — photo → video (HunyuanVideo 1.5 I2V)\n"
         "/image — photo → редактирование фото по промту\n"
         "/mopmix — промт → картинка (MopMix BigASP 2.5); фото опц.: есть → img2img, нет → txt2img\n"
         "/mopmixduo — 2 фото → сцена с обоими лицами (face swap)\n"
         "/prompt текст — сохранить промт\n"
-        f"/seconds 8 — video/ltx_sulphur/ltx_eros до {MAX_SECONDS} сек\n"
+        f"/seconds 8 — video/ltx_sulphur/ltx_eros/hunyuan до лимита режима\n"
         "/quality low|medium|high\n"
         "/repeat 1\n"
         "/loras — выбрать LoRA для обычного video\n"
@@ -2143,6 +2182,91 @@ def build_image_edit_workflow(
         # the NSFW LoRA loader entirely rather than leave a dangling node in the graph.
         wf.pop("76", None)
     return wf
+
+
+def build_hunyuan_i2v_workflow(
+    *,
+    prompt: str,
+    image_name: str,
+    width: int,
+    height: int,
+    seconds: int,
+    seed: int,
+) -> dict[str, Any]:
+    """Minimal HunyuanVideo 1.5 image-to-video graph using core ComfyUI nodes.
+
+    This is intentionally separate from the LTX Sulphur workflow: Hunyuan uses dual text encoders,
+    CLIP vision conditioning and HunyuanVideo15ImageToVideo, so there is no clean checkpoint swap.
+    """
+    fps = max(1, int(HUNYUAN_FPS))
+    # Hunyuan video lengths are 1 mod 4 in the examples (e.g. 121 frames for 5s @ 24fps).
+    frames = max(5, int(seconds) * fps + 1)
+    if frames % 4 != 1:
+        frames += (1 - frames) % 4
+    prompt = "\n\n".join(x for x in (prompt, VIDEO_NO_TEXT_PROMPT, VIDEO_NO_LOOP_PROMPT) if x)
+    negative = ", ".join(x for x in (HUNYUAN_NEGATIVE, VIDEO_NO_TEXT_NEGATIVE, VIDEO_NO_LOOP_NEGATIVE) if x)
+    return {
+        "10": {"class_type": "VAELoader", "inputs": {"vae_name": HUNYUAN_VAE}},
+        "11": {
+            "class_type": "DualCLIPLoader",
+            "inputs": {
+                "clip_name1": HUNYUAN_CLIP_1,
+                "clip_name2": HUNYUAN_CLIP_2,
+                "type": "hunyuan_video_15",
+                "device": "default",
+            },
+        },
+        "12": {"class_type": "UNETLoader", "inputs": {"unet_name": HUNYUAN_UNET, "weight_dtype": HUNYUAN_WEIGHT_DTYPE}},
+        "13": {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": HUNYUAN_CLIP_VISION}},
+        "14": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "15": {"class_type": "CLIPVisionEncode", "inputs": {"clip_vision": ["13", 0], "image": ["14", 0], "crop": "none"}},
+        "16": {
+            "class_type": "TextEncodeHunyuanVideo_ImageToVideo",
+            "inputs": {
+                "clip": ["11", 0],
+                "clip_vision_output": ["15", 0],
+                "prompt": prompt,
+                "image_interleave": HUNYUAN_IMAGE_INTERLEAVE,
+            },
+        },
+        "17": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["11", 0]}},
+        "18": {
+            "class_type": "HunyuanVideo15ImageToVideo",
+            "inputs": {
+                "positive": ["16", 0],
+                "negative": ["17", 0],
+                "vae": ["10", 0],
+                "width": int(width),
+                "height": int(height),
+                "length": frames,
+                "batch_size": 1,
+                "start_image": ["14", 0],
+                "clip_vision_output": ["15", 0],
+            },
+        },
+        "19": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["12", 0], "shift": HUNYUAN_SHIFT}},
+        "20": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["19", 0],
+                "positive": ["18", 0],
+                "negative": ["18", 1],
+                "latent_image": ["18", 2],
+                "seed": int(seed),
+                "steps": HUNYUAN_STEPS,
+                "cfg": HUNYUAN_CFG,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1,
+            },
+        },
+        "21": {"class_type": "VAEDecode", "inputs": {"samples": ["20", 0], "vae": ["10", 0]}},
+        "22": {"class_type": "CreateVideo", "inputs": {"images": ["21", 0], "fps": fps}},
+        "23": {
+            "class_type": "SaveVideo",
+            "inputs": {"video": ["22", 0], "filename_prefix": "video/hunyuan_i2v", "format": "auto", "codec": "h264"},
+        },
+    }
 
 
 def patch_ltx_sulphur_workflow(
@@ -2789,6 +2913,7 @@ async def pick_result_from_history(prompt_id: str, mode: str) -> dict[str, Any] 
         "video_clean": "314",
         "ltx_sulphur": "61",
         "ltx_eros": "1135:597",
+        "hunyuan": "23",
         "image": "9",
         "mopmix": "128",
         "mopmix_duo": "128",
@@ -3083,6 +3208,7 @@ MODE_DISPLAY_NAMES = {
     "image": "Edit Photo",
     "ltx_sulphur": "LTX Sulphur",
     "ltx_eros": "LTX Eros",
+    "hunyuan": "Hunyuan",
     "mopmix": "MopMix",
     "mopmix_duo": "MopMix Duo",
     "story": "История V1",
@@ -3498,6 +3624,8 @@ async def submit_worker_loop(app: Application) -> None:
                 await submit_ltx_sulphur_job(app, job)
             elif job.mode == "ltx_eros":
                 await submit_ltx_eros_job(app, job)
+            elif job.mode == "hunyuan":
+                await submit_hunyuan_job(app, job)
             elif job.mode == "story":
                 await submit_story_job(app, job)
             elif job.mode == "image":
@@ -3713,6 +3841,15 @@ async def ltx_eros_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     st["mode"] = "ltx_eros"
     st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
     await send_ui_message(update.message, context, "Режим: photo → video+audio (LTX2.3 10Eros)", reply_markup=main_keyboard(st))
+
+
+async def hunyuan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_allowed(update):
+        return
+    st = get_state(context)
+    st["mode"] = "hunyuan"
+    st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
+    await send_ui_message(update.message, context, "Режим: photo → video (HunyuanVideo 1.5 I2V)", reply_markup=main_keyboard(st))
 
 
 async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4899,6 +5036,73 @@ async def submit_ltx_sulphur_job(app: Application, job: Job) -> None:
     }
 
 
+HUNYUAN_HARDCORE_TERMS = (
+    # RU
+    "член", "хуй", "трахает", "трахают", "ебёт", "ебет", "минет", "отсос", "сосёт", "сосет",
+    "кончает", "кончил", "камшот", "сперм", "кремпай", "проникновени", "во влагалищ", "в анал",
+    "анал", "наездниц", "раком", "дрочит", "мастурбир", "оргазм", "вагин", "клитор", "пенис",
+    # EN
+    "penis", "cock", "dick", "blowjob", "cum", "cumshot", "creampie", "penetrat", "fucking",
+    "fuck her", "fuck him", "riding his", "doggy", "anal", "pussy", "vagina", "handjob", "facial",
+)
+
+
+def is_hunyuan_hardcore(text: str) -> bool:
+    """True when the prompt asks for explicit acts base HunyuanVideo 1.5 can't render (no NSFW LoRA
+    exists for the 1.5 architecture yet). Used only to nudge the user toward Eros, never to block."""
+    t = (text or "").lower()
+    return any(term in t for term in HUNYUAN_HARDCORE_TERMS)
+
+
+async def submit_hunyuan_job(app: Application, job: Job) -> None:
+    src = job.video_source
+    if not src or not src.get("path"):
+        raise RuntimeError("Для hunyuan сначала пришли фото.")
+
+    # Base HunyuanVideo 1.5 has no explicit-anatomy training and there is no NSFW LoRA for the 1.5
+    # architecture yet (Civitai's Hunyuan NSFW LoRAs are all for the original 13B model — incompatible).
+    # It's excellent at softcore/motion/faces, so steer hardcore prompts to Eros instead of mangling them.
+    if is_hunyuan_hardcore(job.prompt):
+        try:
+            await app.bot.send_message(
+                job.chat_id,
+                "⚠️ Hunyuan 1.5 хорош для софткора, движения и лиц, но не умеет явную порнографию "
+                "(для 1.5 ещё нет NSFW-лоры). Для хардкора используй 🌶 Eros (/ltx_eros) — там лоры "
+                "поз и камшотов. Сейчас сгенерирую в Hunyuan как есть.",
+            )
+        except Exception:
+            pass
+
+    preset_w, preset_h = HUNYUAN_QUALITY.get(job.quality, HUNYUAN_QUALITY["medium"])
+    width, height = fit_to_pixel_budget(src["orig_width"], src["orig_height"], preset_w * preset_h)
+    width = max(16, round(width / 16) * 16)
+    height = max(16, round(height / 16) * 16)
+
+    uploaded_name = await asyncio.to_thread(upload_image_to_comfy, src["path"], src["name"])
+    wf = await asyncio.to_thread(
+        build_hunyuan_i2v_workflow,
+        prompt=job.prompt,
+        image_name=uploaded_name,
+        width=width,
+        height=height,
+        seconds=job.seconds,
+        seed=job.seed,
+    )
+    prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+
+    ACTIVE_PROMPTS[prompt_id] = {
+        "job_id": job.job_id,
+        "chat_id": job.chat_id,
+        "mode": "hunyuan",
+        "preferred_node": "23",
+        "seconds": job.seconds,
+        "width": width,
+        "height": height,
+        "quality": job.quality,
+        "prompt": job.prompt,
+    }
+
+
 async def submit_ltx_eros_job(app: Application, job: Job) -> None:
     src = job.video_source
     if not src or not src.get("path"):
@@ -5291,6 +5495,7 @@ def main() -> None:
     app.add_handler(CommandHandler("videoclean", video_clean_cmd))
     app.add_handler(CommandHandler("ltxsulphur", ltx_sulphur_cmd))
     app.add_handler(CommandHandler("ltxeros", ltx_eros_cmd))
+    app.add_handler(CommandHandler("hunyuan", hunyuan_cmd))
     app.add_handler(CommandHandler("image", image_cmd))
     app.add_handler(CommandHandler("mopmix", mopmix_cmd))
     app.add_handler(CommandHandler("mopmixduo", mopmix_duo_cmd))
