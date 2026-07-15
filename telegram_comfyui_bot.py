@@ -408,12 +408,14 @@ VIDEO_MODELS: dict[str, dict[str, Any]] = {
         "low": "wan22EnhancedNSFWSVICamera_nsfwFASTMOVEV2FP8L.safetensors",
         "loader": "fp8", "distill": False, "driver": False, "shift": 8.0,
     },
-    # Direct successor in the same SVI lineage — SVI 2 PRO 8-step, fp8 I2V. Also baked lightning + NSFW.
+    # Direct successor in the same SVI lineage — SVI 2 PRO 8-step, fp8 I2V. NSFW baked (no driver), but
+    # unlike FASTMOVE its lightning isn't fully self-sufficient: without the external 4-step distill it
+    # under-resolves the latent into a milky fog late in the clip (tested 2026-07-15). distill ON fixes it.
     "svi2pro": {
         "label": "SVI 2 PRO (8 шагов)",
         "high": "wan22_svi2pro_i2v_fp8_high.safetensors",
         "low": "wan22_svi2pro_i2v_fp8_low.safetensors",
-        "loader": "fp8", "distill": False, "driver": False, "shift": 8.0,
+        "loader": "fp8", "distill": True, "driver": False, "shift": 8.0,
     },
     # Wan2.2-Remix I2V GGUF v3.0 — a different NSFW merge (not SVI). Q6_K. Not a baked-lightning
     # model, so it rides the external Seko-V1 4-step distill; already NSFW so no DR34ML4Y driver.
