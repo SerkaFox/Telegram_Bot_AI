@@ -73,10 +73,17 @@ git clone https://github.com/lrzjason/Comfyui-QwenEditUtils qweneditutils
 ## Восстановление: модели по режимам
 
 ### `video` (WAN 2.2 I2V)
-- `wan22EnhancedNSFWSVICamera_nsfwFASTMOVEV2Q4KMH.gguf` / `...Q4KML.gguf` — UNET (high/low noise), CivitAI, точная ссылка не сохранена — искать по имени файла.
 - `nsfw_wan_umt5-xxl_fp8_scaled.safetensors` — текстовый энкодер (CLIP), источник не сохранён.
 - `wan_2.1_vae.safetensors` — VAE, источник не сохранён.
 - Опциональные LoRA (кнопка LoRA в боте, `VIDEO_LORA_OPTIONS` в коде) — список из ~15 NSFW LoRA для WAN 2.2, все предустановлены до этой сессии, точные ссылки не сохранены. Имена файлов — в `telegram_comfyui_bot.py`, искать по имени на CivitAI.
+
+#### 🎛 Выбор базовой модели (`VIDEO_MODELS`, кнопка «🎛 Модель» в video-режиме)
+Базовую NSFW-модель можно переключать прямо из бота, чтобы сравнить, какая лучше держит лицо и переходы. Выбор сохраняется per-user. Каждая запись в `VIDEO_MODELS` описывает: `loader` (fp8 UNETLoader / gguf UnetLoaderGGUF), `distill` (вешать ли внешний Seko-V1 4-step дистилл — **выкл** для моделей с уже вшитым lightning), `driver` (вешать ли DR34ML4Y — **выкл** для уже-NSFW моделей) и `shift` (sigma_shift: ~8 для baked-lightning, ~5 для чистой базы на внешнем дистилле).
+- **`svi_fastmove`** (дефолт, «твоя»): `wan22EnhancedNSFWSVICamera_nsfwFASTMOVEV2FP8H/L.safetensors` — SVI Enhanced NSFW «FAST MOVE V2» Lightning fp8 (CivitAI **https://civitai.com/models/2053259**). Вшитый lightning + NSFW → без дистилла/драйвера, shift 8. Именно эта модель держала лицо и кадр-в-кадр до перехода на сток. Лежат в `models/diffusion_models/`.
+- **`svi2pro`**: `wan22_svi2pro_i2v_fp8_high/low.safetensors` — SVI 2 PRO 8-step I2V fp8 (CivitAI **https://civitai.com/models/2086218**, версии `SVI2PRO_I2V_FP8_High/LowNoise`, id 2792222 / 2792281). Прямой наследник линейки SVI. `models/diffusion_models/`.
+- **`remix_v3`**: `wan22_remix_i2v_v3_highQ6K/lowQ6K.gguf` — Wan2.2-Remix I2V GGUF v3.0 Q6_K (CivitAI **https://civitai.com/models/2472759**, id 2780951 / 2780751). Не SVI, не baked-lightning → едет на внешнем Seko-V1 дистилле, shift 5. `models/unet/`.
+- **`stock_dr34`**: сток `wan2.2_i2v_high/low_noise_14B_fp8_scaled` + дистилл + драйвер `DR34ML4Y_I2V_14B_HIGH/LOW_V2` — прежний эксперимент, оставлен как выбираемый вариант.
+- ⚠️ Ни одна из WAN-моделей **не озвучивает речь нативно** — video даёт немой кадр, звук добавляет MMAudio (эмбиент/фоли, не губосинхрон-речь). Нативная речь без TTS — это режим LTX Eros.
 
 ### `video_clean` (Clean Video — цензурный WAN 2.2)
 Использует **тот же** `workflow_video.json`, но `patch_video_workflow(..., clean=True)` (функция `apply_clean_video_base`) на лету подменяет ноды 371/372 со стоковых экспертов и форсит чистый дистилл. Меняй модели через env-переменные `VIDEO_CLEAN_*` в юните, не правя воркфлоу.

@@ -388,6 +388,56 @@ VIDEO_NSFW_LORA_HIGH = os.getenv("VIDEO_NSFW_LORA_HIGH", "DR34ML4Y_I2V_14B_HIGH_
 VIDEO_NSFW_LORA_LOW = os.getenv("VIDEO_NSFW_LORA_LOW", "DR34ML4Y_I2V_14B_LOW_V2.safetensors")
 VIDEO_NSFW_LORA_STRENGTH = float(os.getenv("VIDEO_NSFW_LORA_STRENGTH", "1.0"))
 VIDEO_SIGMA_SHIFT = float(os.getenv("VIDEO_SIGMA_SHIFT", "5.0"))
+
+# Selectable NSFW 🎬 Video base models (🎛 Модель button, per-user, persisted). Lets the user
+# compare which WAN 2.2 I2V base holds face/motion best. Each entry says how to build the base:
+#   loader  — "fp8" (UNETLoader .safetensors) or "gguf" (UnetLoaderGGUF)
+#   distill — apply the external Seko-V1 4-step lightning lora? OFF for models that already bake a
+#             lightning distill (adding a second one double-distills → jitter/soft faces).
+#   driver  — apply the DR34ML4Y NSFW motion lora? OFF for models that are already NSFW fine-tunes
+#             (only needed to push the CLEAN stock WAN base into porn motion).
+#   shift   — sigma_shift for the WanMoeKSampler (baked-lightning fine-tunes want ~8; a clean base
+#             driven by an external distill wants ~5).
+VIDEO_MODELS: dict[str, dict[str, Any]] = {
+    # The user's own model — SVI "Enhanced NSFW" FAST MOVE V2, Lightning Edition, fp8. This is the
+    # one that "held face + frame-to-frame" before the stock-base rework replaced it. Baked lightning
+    # + baked NSFW → no external distill, no driver, shift 8.
+    "svi_fastmove": {
+        "label": "SVI FASTMOVE V2 (твоя)",
+        "high": "wan22EnhancedNSFWSVICamera_nsfwFASTMOVEV2FP8H.safetensors",
+        "low": "wan22EnhancedNSFWSVICamera_nsfwFASTMOVEV2FP8L.safetensors",
+        "loader": "fp8", "distill": False, "driver": False, "shift": 8.0,
+    },
+    # Direct successor in the same SVI lineage — SVI 2 PRO 8-step, fp8 I2V. Also baked lightning + NSFW.
+    "svi2pro": {
+        "label": "SVI 2 PRO (8 шагов)",
+        "high": "wan22_svi2pro_i2v_fp8_high.safetensors",
+        "low": "wan22_svi2pro_i2v_fp8_low.safetensors",
+        "loader": "fp8", "distill": False, "driver": False, "shift": 8.0,
+    },
+    # Wan2.2-Remix I2V GGUF v3.0 — a different NSFW merge (not SVI). Q6_K. Not a baked-lightning
+    # model, so it rides the external Seko-V1 4-step distill; already NSFW so no DR34ML4Y driver.
+    "remix_v3": {
+        "label": "Wan2.2 Remix v3 (Q6)",
+        "high": "wan22_remix_i2v_v3_highQ6K.gguf",
+        "low": "wan22_remix_i2v_v3_lowQ6K.gguf",
+        "loader": "gguf", "distill": True, "driver": False, "shift": 5.0,
+    },
+    # The stock-fp8 + DR34ML4Y experiment (former default). Kept selectable so nothing is lost.
+    "stock_dr34": {
+        "label": "Сток fp8 + DR34ML4Y",
+        "high": VIDEO_UNET_HIGH, "low": VIDEO_UNET_LOW,
+        "loader": "fp8", "distill": True, "driver": True, "shift": 5.0,
+    },
+}
+VIDEO_MODEL_ORDER = ["svi_fastmove", "svi2pro", "remix_v3", "stock_dr34"]
+VIDEO_MODEL_DEFAULT = os.getenv("VIDEO_MODEL_DEFAULT", "svi_fastmove")
+
+
+def video_model_cfg(key: str | None) -> dict[str, Any]:
+    return VIDEO_MODELS.get(key or VIDEO_MODEL_DEFAULT, VIDEO_MODELS[VIDEO_MODEL_DEFAULT])
+
+
 # WAN 2.2 I2V is natively trained for ~5-6s (~81-97 frames @16fps). Asking it for MORE frames makes
 # it loop/boomerang (replay the arc or repeat). So we cap the GENERATED length here and, when the
 # user asks for longer, RIFE-interpolate the native clip up to the requested duration (smooth
@@ -588,6 +638,8 @@ class Job:
     auto_lora: bool = False
     # Furry base checkpoint choice: "pony" (photoreal, default) or "yiffy" (Yiffymix)
     furry_base: str = "pony"
+    # Selectable NSFW 🎬 Video base model (key into VIDEO_MODELS); "" → VIDEO_MODEL_DEFAULT
+    video_model: str = ""
 
 
 # ============================================================
@@ -1213,6 +1265,7 @@ def initial_state() -> dict[str, Any]:
         "dub_voice_name": DEFAULT_VOICE_NAME,
         "furry": False,
         "furry_base": "pony",
+        "video_model": VIDEO_MODEL_DEFAULT,
         "auto_dialogue": False,
         "auto_lora": False,
     }
@@ -1234,6 +1287,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["furry"] = False
     if "furry_base" not in st:
         st["furry_base"] = "pony"
+    if "video_model" not in st or st.get("video_model") not in VIDEO_MODELS:
+        st["video_model"] = VIDEO_MODEL_DEFAULT
     if "auto_dialogue" not in st:
         st["auto_dialogue"] = False
     if "auto_lora" not in st:
@@ -1448,6 +1503,11 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
         base = (st.get("furry_base") if st else "pony") or "pony"
         base_label = f"🧬 База: {'AutismMix (арт)' if base == 'yiffy' else 'Pony (фото)'}"
         rows.append([InlineKeyboardButton(base_label, callback_data="do:furrybase")])
+    # NSFW video base model picker — only relevant in the 🎬 Video mode.
+    if st and st.get("mode") == "video":
+        vm = st.get("video_model") or VIDEO_MODEL_DEFAULT
+        vm_label = video_model_cfg(vm)["label"]
+        rows.append([InlineKeyboardButton(f"🎛 Модель: {vm_label}", callback_data="do:videomodel")])
     if dub_voice_on:
         voice_name = st.get("dub_voice_name", DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME
         rows.append([InlineKeyboardButton(f"🎙 Голос: {voice_name}", callback_data="voice:list")])
@@ -1937,6 +1997,7 @@ def patch_video_workflow(
     continuity_prompt: str = "",
     continuity_negative: str = "",
     clean: bool = False,
+    video_model: str | None = None,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
     prompt_parts = [prompt]
@@ -1995,7 +2056,7 @@ def patch_video_workflow(
     if clean:
         apply_clean_video_base(wf)
     else:
-        apply_nsfw_video_base(wf)
+        apply_nsfw_video_base(wf, video_model)
         apply_video_loras(wf, selected_loras or [])
     return wf
 
@@ -2008,19 +2069,30 @@ def _clean_unet_loader(unet_name: str) -> dict[str, Any]:
     return {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": VIDEO_CLEAN_UNET_DTYPE}}
 
 
-def apply_nsfw_video_base(wf: dict[str, Any]) -> None:
-    """Rebuild the NSFW 🎬 Video base around the fp8-scaled stock WAN 2.2 I2V experts (replacing the
-    lossy Q4 FASTMOVE merge): 371/372 fp8 UNETs → ModelPatchTorchSettings → SageAttention → Lightx2v
-    4-step distill, feeding the WanMoeKSampler (141) at sigma_shift 5. User-selected 🎚 loras are then
-    chained off THIS base by apply_video_loras (which reads 141's current model inputs). Big quality
-    win for face/anatomy fidelity; matches the user's validated missionary_b recipe minus its bespoke
-    2×KSamplerAdvanced (our WanMoeKSampler does the same high/low expert split)."""
-    wf["371"] = {"class_type": "UNETLoader", "inputs": {"unet_name": VIDEO_UNET_HIGH, "weight_dtype": VIDEO_UNET_DTYPE}}
-    wf["372"] = {"class_type": "UNETLoader", "inputs": {"unet_name": VIDEO_UNET_LOW, "weight_dtype": VIDEO_UNET_DTYPE}}
+def _nsfw_unet_loader(name: str) -> dict[str, Any]:
+    """GGUF quants need UnetLoaderGGUF; fp8 .safetensors need UNETLoader. Both expose MODEL at out 0."""
+    if name.lower().endswith(".gguf"):
+        return {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": name}}
+    return {"class_type": "UNETLoader", "inputs": {"unet_name": name, "weight_dtype": VIDEO_UNET_DTYPE}}
+
+
+def apply_nsfw_video_base(wf: dict[str, Any], model_key: str | None = None) -> None:
+    """Build the NSFW 🎬 Video base for the user-selected model (🎛 Модель / VIDEO_MODELS).
+
+    Chain per expert (high 371 / low 372): UNET → ModelPatchTorchSettings → SageAttention →
+    [Seko-V1 4-step distill, only if the model isn't already baked-lightning] →
+    [DR34ML4Y NSFW driver, only if the model is a CLEAN base], feeding the WanMoeKSampler (141).
+    User-selected 🎚 loras chain off THIS base afterwards (apply_video_loras reads 141's inputs).
+
+    The default is the user's own SVI FASTMOVE V2 fp8 — a baked lightning+NSFW fine-tune, so distill
+    and driver are BOTH off (double-distilling / driving an already-NSFW model was what smeared faces
+    and broke frame-to-frame motion in the stock-base rework)."""
+    cfg = video_model_cfg(model_key)
+    wf["371"] = _nsfw_unet_loader(cfg["high"])
+    wf["372"] = _nsfw_unet_loader(cfg["low"])
     for expert, base in (("high", "371"), ("low", "372")):
         torch_id = f"tg_torch_{expert}"
         sage_id = f"tg_sage_{expert}"
-        distill_id = f"tg_nsfw_distill_{expert}"
         wf[torch_id] = {
             "class_type": "ModelPatchTorchSettings",
             "inputs": {"model": [base, 0], "enable_fp16_accumulation": bool(VIDEO_FP16_ACCUM)},
@@ -2029,29 +2101,33 @@ def apply_nsfw_video_base(wf: dict[str, Any]) -> None:
             "class_type": "PathchSageAttentionKJ",
             "inputs": {"model": [torch_id, 0], "sage_attention": VIDEO_SAGE_MODE},
         }
-        wf[distill_id] = {
-            "class_type": "LoraLoaderModelOnly",
-            "inputs": {
-                "model": [sage_id, 0],
-                "lora_name": VIDEO_DISTILL_HIGH if expert == "high" else VIDEO_DISTILL_LOW,
-                "strength_model": VIDEO_DISTILL_STRENGTH,
-            },
-        }
-        tail = [distill_id, 0]
-        # Always-on NSFW driver (DR34ML4Y): restores the porn motion the clean fp8 base lacks.
-        if VIDEO_NSFW_LORA_STRENGTH > 0:
+        tail = [sage_id, 0]
+        # External 4-step lightning distill — only for bases that don't already bake one in.
+        if cfg.get("distill"):
+            distill_id = f"tg_nsfw_distill_{expert}"
+            wf[distill_id] = {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "model": tail,
+                    "lora_name": VIDEO_DISTILL_HIGH if expert == "high" else VIDEO_DISTILL_LOW,
+                    "strength_model": VIDEO_DISTILL_STRENGTH,
+                },
+            }
+            tail = [distill_id, 0]
+        # DR34ML4Y NSFW driver — only to push a CLEAN base into porn motion.
+        if cfg.get("driver") and VIDEO_NSFW_LORA_STRENGTH > 0:
             drive_id = f"tg_nsfw_drive_{expert}"
             wf[drive_id] = {
                 "class_type": "LoraLoaderModelOnly",
                 "inputs": {
-                    "model": [distill_id, 0],
+                    "model": tail,
                     "lora_name": VIDEO_NSFW_LORA_HIGH if expert == "high" else VIDEO_NSFW_LORA_LOW,
                     "strength_model": VIDEO_NSFW_LORA_STRENGTH,
                 },
             }
             tail = [drive_id, 0]
         wf["141"]["inputs"][f"model_{expert}_noise"] = tail
-    wf["141"]["inputs"]["sigma_shift"] = VIDEO_SIGMA_SHIFT
+    wf["141"]["inputs"]["sigma_shift"] = float(cfg.get("shift", VIDEO_SIGMA_SHIFT))
 
 
 def apply_clean_video_base(wf: dict[str, Any]) -> None:
@@ -4332,6 +4408,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data == "do:videomodel":
+        cur = st.get("video_model") or VIDEO_MODEL_DEFAULT
+        if cur not in VIDEO_MODEL_ORDER:
+            cur = VIDEO_MODEL_DEFAULT
+        nxt = VIDEO_MODEL_ORDER[(VIDEO_MODEL_ORDER.index(cur) + 1) % len(VIDEO_MODEL_ORDER)]
+        st["video_model"] = nxt
+        cfg = video_model_cfg(nxt)
+        extras = []
+        if cfg.get("distill"):
+            extras.append("+ 4-step дистилл")
+        if cfg.get("driver"):
+            extras.append("+ DR34ML4Y-драйвер")
+        extra_txt = (" " + ", ".join(extras)) if extras else " (baked lightning+NSFW, без наворотов)"
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"🎛 Модель video: {cfg['label']}.\n"
+            f"Загрузчик {cfg['loader']}, sigma_shift {cfg['shift']:g}{extra_txt}.\n"
+            f"Жми ещё раз, чтобы перебрать модели и сравнить, какая лучше держит лицо и переходы.",
+            reply_markup=main_keyboard(st),
+        )
+        return
+
     if data == "do:autodialogue":
         st["auto_dialogue"] = not st.get("auto_dialogue")
         state_text = "включены" if st["auto_dialogue"] else "выключены"
@@ -4480,6 +4579,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             furry_base=st.get("furry_base") or "pony",
             auto_dialogue=bool(st.get("auto_dialogue")),
             auto_lora=bool(st.get("auto_lora")),
+            video_model=st.get("video_model") or VIDEO_MODEL_DEFAULT,
         )
         await GEN_QUEUE.put(job)
 
@@ -4647,6 +4747,7 @@ async def submit_video_story(app: Application, job: Job) -> None:
                 width=src["fit_width"], height=src["fit_height"],
                 seconds=chunk_secs, video_fps=job.video_fps, seed=seed,
                 selected_loras=chunk_loras,
+                video_model=job.video_model,
             )
             prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
             result = await wait_for_result_from_prompt(prompt_id, preferred_node="314", timeout=STORY_SEGMENT_TIMEOUT)
@@ -4751,6 +4852,7 @@ async def submit_video_job(app: Application, job: Job) -> None:
         video_fps=job.video_fps,
         seed=job.seed,
         selected_loras=job.video_loras,
+        video_model=job.video_model,
     )
 
     prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
