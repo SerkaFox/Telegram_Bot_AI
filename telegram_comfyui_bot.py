@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -438,6 +438,10 @@ def video_model_cfg(key: str | None) -> dict[str, Any]:
 # user asks for longer, RIFE-interpolate the native clip up to the requested duration (smooth
 # slow-motion, one continuous arc, no boomerang). Clean video mode is left untouched.
 VIDEO_NATIVE_MAX_SECONDS = int(os.getenv("VIDEO_NATIVE_MAX_SECONDS", "6"))
+# 📖 Story (video >6s): length of EACH chained chunk. The user drives the story by typing one prompt
+# per part, so we don't Ollama-split; each part is this many seconds. Selectable 6/8/10 via 🎬 button.
+VIDEO_STORY_CHUNK_SECS = int(os.getenv("VIDEO_STORY_CHUNK_SECS", "8"))
+VIDEO_STORY_CHUNK_CHOICES = [6, 8, 10]
 VIDEO_RIFE_CKPT = os.getenv("VIDEO_RIFE_CKPT", "rife49.pth")
 # SageAttention mode (KJNodes PathchSageAttentionKJ): "auto" picks the best kernel for the GPU.
 VIDEO_SAGE_MODE = os.getenv("VIDEO_SAGE_MODE", "auto")
@@ -635,6 +639,10 @@ class Job:
     furry_base: str = "pony"
     # Selectable NSFW 🎬 Video base model (key into VIDEO_MODELS); "" → VIDEO_MODEL_DEFAULT
     video_model: str = ""
+    # 📖 Story: user-written prompt per part (skips Ollama beat-split + Qwen pre-edit when set)
+    story_prompts: list[str] = field(default_factory=list)
+    # 📖 Story: seconds per chained chunk (0 → VIDEO_NATIVE_MAX_SECONDS)
+    story_chunk_secs: int = 0
 
 
 # ============================================================
@@ -1261,6 +1269,7 @@ def initial_state() -> dict[str, Any]:
         "furry": False,
         "furry_base": "pony",
         "video_model": VIDEO_MODEL_DEFAULT,
+        "story_chunk": VIDEO_STORY_CHUNK_SECS,
         "auto_dialogue": False,
         "auto_lora": False,
     }
@@ -1284,6 +1293,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["furry_base"] = "pony"
     if "video_model" not in st or st.get("video_model") not in VIDEO_MODELS:
         st["video_model"] = VIDEO_MODEL_DEFAULT
+    if int(st.get("story_chunk") or 0) not in VIDEO_STORY_CHUNK_CHOICES:
+        st["story_chunk"] = VIDEO_STORY_CHUNK_SECS
     if "auto_dialogue" not in st:
         st["auto_dialogue"] = False
     if "auto_lora" not in st:
@@ -1498,11 +1509,13 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
         base = (st.get("furry_base") if st else "pony") or "pony"
         base_label = f"🧬 База: {'AutismMix (арт)' if base == 'yiffy' else 'Pony (фото)'}"
         rows.append([InlineKeyboardButton(base_label, callback_data="do:furrybase")])
-    # NSFW video base model picker — only relevant in the 🎬 Video mode.
+    # NSFW video base model picker + story chunk length — only relevant in the 🎬 Video mode.
     if st and st.get("mode") == "video":
         vm = st.get("video_model") or VIDEO_MODEL_DEFAULT
         vm_label = video_model_cfg(vm)["label"]
+        chunk = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
         rows.append([InlineKeyboardButton(f"🎛 Модель: {vm_label}", callback_data="do:videomodel")])
+        rows.append([InlineKeyboardButton(f"📖 Кусок истории: {chunk}с", callback_data="do:storychunk")])
     if dub_voice_on:
         voice_name = st.get("dub_voice_name", DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME
         rows.append([InlineKeyboardButton(f"🎙 Голос: {voice_name}", callback_data="voice:list")])
@@ -4017,6 +4030,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     st = get_state(context)
+
+    # 📖 Story collection: each message is the prompt for the next part.
+    sc = st.get("story_collect")
+    if sc:
+        if text.lower() in {"отмена", "cancel", "стоп"}:
+            st.pop("story_collect", None)
+            await send_ui_message(update.message, context, "📖 История отменена.", reply_markup=main_keyboard(st))
+            return
+        sc["collected"].append(text)
+        n = len(sc["collected"])
+        if n < sc["parts"]:
+            await send_ui_message(
+                update.message, context,
+                f"✅ Часть {n}/{sc['parts']} принята.\nПришли промт для ЧАСТИ {n+1}/{sc['parts']}.",
+                reply_markup=None,
+            )
+            return
+        prompts = list(sc["collected"]); chunk = int(sc["chunk"])
+        st.pop("story_collect", None)
+        st["prompt"] = prompts[0]
+        await enqueue_story_job(update, context, prompts, chunk)
+        return
+
     st["prompt"] = text
 
     await send_ui_message(update.message, context, "Текст принят как промт.", reply_markup=main_keyboard(st))
@@ -4097,6 +4133,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data.startswith("mode:"):
         st["mode"] = data.split(":", 1)[1]
+        st.pop("story_collect", None)  # abandon any half-collected story on a mode switch
         st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
         await replace_ui_message_from_callback(query, context, f"Режим: {st['mode']}", reply_markup=main_keyboard(st))
         return
@@ -4426,6 +4463,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data == "do:storychunk":
+        cur = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
+        nxt = VIDEO_STORY_CHUNK_CHOICES[(VIDEO_STORY_CHUNK_CHOICES.index(cur) + 1) % len(VIDEO_STORY_CHUNK_CHOICES)] if cur in VIDEO_STORY_CHUNK_CHOICES else VIDEO_STORY_CHUNK_SECS
+        st["story_chunk"] = nxt
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"📖 Длина куска истории: {nxt}с.\n"
+            f"Когда поставишь секунды >6 и нажмёшь Generate, бот попросит промт на каждую часть "
+            f"(по {nxt}с). Число частей = секунды ÷ {nxt}с. Больше {VIDEO_NATIVE_MAX_SECONDS}с на кусок "
+            f"WAN может слегка зацикливать — если увидишь повтор, вернись на 6с.",
+            reply_markup=main_keyboard(st),
+        )
+        return
+
     if data == "do:autodialogue":
         st["auto_dialogue"] = not st.get("auto_dialogue")
         state_text = "включены" if st["auto_dialogue"] else "выключены"
@@ -4509,6 +4561,23 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_ui_message(target, context, "📖 История временно отключена — переключил на 🔥 LTX Eros.", reply_markup=main_keyboard(st))
         return
 
+    # 📖 Story: video >6s → collect ONE prompt per part from the user (no Ollama split, no Qwen
+    # redraw — chunk 1 animates the real photo). Number of parts = seconds ÷ chunk length.
+    if st.get("mode") == "video" and int(st.get("seconds") or 0) > VIDEO_NATIVE_MAX_SECONDS and not st.get("story_collect"):
+        if not (st.get("video_source") or {}).get("path"):
+            await send_ui_message(target, context, "Для истории (>6с) сначала пришли фото.", reply_markup=main_keyboard(st))
+            return
+        chunk = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
+        parts = max(2, round(int(st["seconds"]) / chunk))
+        st["story_collect"] = {"parts": parts, "chunk": chunk, "collected": []}
+        await send_ui_message(
+            target, context,
+            f"📖 История: {parts} части по {chunk}с (старт от твоего фото, без перерисовки).\n\n"
+            f"Пришли промт для ЧАСТИ 1/{parts}. Напиши «отмена», чтобы прекратить.",
+            reply_markup=None,
+        )
+        return
+
     if not st.get("prompt"):
         await send_ui_message(target, context, "Сначала задай промт.", reply_markup=main_keyboard(st))
         return
@@ -4579,6 +4648,45 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await GEN_QUEUE.put(job)
 
 
+async def enqueue_story_job(update: Update, context: ContextTypes.DEFAULT_TYPE, prompts: list[str], chunk: int) -> None:
+    """📖 Story with user-written per-part prompts. One video job, mode 'video', seconds set so it
+    routes to submit_video_story; carries story_prompts (no Ollama split) + story_chunk_secs."""
+    global JOB_SEQ
+    st = get_state(context)
+    target = update.message if update.message else update.callback_query.message
+    JOB_SEQ += 1
+    total = len(prompts) * chunk
+    await cleanup_chat_status(context.bot, target.chat_id)
+    await update_chat_status(context.bot, target.chat_id,
+                             f"🕐 История в очереди: {len(prompts)} части × {chunk}с (~{total}с). ID: #{JOB_SEQ}.")
+    job = Job(
+        job_id=JOB_SEQ,
+        chat_id=target.chat_id,
+        mode="video",
+        prompt=prompts[0],
+        seconds=total,
+        max_side=int(st["max_side"]),
+        video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
+        seed=make_seed(),
+        video_source=copy.deepcopy(st["video_source"]),
+        duo_photos=copy.deepcopy(st["duo_photos"]),
+        video_loras=list(st.get("video_loras") or []),
+        quality=(st.get("quality") or "medium").strip().lower(),
+        batch_index=1,
+        batch_total=1,
+        dub_voice=bool(st.get("dub_voice")),
+        dub_voice_name=st.get("dub_voice_name") or DEFAULT_VOICE_NAME,
+        furry=bool(st.get("furry")),
+        furry_base=st.get("furry_base") or "pony",
+        auto_dialogue=bool(st.get("auto_dialogue")),
+        auto_lora=bool(st.get("auto_lora")),
+        video_model=st.get("video_model") or VIDEO_MODEL_DEFAULT,
+        story_prompts=prompts,
+        story_chunk_secs=chunk,
+    )
+    await GEN_QUEUE.put(job)
+
+
 async def submit_image_job(app: Application, job: Job) -> None:
     src = job.video_source
     if not src or not src.get("path"):
@@ -4642,8 +4750,10 @@ async def submit_video_story(app: Application, job: Job) -> None:
         raise RuntimeError("Для video сначала пришли фото.")
     chat_id = job.chat_id
     STORY_CANCEL.discard(chat_id)
-    chunk_secs = VIDEO_NATIVE_MAX_SECONDS
-    parts = max(2, round(job.seconds / chunk_secs))
+    # User-driven story: one prompt per part, each `story_chunk_secs` long, no Ollama split.
+    user_prompts = list(job.story_prompts or [])
+    chunk_secs = int(job.story_chunk_secs) if job.story_chunk_secs else VIDEO_NATIVE_MAX_SECONDS
+    parts = len(user_prompts) if user_prompts else max(2, round(job.seconds / chunk_secs))
 
     loras = list(job.video_loras)
     if job.auto_lora and not loras:
@@ -4671,7 +4781,8 @@ async def submit_video_story(app: Application, job: Job) -> None:
     #    clothes, kept the original room, or regenerated a different girl on a location change.
     start_path, start_name = src["path"], src["name"]
     pre_edited = False
-    if STORY_PRE_EDIT:
+    # When the user wrote the per-part prompts, chunk 1 must animate the REAL photo — no Qwen redraw.
+    if STORY_PRE_EDIT and not user_prompts:
         try:
             instr = await asyncio.to_thread(build_scene_edit_instruction, job.prompt)
             if instr:
@@ -4710,7 +4821,10 @@ async def submit_video_story(app: Application, job: Job) -> None:
     # Split the prompt into `parts` chronological beats so EACH 6s chunk advances the story with
     # its own action + pose lora, instead of the whole prompt collapsing to one looped action.
     # (Not announced in chat — the user can't act on it; it goes to the gen log for analysis.)
-    beats = await asyncio.to_thread(break_story_into_beats, job.prompt, identity, parts)
+    if user_prompts:
+        beats = user_prompts  # user wrote each part; keep exactly, no Ollama split
+    else:
+        beats = await asyncio.to_thread(break_story_into_beats, job.prompt, identity, parts)
     current_image_name = await asyncio.to_thread(upload_image_to_comfy, start_path, start_name)
     try:
         for i in range(parts):
