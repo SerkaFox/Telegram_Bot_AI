@@ -4033,29 +4033,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     st = get_state(context)
 
-    # 📖 Story collection: each message is the prompt for the next part.
-    sc = st.get("story_collect")
-    if sc:
-        if text.lower() in {"отмена", "cancel", "стоп"}:
-            st.pop("story_collect", None)
-            await send_ui_message(update.message, context, "📖 История отменена.", reply_markup=main_keyboard(st))
-            return
-        sc["collected"].append(text)
-        n = len(sc["collected"])
-        if n < sc["parts"]:
-            await send_ui_message(
-                update.message, context,
-                f"✅ Часть {n}/{sc['parts']} принята.\nПришли промт для ЧАСТИ {n+1}/{sc['parts']}.",
-                reply_markup=None,
-            )
-            return
-        prompts = list(sc["collected"]); chunk = int(sc["chunk"])
-        st.pop("story_collect", None)
-        st["prompt"] = prompts[0]
-        await enqueue_story_job(update, context, prompts, chunk)
-        return
-
     st["prompt"] = text
+
+    # 📖 Story hint: if a >6s video prompt was split into '#' blocks, preview the part count so
+    # the user knows it'll render as a chained story (parts = number of '#'-separated blocks).
+    if st.get("mode") == "video" and int(st.get("seconds") or 0) > VIDEO_NATIVE_MAX_SECONDS and "#" in text:
+        parts = [p.strip() for p in text.split("#") if p.strip()]
+        chunk = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
+        await send_ui_message(
+            update.message, context,
+            f"📖 Принято: история из {len(parts)} частей по ~{chunk}с (≈{len(parts) * chunk}с). "
+            f"Жми ▶️ Генерировать.",
+            reply_markup=main_keyboard(st),
+        )
+        return
 
     await send_ui_message(update.message, context, "Текст принят как промт.", reply_markup=main_keyboard(st))
 
@@ -4135,7 +4126,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data.startswith("mode:"):
         st["mode"] = data.split(":", 1)[1]
-        st.pop("story_collect", None)  # abandon any half-collected story on a mode switch
         st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
         await replace_ui_message_from_callback(query, context, f"Режим: {st['mode']}", reply_markup=main_keyboard(st))
         return
@@ -4563,21 +4553,35 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_ui_message(target, context, "📖 История временно отключена — переключил на 🔥 LTX Eros.", reply_markup=main_keyboard(st))
         return
 
-    # 📖 Story: video >6s → collect ONE prompt per part from the user (no Ollama split, no Qwen
-    # redraw — chunk 1 animates the real photo). Number of parts = seconds ÷ chunk length.
-    if st.get("mode") == "video" and int(st.get("seconds") or 0) > VIDEO_NATIVE_MAX_SECONDS and not st.get("story_collect"):
+    # 📖 Story: video >6s is a chained multi-part film. Split ONE prompt into parts by '#'
+    # (one block per part). Chunk 1 animates the REAL photo (no redraw); each next part chains
+    # off the previous last frame. No Ollama split, no per-part Q&A. Number of parts = # of blocks.
+    if st.get("mode") == "video" and int(st.get("seconds") or 0) > VIDEO_NATIVE_MAX_SECONDS:
+        prompt = (st.get("prompt") or "").strip()
+        chunk = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
+        if not prompt:
+            await send_ui_message(
+                target, context,
+                "Сначала задай промт. Для истории (>6с) раздели части значком «#», "
+                "например: «она сосёт член#он кончает ей на лицо#она улыбается в камеру».",
+                reply_markup=main_keyboard(st),
+            )
+            return
         if not (st.get("video_source") or {}).get("path"):
             await send_ui_message(target, context, "Для истории (>6с) сначала пришли фото.", reply_markup=main_keyboard(st))
             return
-        chunk = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
-        parts = max(2, round(int(st["seconds"]) / chunk))
-        st["story_collect"] = {"parts": parts, "chunk": chunk, "collected": []}
-        await send_ui_message(
-            target, context,
-            f"📖 История: {parts} части по {chunk}с (старт от твоего фото, без перерисовки).\n\n"
-            f"Пришли промт для ЧАСТИ 1/{parts}. Напиши «отмена», чтобы прекратить.",
-            reply_markup=None,
-        )
+        parts = [p.strip() for p in prompt.split("#") if p.strip()]
+        if len(parts) < 2:
+            await send_ui_message(
+                target, context,
+                f"📖 Видео {st['seconds']}с — это история из нескольких частей, но в промте нет разделителей «#».\n\n"
+                f"Раздели сюжет значком #, по одному блоку на часть (каждая ~{chunk}с), например:\n"
+                f"«она сосёт член#он кончает ей на лицо#она улыбается в камеру» — 3 части.\n\n"
+                f"Сейчас у тебя только 1 блок — не хватает ещё минимум одной части.",
+                reply_markup=main_keyboard(st),
+            )
+            return
+        await enqueue_story_job(update, context, parts, chunk)
         return
 
     if not st.get("prompt"):
@@ -4659,8 +4663,11 @@ async def enqueue_story_job(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     JOB_SEQ += 1
     total = len(prompts) * chunk
     await cleanup_chat_status(context.bot, target.chat_id)
-    await update_chat_status(context.bot, target.chat_id,
-                             f"🕐 История в очереди: {len(prompts)} части × {chunk}с (~{total}с). ID: #{JOB_SEQ}.")
+    status = f"🕐 История в очереди: {len(prompts)} части × {chunk}с (~{total}с). ID: #{JOB_SEQ}."
+    # A story is one chained film; the 🔁 repeat (10x/30x) never fans it out — say so if it's set.
+    if int(st.get("repeat", 1)) > 1:
+        status += f"\n🔁 Повтор {st['repeat']}x к истории не применяется — будет 1 фильм."
+    await update_chat_status(context.bot, target.chat_id, status)
     job = Job(
         job_id=JOB_SEQ,
         chat_id=target.chat_id,
