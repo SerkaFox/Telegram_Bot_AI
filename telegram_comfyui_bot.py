@@ -317,6 +317,8 @@ OLLAMA_LORA_SYSTEM_PROMPT = (
 STORY_ENABLED = os.getenv("BOT_STORY_ENABLED", "0") == "1"
 STORY_PARTS = int(os.getenv("STORY_PARTS", "5"))
 STORY_SEGMENT_TIMEOUT = int(os.getenv("STORY_SEGMENT_TIMEOUT", "900"))
+# Rough per-part wall time (gen + MMAudio + normalize) for the live story timer's ETA. Self-tunes.
+STORY_CHUNK_AVG = float(os.getenv("STORY_CHUNK_AVG", "200"))
 OLLAMA_STORY_SYSTEM_PROMPT = (
     "Ты — сценарист эротического мини-фильма, который нейросеть соберёт из {parts} видео-сцен, "
     "идущих подряд. Разбей идею пользователя на РОВНО {parts} сцен. Каждая сцена — ОДНО "
@@ -4739,17 +4741,40 @@ def log_generation(entry: dict[str, Any]) -> None:
         log.exception("log_generation failed")
 
 
+async def _story_part_ticker(app: Application, chat_id: int, i: int, parts: int, t0: float,
+                             avg: float, stop: asyncio.Event) -> None:
+    """Live per-part timer: refresh the story status every few seconds with elapsed + rough ETA,
+    since each chunk is a single blocking Comfy prompt (no monitor loop to tick it)."""
+    while not stop.is_set():
+        elapsed = time.time() - t0
+        remaining = max(0.0, avg - elapsed)
+        try:
+            await update_chat_status(
+                app.bot, chat_id,
+                f"🎬 История {i+1}/{parts}: генерирую… Прошло {format_eta(elapsed)} · осталось {format_eta(remaining)}",
+            )
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=6)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def submit_video_story(app: Application, job: Job) -> None:
     """🎬 Video >6s as a chain of native 6s WAN chunks (no RIFE slow-mo). Chunk 1 does the setup
     (undress/scene-change + pose from the picked loras); each later chunk starts from the previous
     chunk's LAST FRAME and runs only the act loras (setup drivers dropped), so its whole 6s is the
     action rather than the undress ramp-up. Segments are concatenated, MMAudio adds sound, and the
     film is delivered directly (no ACTIVE_PROMPTS/monitor), like submit_story_job."""
+    global STORY_CHUNK_AVG
     src = job.video_source
     if not src or not src.get("path"):
         raise RuntimeError("Для video сначала пришли фото.")
     chat_id = job.chat_id
     STORY_CANCEL.discard(chat_id)
+    ticker_stop: asyncio.Event | None = None
+    ticker_task: asyncio.Task | None = None
     # User-driven story: one prompt per part, each `story_chunk_secs` long, no Ollama split.
     user_prompts = list(job.story_prompts or [])
     chunk_secs = int(job.story_chunk_secs) if job.story_chunk_secs else VIDEO_NATIVE_MAX_SECONDS
@@ -4831,7 +4856,10 @@ async def submit_video_story(app: Application, job: Job) -> None:
             if chat_id in STORY_CANCEL:
                 await app.bot.send_message(chat_id, f"⛔ Остановлено на части {i+1}/{parts}.")
                 return
-            await update_chat_status(app.bot, chat_id, f"🎬 История {i+1}/{parts}: генерирую…")
+            t_part = time.time()
+            ticker_stop = asyncio.Event()
+            ticker_task = asyncio.create_task(
+                _story_part_ticker(app, chat_id, i, parts, t_part, STORY_CHUNK_AVG, ticker_stop))
             beat_ru = beats[i]
             chunk_prompt = await asyncio.to_thread(translate_to_english, beat_ru)
             if identity:  # keep her the same person every chunk
@@ -4893,6 +4921,15 @@ async def submit_video_story(app: Application, job: Job) -> None:
                 await asyncio.to_thread(extract_last_frame, raw_path, frame_path)
                 current_image_name = await asyncio.to_thread(upload_image_to_comfy, str(frame_path), frame_path.name)
 
+            # Stop this part's live timer and self-tune the per-part average for the next ETA.
+            ticker_stop.set()
+            try:
+                await ticker_task
+            except Exception:
+                pass
+            ticker_task = None
+            STORY_CHUNK_AVG = 0.7 * STORY_CHUNK_AVG + 0.3 * (time.time() - t_part)
+
         await update_chat_status(app.bot, chat_id, "🎬 Склеиваю…")
         final_path = story_dir / "video_story.mp4"
         # Segments already carry per-chunk MMAudio, so concat -c copy keeps continuous sound;
@@ -4913,6 +4950,13 @@ async def submit_video_story(app: Application, job: Job) -> None:
             "chunks": chunk_log,
         })
     finally:
+        if ticker_stop is not None:
+            ticker_stop.set()
+        if ticker_task is not None:
+            try:
+                await ticker_task
+            except Exception:
+                pass
         STORY_CANCEL.discard(chat_id)
 
 
