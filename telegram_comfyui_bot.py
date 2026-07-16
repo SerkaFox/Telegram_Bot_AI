@@ -4660,40 +4660,47 @@ async def enqueue_story_job(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     global JOB_SEQ
     st = get_state(context)
     target = update.message if update.message else update.callback_query.message
-    JOB_SEQ += 1
     total = len(prompts) * chunk
+    # 🔁 repeat fans the story into N independent films (fresh seed each) — meant for overnight
+    # batches. Same prompts/parts, different random seed → different takes of the same scenario.
+    repeat = max(1, min(200, int(st.get("repeat", 1))))
+    first_job_id = JOB_SEQ + 1
+    last_job_id = first_job_id + repeat - 1
     await cleanup_chat_status(context.bot, target.chat_id)
-    status = f"🕐 История в очереди: {len(prompts)} части × {chunk}с (~{total}с). ID: #{JOB_SEQ}."
-    # A story is one chained film; the 🔁 repeat (10x/30x) never fans it out — say so if it's set.
-    if int(st.get("repeat", 1)) > 1:
-        status += f"\n🔁 Повтор {st['repeat']}x к истории не применяется — будет 1 фильм."
+    if repeat > 1:
+        status = (f"🕐 Историй в очереди: {repeat} × ({len(prompts)} части по {chunk}с ≈ {total}с). "
+                  f"ID: #{first_job_id}–#{last_job_id}.\n🔁 Каждый фильм — свой seed (варианты одного сюжета).")
+    else:
+        status = f"🕐 История в очереди: {len(prompts)} части × {chunk}с (~{total}с). ID: #{first_job_id}."
     await update_chat_status(context.bot, target.chat_id, status)
-    job = Job(
-        job_id=JOB_SEQ,
-        chat_id=target.chat_id,
-        mode="video",
-        prompt=prompts[0],
-        seconds=total,
-        max_side=int(st["max_side"]),
-        video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
-        seed=make_seed(),
-        video_source=copy.deepcopy(st["video_source"]),
-        duo_photos=copy.deepcopy(st["duo_photos"]),
-        video_loras=list(st.get("video_loras") or []),
-        quality=(st.get("quality") or "medium").strip().lower(),
-        batch_index=1,
-        batch_total=1,
-        dub_voice=bool(st.get("dub_voice")),
-        dub_voice_name=st.get("dub_voice_name") or DEFAULT_VOICE_NAME,
-        furry=bool(st.get("furry")),
-        furry_base=st.get("furry_base") or "pony",
-        auto_dialogue=bool(st.get("auto_dialogue")),
-        auto_lora=bool(st.get("auto_lora")),
-        video_model=st.get("video_model") or VIDEO_MODEL_DEFAULT,
-        story_prompts=prompts,
-        story_chunk_secs=chunk,
-    )
-    await GEN_QUEUE.put(job)
+    for i in range(repeat):
+        JOB_SEQ += 1
+        job = Job(
+            job_id=JOB_SEQ,
+            chat_id=target.chat_id,
+            mode="video",
+            prompt=prompts[0],
+            seconds=total,
+            max_side=int(st["max_side"]),
+            video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
+            seed=make_seed(),
+            video_source=copy.deepcopy(st["video_source"]),
+            duo_photos=copy.deepcopy(st["duo_photos"]),
+            video_loras=list(st.get("video_loras") or []),
+            quality=(st.get("quality") or "medium").strip().lower(),
+            batch_index=i + 1,
+            batch_total=repeat,
+            dub_voice=bool(st.get("dub_voice")),
+            dub_voice_name=st.get("dub_voice_name") or DEFAULT_VOICE_NAME,
+            furry=bool(st.get("furry")),
+            furry_base=st.get("furry_base") or "pony",
+            auto_dialogue=bool(st.get("auto_dialogue")),
+            auto_lora=bool(st.get("auto_lora")),
+            video_model=st.get("video_model") or VIDEO_MODEL_DEFAULT,
+            story_prompts=prompts,
+            story_chunk_secs=chunk,
+        )
+        await GEN_QUEUE.put(job)
 
 
 async def submit_image_job(app: Application, job: Job) -> None:
@@ -4944,10 +4951,11 @@ async def submit_video_story(app: Application, job: Job) -> None:
         await asyncio.to_thread(concat_story_segments, normalized, final_path, story_dir)
         film = await asyncio.to_thread(final_path.read_bytes)
         filename = "story.mp4"
-        caption_txt = f"🎬 История · {parts}×{chunk_secs}с ≈ {parts * chunk_secs}с"[:MAX_CAPTION]
+        take = f" · вариант {job.batch_index}/{job.batch_total}" if job.batch_total > 1 else ""
+        caption_txt = f"🎬 История{take} · {parts}×{chunk_secs}с ≈ {parts * chunk_secs}с"[:MAX_CAPTION]
         await app.bot.send_video(chat_id=chat_id, video=InputFile(io.BytesIO(film), filename=filename), caption=caption_txt)
         await mirror_to_admins(app, {"chat_id": chat_id, "prompt": job.prompt, "mode": "video"}, film, filename, caption_txt)
-        await finish_chat_status(app, chat_id, f"✅ История готова ({parts}×{chunk_secs}с)", show_menu=True)
+        await finish_chat_status(app, chat_id, f"✅ История готова{take} ({parts}×{chunk_secs}с)", show_menu=True)
         await asyncio.to_thread(log_generation, {
             "mode": "video_story", "chat_id": chat_id, "job_id": job.job_id,
             "prompt": job.prompt, "seconds": job.seconds, "parts": parts,
