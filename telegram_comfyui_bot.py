@@ -17,7 +17,7 @@ from typing import Any
 import requests
 from deep_translator import GoogleTranslator
 from PIL import Image, ImageOps
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -58,6 +58,7 @@ COMFY_INPUT_DIR = Path(os.getenv("COMFY_INPUT_DIR", "/home/iaadmin/ComfyUI/input
 COMFY_OUTPUT_DIR = Path(os.getenv("COMFY_OUTPUT_DIR", "/home/iaadmin/ComfyUI/output"))
 
 MAX_CAPTION = 1000
+COPY_TEXT_MAX_LENGTH = 256
 
 # Admins can always use the bot AND manage who else may. Default = the owner's id;
 # override with the ADMIN_USER_IDS env (comma-separated) if needed.
@@ -336,10 +337,10 @@ OLLAMA_STORY_SYSTEM_PROMPT = (
 # "story" (История V1) chains several LTX Eros clips into one film — it's a video mode that needs
 # one start photo, but it renders + delivers entirely inside submit_story_job (no ACTIVE_PROMPTS
 # entry), so it never touches the monitor loop / send_result path.
-VIDEO_MODES = {"video", "video_clean", "ltx_sulphur", "ltx_eros", "story"}
+VIDEO_MODES = {"video", "video_clean", "v2v", "remove_people", "ltx_sulphur", "ltx_eros", "story"}
 # Modes that take a single uploaded photo into st["video_source"] (video modes, plus
 # mopmix which runs img2img off of it, plus image which edits it directly).
-SINGLE_PHOTO_MODES = VIDEO_MODES | {"mopmix", "image"}
+SINGLE_PHOTO_MODES = (VIDEO_MODES - {"v2v", "remove_people"}) | {"mopmix", "image"}
 # Modes that take two uploaded photos into st["duo_photos"].
 DUO_PHOTO_MODES = {"mopmix_duo"}
 # Modes whose workflow renders silent video and needs the MMAudio postprocess pass.
@@ -368,6 +369,33 @@ VIDEO_CLEAN_DISTILL_STRENGTH = float(os.getenv("VIDEO_CLEAN_DISTILL_STRENGTH", "
 # an external Lightx2v distill want the canonical ~5.0 shift. At 8 the schedule over-shifts and the
 # stock latent never resolves -> frames disintegrate into dust/fog. Override only the clean sampler.
 VIDEO_CLEAN_SIGMA_SHIFT = float(os.getenv("VIDEO_CLEAN_SIGMA_SHIFT", "5.0"))
+
+# VACE-Wan 2.1 1.3B video-to-video editing. The small FP8 base plus the BF16 VACE
+# control module fits the RTX 5070 while retaining the source video's motion.
+V2V_MODEL = os.getenv("V2V_MODEL", "Wan2_1-T2V-1_3B_fp8_e4m3fn.safetensors")
+V2V_VACE_MODEL = os.getenv("V2V_VACE_MODEL", "Wan2_1-VACE_module_1_3B_bf16.safetensors")
+V2V_VAE = os.getenv("V2V_VAE", "Wan2_1_VAE_bf16.safetensors")
+V2V_TEXT_ENCODER = os.getenv("V2V_TEXT_ENCODER", "umt5-xxl-enc-bf16.safetensors")
+V2V_STEPS = int(os.getenv("V2V_STEPS", "20"))
+V2V_CFG = float(os.getenv("V2V_CFG", "4.0"))
+V2V_SHIFT = float(os.getenv("V2V_SHIFT", "8.0"))
+V2V_FPS = int(os.getenv("V2V_FPS", "16"))
+V2V_MAX_SIDE = {"low": 480, "medium": 576, "high": 704}
+V2V_CHUNK_SECONDS = int(os.getenv("V2V_CHUNK_SECONDS", "5"))
+V2V_NEGATIVE = os.getenv(
+    "V2V_NEGATIVE",
+    "low quality, blurry, flicker, jitter, distorted face, deformed body, extra limbs, "
+    "warped hands, temporal inconsistency, camera shake",
+)
+
+# Automatic person removal: YOLO creates a silhouette mask for every frame and ProPainter
+# reconstructs the background coherently across time. Process long videos in bounded chunks so
+# frame batches remain practical on the RTX 5070.
+REMOVE_PEOPLE_MAX_SIDE = 1024
+REMOVE_PEOPLE_MAX_FPS = float(os.getenv("REMOVE_PEOPLE_MAX_FPS", "60"))
+REMOVE_PEOPLE_CHUNK_SECONDS = int(os.getenv("REMOVE_PEOPLE_CHUNK_SECONDS", "10"))
+REMOVE_PEOPLE_MODEL = os.getenv("REMOVE_PEOPLE_MODEL", "segm/person_yolov8m-seg.pt")
+REMOVE_PEOPLE_TIMEOUT = int(os.getenv("REMOVE_PEOPLE_TIMEOUT", "1800"))
 
 # NSFW "🎬 Video" base — upgraded from the Q4_K_M "FASTMOVE" merge to the fp8-scaled stock WAN 2.2
 # I2V experts (much less quant loss → faces/anatomy hold together) driven by the Lightx2v 4-step
@@ -420,14 +448,11 @@ VIDEO_MODELS: dict[str, dict[str, Any]] = {
         "low": "wan22_remix_i2v_v3_lowQ6K.gguf",
         "loader": "gguf", "distill": True, "driver": False, "shift": 5.0,
     },
-    # The stock-fp8 + DR34ML4Y experiment (former default). Kept selectable so nothing is lost.
-    "stock_dr34": {
-        "label": "Сток fp8 + DR34ML4Y",
-        "high": VIDEO_UNET_HIGH, "low": VIDEO_UNET_LOW,
-        "loader": "fp8", "distill": True, "driver": True, "shift": 5.0,
-    },
+    # (Сток fp8 + DR34ML4Y was removed 2026-07-27 — the clean stock WAN base "генерит чепуху" even
+    # with the DR34ML4Y driver; not worth keeping next to the NSFW fine-tunes. The 🌸 Clean pipeline
+    # uses its own VIDEO_CLEAN_UNET_* GGUF base, so nothing else depended on this entry.)
 }
-VIDEO_MODEL_ORDER = ["svi_fastmove", "remix_v3", "stock_dr34"]
+VIDEO_MODEL_ORDER = ["svi_fastmove", "remix_v3"]
 VIDEO_MODEL_DEFAULT = os.getenv("VIDEO_MODEL_DEFAULT", "svi_fastmove")
 
 
@@ -584,6 +609,7 @@ log = logging.getLogger("tg-comfy-bot")
 # ============================================================
 GEN_QUEUE: asyncio.Queue = asyncio.Queue()
 WORKER_STARTED = False
+BACKGROUND_TASKS: set[asyncio.Task] = set()
 # Roulette per-chat state, filled lazily by the worker during a batch
 ROULETTE_LAST_PROMPT: dict[int, str] = {}
 ROULETTE_CAPTION: dict[int, str] = {}
@@ -600,6 +626,8 @@ CHAT_STATUS: dict[int, dict[str, Any]] = {}
 MODE_AVG_DURATION: dict[str, float] = {
     "video": 240.0,
     "video_clean": 300.0,
+    "v2v": 240.0,
+    "remove_people": 180.0,
     "ltx_sulphur": 230.0,
     "ltx_eros": 230.0,
     "story": 1400.0,
@@ -608,6 +636,7 @@ MODE_AVG_DURATION: dict[str, float] = {
     "image": 30.0,
 }
 STATUS_UPDATE_INTERVAL = 8.0
+STATUS_UPDATE_TIMEOUT = 20.0
 
 
 @dataclass
@@ -621,6 +650,7 @@ class Job:
     video_fps: int
     seed: int
     video_source: dict | None
+    source_video: dict | None
     duo_photos: list[dict]
     video_loras: list[str]
     quality: str
@@ -675,6 +705,8 @@ def apply_quality(st: dict[str, Any], name: str) -> bool:
 def quality_status(st: dict[str, Any]) -> str:
     quality = (st.get("quality") or "medium").strip().lower()
     mode = st.get("mode")
+    if mode == "remove_people":
+        return f"native (до {REMOVE_PEOPLE_MAX_SIDE}px, исходный FPS)"
     if mode == "ltx_sulphur":
         w, h = LTX_SULPHUR_QUALITY.get(quality, LTX_SULPHUR_QUALITY["medium"])
         return f"{quality} ({w}x{h})"
@@ -773,6 +805,70 @@ def run_cmd(
         )
 
 
+def probe_video(path: Path) -> dict[str, Any]:
+    p = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,r_frame_rate:format=duration",
+            "-of", "json", str(path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=60,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"ffprobe не смог прочитать видео: {p.stderr.strip()}")
+    data = json.loads(p.stdout or "{}")
+    stream = (data.get("streams") or [{}])[0]
+    rate = str(stream.get("r_frame_rate") or "0/1")
+    num, den = (rate.split("/", 1) + ["1"])[:2]
+    fps = float(num) / max(1.0, float(den))
+    return {
+        "width": int(stream.get("width") or 0),
+        "height": int(stream.get("height") or 0),
+        "duration": float((data.get("format") or {}).get("duration") or 0),
+        "fps": fps,
+    }
+
+
+def v2v_chunk_ranges(duration: float) -> list[tuple[float, float]]:
+    duration = max(0.0, float(duration))
+    if duration <= 0:
+        return []
+    ranges: list[tuple[float, float]] = []
+    start = 0.0
+    while duration - start > V2V_CHUNK_SECONDS:
+        ranges.append((start, float(V2V_CHUNK_SECONDS)))
+        start += V2V_CHUNK_SECONDS
+    remainder = duration - start
+    # Avoid a nearly empty final VACE pass. A short tail is cheaper and more stable when folded
+    # into the previous chunk, so a nominal 5s chunk may become up to 6s.
+    if ranges and remainder < 1.0:
+        prev_start, prev_duration = ranges[-1]
+        ranges[-1] = (prev_start, prev_duration + remainder)
+    elif remainder > 0:
+        ranges.append((start, remainder))
+    return ranges
+
+
+def remove_people_chunk_ranges(duration: float) -> list[tuple[float, float]]:
+    duration = max(0.0, float(duration))
+    if duration <= 0:
+        return []
+    ranges: list[tuple[float, float]] = []
+    start = 0.0
+    while start < duration:
+        chunk_duration = min(float(REMOVE_PEOPLE_CHUNK_SECONDS), duration - start)
+        if ranges and chunk_duration < 1.0:
+            prev_start, prev_duration = ranges[-1]
+            ranges[-1] = (prev_start, prev_duration + chunk_duration)
+            break
+        ranges.append((start, chunk_duration))
+        start += chunk_duration
+    return ranges
+
+
 def gif_to_mp4(input_path: Path, output_path: Path) -> None:
     run_cmd([
         "ffmpeg",
@@ -798,6 +894,110 @@ def mux_video_with_audio(video_path: Path, audio_source_path: Path, output_path:
         "-movflags", "+faststart",
         str(output_path),
     ])
+
+
+def extract_v2v_chunk(
+    source_path: Path,
+    output_path: Path,
+    *,
+    start_seconds: float,
+    duration: float,
+    width: int,
+    height: int,
+) -> None:
+    run_cmd([
+        "ffmpeg", "-y",
+        "-ss", f"{start_seconds:.3f}",
+        "-i", str(source_path),
+        "-t", f"{duration:.3f}",
+        "-an",
+        "-vf", f"fps={V2V_FPS},scale={width}:{height}:flags=lanczos",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(output_path),
+    ])
+
+
+def extract_remove_people_chunk(
+    source_path: Path,
+    output_path: Path,
+    *,
+    start_seconds: float,
+    duration: float,
+    width: int,
+    height: int,
+    fps: float,
+) -> None:
+    run_cmd([
+        "ffmpeg", "-y",
+        "-ss", f"{start_seconds:.3f}",
+        "-i", str(source_path),
+        "-t", f"{duration:.3f}",
+        "-an",
+        "-vf", f"fps={fps},scale={width}:{height}:flags=lanczos",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "17",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(output_path),
+    ])
+
+
+def finalize_v2v_video(video_path: Path, source_path: Path, output_path: Path, duration: float) -> None:
+    if _segment_has_audio(source_path):
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-i", str(source_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-t", f"{duration:.3f}",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_path),
+        ])
+    else:
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-t", f"{duration:.3f}",
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(output_path),
+        ])
+
+
+def finalize_remove_people_video(
+    video_path: Path,
+    source_path: Path,
+    output_path: Path,
+) -> None:
+    if _segment_has_audio(source_path):
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-i", str(source_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(output_path),
+        ])
+    else:
+        run_cmd([
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(output_path),
+        ])
 
 
 def _segment_has_audio(path: Path) -> bool:
@@ -1242,6 +1442,10 @@ MODE_MAX_SECONDS = {
     # 🎬 Video renders >6s as a chained WAN story (native 6s chunks), so allow more seconds
     # here than the single-clip modes — each extra 6s is one more story part (36 → up to 6 parts).
     "video": int(os.getenv("MAX_SECONDS_VIDEO", "36")),
+    # The full source video is processed in V2V_CHUNK_SECONDS chunks. This value only controls
+    # the seconds selector shown in the shared UI; it does not truncate V2V input.
+    "v2v": V2V_CHUNK_SECONDS,
+    "remove_people": REMOVE_PEOPLE_CHUNK_SECONDS,
 }
 
 
@@ -1263,6 +1467,7 @@ def initial_state() -> dict[str, Any]:
         "max_side": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["max_side"],
         "video_fps": QUALITY_PRESETS.get(DEFAULT_QUALITY, QUALITY_PRESETS["medium"])["video_fps"],
         "video_source": blank_media(),
+        "source_video": blank_media(),
         "duo_photos": [blank_media(), blank_media()],
         "video_loras": [],
         "roulette": False,
@@ -1274,6 +1479,9 @@ def initial_state() -> dict[str, Any]:
         "story_chunk": VIDEO_STORY_CHUNK_SECS,
         "auto_dialogue": False,
         "auto_lora": False,
+        # True once the user picks a duration by hand (➖/➕2s or /seconds). A single-block (no '#')
+        # 🎬 Video then honours that length instead of snapping back to VIDEO_NATIVE_MAX_SECONDS.
+        "seconds_manual": False,
     }
 
 
@@ -1287,6 +1495,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["video_loras"] = []
     if "duo_photos" not in st:
         st["duo_photos"] = [blank_media(), blank_media()]
+    if "source_video" not in st:
+        st["source_video"] = blank_media()
     if "roulette" not in st:
         st["roulette"] = False
     if "furry" not in st:
@@ -1301,6 +1511,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["auto_dialogue"] = False
     if "auto_lora" not in st:
         st["auto_lora"] = False
+    if "seconds_manual" not in st:
+        st["seconds_manual"] = False
     if "dub_voice" not in st:
         st["dub_voice"] = False
     if "dub_voice_name" not in st:
@@ -1338,6 +1550,7 @@ def refresh_media_size(media: dict[str, Any], max_side: int) -> None:
 def refresh_all_sizes(st: dict[str, Any]) -> None:
     max_side = int(st.get("max_side") or QUALITY_PRESETS["medium"]["max_side"])
     refresh_media_size(st.get("video_source") or {}, max_side)
+    refresh_media_size(st.get("source_video") or {}, max_side)
 
 
 def get_media_library(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, Any]]:
@@ -1457,6 +1670,32 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
     furry_label = f"🐾 Furry: {'✅ ВКЛ' if furry_on else '⬜ выкл'}"
     auto_dialogue_label = f"💬 Реплики: {'✅ ВКЛ' if auto_dialogue_on else '⬜ выкл'}"
     auto_lora_label = f"🧠 Авто-лоры: {'✅ ВКЛ' if auto_lora_on else '⬜ выкл'}"
+    prompt_txt = str((st or {}).get("prompt") or "").strip()
+    if prompt_txt and len(prompt_txt) <= COPY_TEXT_MAX_LENGTH:
+        prompt_button = InlineKeyboardButton(
+            "📋 Промпт",
+            copy_text=CopyTextButton(prompt_txt),
+        )
+    else:
+        prompt_button = InlineKeyboardButton("📋 Промпт", callback_data="prompt:show")
+    if st and st.get("mode") == "remove_people":
+        quality_row = [
+            InlineKeyboardButton("🎞 Native · исходный FPS", callback_data="noop"),
+            InlineKeyboardButton("♾ Полностью", callback_data="noop"),
+        ]
+    else:
+        quality_row = [
+            InlineKeyboardButton("L", callback_data="quality:low"),
+            InlineKeyboardButton("M", callback_data="quality:medium"),
+            InlineKeyboardButton("H", callback_data="quality:high"),
+        ]
+    if st and st.get("mode") == "v2v":
+        quality_row.append(InlineKeyboardButton("♾ Полностью", callback_data="noop"))
+    elif not st or st.get("mode") != "remove_people":
+        quality_row.extend([
+            InlineKeyboardButton("➖2s", callback_data="sec:-2"),
+            InlineKeyboardButton("➕2s", callback_data="sec:+2"),
+        ])
 
     rows = [
         [
@@ -1464,7 +1703,12 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🌸 Clean Video", callback_data="mode:video_clean"),
         ],
         [
+            InlineKeyboardButton("🎞 V2V Edit", callback_data="mode:v2v"),
+            InlineKeyboardButton("🧹 Удалить людей", callback_data="mode:remove_people"),
+        ],
+        [
             InlineKeyboardButton("✏️ Edit Photo", callback_data="mode:image"),
+            InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
         ],
         [
             InlineKeyboardButton("🧪 LTX Sulphur", callback_data="mode:ltx_sulphur"),
@@ -1475,13 +1719,7 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎨 MopMix", callback_data="mode:mopmix"),
             InlineKeyboardButton("👯 MopMix Duo", callback_data="mode:mopmix_duo"),
         ],
-        [
-            InlineKeyboardButton("L", callback_data="quality:low"),
-            InlineKeyboardButton("M", callback_data="quality:medium"),
-            InlineKeyboardButton("H", callback_data="quality:high"),
-            InlineKeyboardButton("➖2s", callback_data="sec:-2"),
-            InlineKeyboardButton("➕2s", callback_data="sec:+2"),
-        ],
+        quality_row,
         [
             InlineKeyboardButton("1x", callback_data="repeat:1"),
             InlineKeyboardButton("10x", callback_data="repeat:10"),
@@ -1493,9 +1731,6 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
         ],
         [
-            InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
-        ],
-        [
             InlineKeyboardButton(roulette_label, callback_data="do:roulette"),
             InlineKeyboardButton(dub_voice_label, callback_data="do:dubvoice"),
         ],
@@ -1504,6 +1739,7 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(auto_dialogue_label, callback_data="do:autodialogue"),
         ],
         [
+            prompt_button,
             InlineKeyboardButton(auto_lora_label, callback_data="do:autolora"),
         ],
     ]
@@ -1511,13 +1747,11 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
         base = (st.get("furry_base") if st else "pony") or "pony"
         base_label = f"🧬 База: {'AutismMix (арт)' if base == 'yiffy' else 'Pony (фото)'}"
         rows.append([InlineKeyboardButton(base_label, callback_data="do:furrybase")])
-    # NSFW video base model picker + story chunk length — only relevant in the 🎬 Video mode.
+    # NSFW video base model picker — only relevant in the 🎬 Video mode.
     if st and st.get("mode") == "video":
         vm = st.get("video_model") or VIDEO_MODEL_DEFAULT
         vm_label = video_model_cfg(vm)["label"]
-        chunk = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
         rows.append([InlineKeyboardButton(f"🎛 Модель: {vm_label}", callback_data="do:videomodel")])
-        rows.append([InlineKeyboardButton(f"📖 Кусок истории: {chunk}с", callback_data="do:storychunk")])
     if dub_voice_on:
         voice_name = st.get("dub_voice_name", DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME
         rows.append([InlineKeyboardButton(f"🎙 Голос: {voice_name}", callback_data="voice:list")])
@@ -1668,11 +1902,19 @@ def media_line(m: dict[str, Any]) -> str:
 
 def help_text(st: dict[str, Any]) -> str:
     prompt_preview = short_preview(st.get("prompt") or "—", 180)
+    if st.get("mode") == "v2v":
+        seconds_status = f"полное исходное видео, куски по ≤{V2V_CHUNK_SECONDS}с"
+    elif st.get("mode") == "remove_people":
+        seconds_status = f"полное исходное видео, куски по ≤{REMOVE_PEOPLE_CHUNK_SECONDS}с"
+    else:
+        seconds_status = f"{st['seconds']}"
 
     return (
         "Бот готов.\n\n"
         "Режимы:\n"
         "• video: 1 фото + промт + секунды + звук MMAudio\n"
+        "• v2v: исходное видео + промт → отредактированное видео; движение и звук сохраняются\n"
+        "• remove_people: исходное видео → автоматическое удаление всех людей, промт не нужен\n"
         "• ltx_sulphur: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 Sulphur)\n"
         "• ltx_eros: 1 фото + промт + секунды, видео+звук нативно (LTX2.3 10Eros). "
         "Реплику пиши в кавычках — произнесётся один раз. 💬 Реплики ВКЛ → фразу под сцену сочинит Ollama\n"
@@ -1681,6 +1923,7 @@ def help_text(st: dict[str, Any]) -> str:
         "• mopmix_duo: 2 фото (лица) + промт → сцена с обоими лицами (face swap)\n\n"
         "Команды:\n"
         "/video — обычный photo → video\n"
+        "/removepeople — удалить всех людей из полного исходного видео\n"
         "/ltxsulphur — photo → video+audio (LTX2.3 Sulphur)\n"
         "/ltxeros — photo → video+audio (LTX2.3 10Eros)\n"
         "/image — photo → редактирование фото по промту\n"
@@ -1697,7 +1940,7 @@ def help_text(st: dict[str, Any]) -> str:
         "Текущее состояние:\n"
         f"• mode: {st['mode']}\n"
         f"• quality: {quality_status(st)}\n"
-        f"• seconds: {st['seconds']}\n"
+        f"• seconds: {seconds_status}\n"
         f"• repeat: {st.get('repeat', 1)}\n"
         f"• рулетка: {'on' if st.get('roulette') else 'off'}\n"
         f"• дубляж голоса: {'on' if st.get('dub_voice') else 'off'}\n"
@@ -1705,6 +1948,7 @@ def help_text(st: dict[str, Any]) -> str:
         f"• video audio: {'on' if VIDEO_AUDIO else 'off'}\n"
         f"• video TTS: {'on' if VIDEO_TTS else 'off'}\n"
         f"• video source: {media_line(st['video_source'])}\n"
+        f"• V2V source: {media_line(st['source_video'])}\n"
         f"• duo фото A: {media_line(st['duo_photos'][0])}\n"
         f"• duo фото B: {media_line(st['duo_photos'][1])}\n"
         f"• prompt: {prompt_preview}"
@@ -1726,6 +1970,231 @@ def upload_image_to_comfy(local_path: str, filename: str) -> str:
         r = requests.post(f"{COMFY_BASE}/upload/image", files=files, data=data, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     return r.json().get("name", filename)
+
+
+def build_v2v_workflow(
+    *,
+    video_name: str,
+    prompt: str,
+    width: int,
+    height: int,
+    seconds: float,
+    seed: int,
+) -> dict[str, Any]:
+    frame_cap = max(5, (int(float(seconds) * V2V_FPS) // 4) * 4 + 1)
+    return {
+        "1": {
+            "class_type": "VHS_LoadVideo",
+            "inputs": {
+                "video": video_name,
+                "force_rate": float(V2V_FPS),
+                "custom_width": width,
+                "custom_height": height,
+                "frame_load_cap": frame_cap,
+                "skip_first_frames": 0,
+                "select_every_nth": 1,
+                "format": "Wan",
+            },
+        },
+        "2": {
+            "class_type": "LoadWanVideoT5TextEncoder",
+            "inputs": {
+                "model_name": V2V_TEXT_ENCODER,
+                "precision": "bf16",
+                "load_device": "offload_device",
+                "quantization": "disabled",
+            },
+        },
+        "3": {
+            "class_type": "WanVideoTextEncode",
+            "inputs": {
+                "positive_prompt": prompt,
+                "negative_prompt": V2V_NEGATIVE,
+                "t5": ["2", 0],
+                "force_offload": True,
+                "use_disk_cache": True,
+                "device": "gpu",
+            },
+        },
+        "4": {
+            "class_type": "WanVideoVAELoader",
+            "inputs": {
+                "model_name": V2V_VAE,
+                "precision": "bf16",
+                "use_cpu_cache": False,
+                "verbose": False,
+            },
+        },
+        "5": {
+            "class_type": "WanVideoVACEModelSelect",
+            "inputs": {"vace_model": V2V_VACE_MODEL},
+        },
+        "6": {
+            "class_type": "WanVideoBlockSwap",
+            "inputs": {
+                "blocks_to_swap": 0,
+                "offload_img_emb": False,
+                "offload_txt_emb": False,
+                "use_non_blocking": True,
+                "vace_blocks_to_swap": 15,
+                "prefetch_blocks": 0,
+                "block_swap_debug": False,
+            },
+        },
+        "7": {
+            "class_type": "WanVideoModelLoader",
+            "inputs": {
+                "model": V2V_MODEL,
+                "base_precision": "fp16",
+                "quantization": "disabled",
+                "load_device": "offload_device",
+                "attention_mode": "sdpa",
+                "block_swap_args": ["6", 0],
+                "extra_model": ["5", 0],
+                "rms_norm_function": "default",
+            },
+        },
+        "8": {
+            "class_type": "WanVideoVACEEncode",
+            "inputs": {
+                "vae": ["4", 0],
+                "input_frames": ["1", 0],
+                "width": width,
+                "height": height,
+                "num_frames": ["1", 1],
+                "strength": 1.0,
+                "vace_start_percent": 0.0,
+                "vace_end_percent": 1.0,
+                "tiled_vae": True,
+            },
+        },
+        "9": {
+            "class_type": "WanVideoSampler",
+            "inputs": {
+                "model": ["7", 0],
+                "image_embeds": ["8", 0],
+                "text_embeds": ["3", 0],
+                "steps": V2V_STEPS,
+                "cfg": V2V_CFG,
+                "shift": V2V_SHIFT,
+                "seed": seed,
+                "force_offload": True,
+                "scheduler": "unipc",
+                "riflex_freq_index": 0,
+                "batched_cfg": False,
+                "rope_function": "comfy",
+            },
+        },
+        "10": {
+            "class_type": "WanVideoDecode",
+            "inputs": {
+                "vae": ["4", 0],
+                "samples": ["9", 0],
+                "enable_vae_tiling": True,
+                "tile_x": 272,
+                "tile_y": 272,
+                "tile_stride_x": 144,
+                "tile_stride_y": 128,
+                "normalization": "default",
+            },
+        },
+        "11": {
+            "class_type": "VHS_VideoCombine",
+            "inputs": {
+                "images": ["10", 0],
+                "frame_rate": float(V2V_FPS),
+                "loop_count": 0,
+                "filename_prefix": "v2v_edit",
+                "format": "video/h264-mp4",
+                "pingpong": False,
+                "save_output": True,
+            },
+        },
+    }
+
+
+def build_remove_people_workflow(
+    *,
+    video_name: str,
+    width: int,
+    height: int,
+    seconds: float,
+    fps: float,
+) -> dict[str, Any]:
+    frame_cap = max(1, int(round(float(seconds) * fps)))
+    return {
+        "1": {
+            "class_type": "VHS_LoadVideo",
+            "inputs": {
+                "video": video_name,
+                "force_rate": 0.0,
+                "custom_width": width,
+                "custom_height": height,
+                "frame_load_cap": frame_cap,
+                "skip_first_frames": 0,
+                "select_every_nth": 1,
+                "format": "None",
+            },
+        },
+        "2": {
+            "class_type": "UltralyticsDetectorProvider",
+            "inputs": {"model_name": REMOVE_PEOPLE_MODEL},
+        },
+        "3": {
+            "class_type": "ImpactSimpleDetectorSEGS_for_AD",
+            "inputs": {
+                "bbox_detector": ["2", 0],
+                "image_frames": ["1", 0],
+                "bbox_threshold": 0.25,
+                "bbox_dilation": 4,
+                "crop_factor": 2.0,
+                "drop_size": 8,
+                "sub_threshold": 0.25,
+                "sub_dilation": 5,
+                "sub_bbox_expansion": 4,
+                "sam_mask_hint_threshold": 0.7,
+                "masking_mode": "Combine neighboring frames",
+                "segs_pivot": "Combined mask",
+                "segm_detector_opt": ["2", 1],
+            },
+        },
+        "4": {
+            "class_type": "ImpactSEGSToMaskBatch",
+            "inputs": {"segs": ["3", 0]},
+        },
+        "5": {
+            "class_type": "ProPainterInpaint",
+            "inputs": {
+                "image": ["1", 0],
+                "mask": ["4", 0],
+                "width": width,
+                "height": height,
+                "mask_dilates": 7,
+                "flow_mask_dilates": 10,
+                "ref_stride": 10,
+                "neighbor_length": 10,
+                "subvideo_length": 80,
+                "raft_iter": 20,
+                "fp16": "enable",
+            },
+        },
+        "6": {
+            "class_type": "VHS_VideoCombine",
+            "inputs": {
+                "images": ["5", 0],
+                "frame_rate": float(fps),
+                "loop_count": 0,
+                "filename_prefix": "remove_people",
+                "format": "video/h264-mp4",
+                "pix_fmt": "yuv420p",
+                "crf": 18,
+                "save_metadata": True,
+                "trim_to_audio": False,
+                "pingpong": False,
+                "save_output": True,
+            },
+        },
+    }
 
 
 def queue_prompt(prompt: dict[str, Any], client_id: str) -> str:
@@ -2350,6 +2819,28 @@ def caption_photo(local_path: str, name_hint: str) -> str:
     return ""
 
 
+def unload_ollama_models() -> None:
+    """Release GPU memory held by Ollama before ComfyUI starts a generation."""
+    try:
+        response = requests.get(f"{OLLAMA_BASE}/api/ps", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        loaded = response.json().get("models") or []
+        for item in loaded:
+            model = item.get("name") or item.get("model")
+            if not model:
+                continue
+            unload = requests.post(
+                f"{OLLAMA_BASE}/api/generate",
+                json={"model": model, "keep_alive": 0, "stream": False},
+                timeout=REQUEST_TIMEOUT,
+            )
+            unload.raise_for_status()
+            log.info("Unloaded Ollama model before ComfyUI generation: %s", model)
+    except Exception:
+        # Ollama is optional for several modes; its failure must not block ComfyUI.
+        log.warning("Could not unload Ollama models before generation", exc_info=True)
+
+
 def expand_idea_with_ollama(idea: str, photo_caption: str = "", system_prompt: str | None = None) -> str:
     prompt = f"{system_prompt or OLLAMA_SCENARIO_SYSTEM_PROMPT}"
     if photo_caption:
@@ -2873,6 +3364,7 @@ async def pick_result_from_history(prompt_id: str, mode: str) -> dict[str, Any] 
     preferred_nodes = {
         "video": "314",
         "video_clean": "314",
+        "v2v": "11",
         "ltx_sulphur": "61",
         "ltx_eros": "1135:597",
         "image": "9",
@@ -3166,6 +3658,8 @@ async def run_video_tts_postprocess(blob: bytes, meta: dict[str, Any], filename:
 MODE_DISPLAY_NAMES = {
     "video": "Video",
     "video_clean": "Clean Video",
+    "v2v": "V2V Edit",
+    "remove_people": "Remove People",
     "image": "Edit Photo",
     "ltx_sulphur": "LTX Sulphur",
     "ltx_eros": "LTX Eros",
@@ -3268,7 +3762,14 @@ async def cleanup_chat_status(bot, chat_id: int) -> None:
             pass
 
 
-async def finish_chat_status(app, chat_id: int, text: str, *, show_menu: bool) -> None:
+async def finish_chat_status(
+    app,
+    chat_id: int,
+    text: str,
+    *,
+    show_menu: bool,
+    prompt: str | None = None,
+) -> None:
     bot = app.bot
     await update_chat_status(bot, chat_id, text)
     if show_menu:
@@ -3285,8 +3786,25 @@ async def finish_chat_status(app, chat_id: int, text: str, *, show_menu: bool) -
             st = (app.user_data.get(chat_id) or {}).get("job_state")
         except Exception:
             st = None
+        prompt_txt = str(prompt or ((st or {}).get("prompt") if isinstance(st, dict) else "") or "").strip()
+        entry["copy_prompt"] = prompt_txt
+        # main_keyboard already renders one 📋 Промпт button off st["prompt"], so DON'T prepend a
+        # second (that produced two prompt buttons that could drift apart). Its own button is the
+        # live one; only fall back to a standalone button (from this finished job's prompt) when the
+        # chat state couldn't be read.
+        menu = main_keyboard(st)
+        if not isinstance(st, dict) and prompt_txt:
+            if len(prompt_txt) <= COPY_TEXT_MAX_LENGTH:
+                prompt_button = InlineKeyboardButton("📋 Промпт", copy_text=CopyTextButton(prompt_txt))
+            else:
+                prompt_button = InlineKeyboardButton("📋 Промпт", callback_data="prompt:show")
+            menu = InlineKeyboardMarkup([[prompt_button], *menu.inline_keyboard])
         try:
-            msg = await bot.send_message(chat_id=chat_id, text="Готово! Выбери режим:", reply_markup=main_keyboard(st))
+            msg = await bot.send_message(
+                chat_id=chat_id,
+                text="Готово! Выбери режим:",
+                reply_markup=menu,
+            )
             entry["menu_message_id"] = msg.message_id
         except Exception:
             log.exception("Failed to send menu to chat %s", chat_id)
@@ -3387,12 +3905,12 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
             log.exception("Voice dub postprocess failed; sending video with original voice")
 
     prompt_text = (meta.get("prompt") or "").strip()
-
-    caption = prompt_text or ""
     info_line = workflow_info_line(meta)
+    caption = info_line[:MAX_CAPTION]
+    mirror_caption = prompt_text
     if info_line:
-        caption = f"{caption}\n\n{info_line}" if caption else info_line
-    caption = caption[:MAX_CAPTION]
+        mirror_caption = f"{mirror_caption}\n\n{info_line}" if mirror_caption else info_line
+    mirror_caption = mirror_caption[:MAX_CAPTION]
 
     input_audio_name = meta.get("input_audio_name")
     if input_audio_name:
@@ -3417,7 +3935,7 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
                 video=InputFile(f, filename=mp4_path.name),
                 caption=caption,
             )
-        await mirror_to_admins(app, meta, mp4_path.read_bytes(), mp4_path.name, caption)
+        await mirror_to_admins(app, meta, mp4_path.read_bytes(), mp4_path.name, mirror_caption)
         await asyncio.to_thread(clear_directory_safe, COMFY_OUTPUT_DIR)
         return
 
@@ -3442,7 +3960,7 @@ async def send_result(app: Application, meta: dict[str, Any], result: dict[str, 
             caption=caption,
         )
 
-    await mirror_to_admins(app, meta, blob, filename, caption)
+    await mirror_to_admins(app, meta, blob, filename, mirror_caption)
 
     await asyncio.to_thread(clear_directory_safe, COMFY_OUTPUT_DIR)
     if is_system_idle():
@@ -3470,7 +3988,20 @@ async def monitor_loop(app: Application) -> None:
                     now = time.time()
                     if now - meta.get("last_status_edit", 0.0) >= STATUS_UPDATE_INTERVAL:
                         meta["last_status_edit"] = now
-                        await update_chat_status(app.bot, meta["chat_id"], job_status_text(meta, started=True))
+                        try:
+                            await asyncio.wait_for(
+                                update_chat_status(
+                                    app.bot,
+                                    meta["chat_id"],
+                                    job_status_text(meta, started=True),
+                                ),
+                                timeout=STATUS_UPDATE_TIMEOUT,
+                            )
+                        except TimeoutError:
+                            log.warning(
+                                "Status update timed out for chat %s; continuing result monitoring",
+                                meta["chat_id"],
+                            )
 
                 try:
                     result = await pick_result_from_history(prompt_id, meta["mode"])
@@ -3502,7 +4033,13 @@ async def monitor_loop(app: Application) -> None:
 
                 if meta.get("batch_index", 1) == meta.get("batch_total", 1):
                     mode_label = MODE_DISPLAY_NAMES.get(meta["mode"], meta["mode"])
-                    await finish_chat_status(app, meta["chat_id"], f"✅ Готово: {mode_label}", show_menu=True)
+                    await finish_chat_status(
+                        app,
+                        meta["chat_id"],
+                        f"✅ Готово: {mode_label}",
+                        show_menu=True,
+                        prompt=meta.get("prompt"),
+                    )
 
             except Exception:
                 log.exception("Monitor error for %s", prompt_id)
@@ -3568,6 +4105,7 @@ async def submit_worker_loop(app: Application) -> None:
 
         job = await GEN_QUEUE.get()
         await maybe_reroll_roulette(app, job)
+        await asyncio.to_thread(unload_ollama_models)
         await update_chat_status(
             app.bot, job.chat_id,
             job_status_text(
@@ -3580,6 +4118,10 @@ async def submit_worker_loop(app: Application) -> None:
                 await submit_video_job(app, job)
             elif job.mode == "video_clean":
                 await submit_video_clean_job(app, job)
+            elif job.mode == "v2v":
+                await submit_v2v_job(app, job)
+            elif job.mode == "remove_people":
+                await submit_remove_people_job(app, job)
             elif job.mode == "ltx_sulphur":
                 await submit_ltx_sulphur_job(app, job)
             elif job.mode == "ltx_eros":
@@ -3783,6 +4325,35 @@ async def video_clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await send_ui_message(update.message, context, "Режим: photo → video (цензурный, WAN 2.2 — держит лицо)", reply_markup=main_keyboard(st))
 
 
+async def v2v_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update, context):
+        return
+    st = get_state(context)
+    st["mode"] = "v2v"
+    st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
+    await send_ui_message(
+        update.message,
+        context,
+        "Режим: video → video edit (VACE 1.3B). Пришли MP4/MOV, затем промт.",
+        reply_markup=main_keyboard(st),
+    )
+
+
+async def remove_people_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update, context):
+        return
+    st = get_state(context)
+    st["mode"] = "remove_people"
+    st["repeat"] = 1
+    st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
+    await send_ui_message(
+        update.message,
+        context,
+        "Режим: удалить всех людей из полного видео (YOLO + ProPainter). Пришли MP4/MOV и нажми Generate.",
+        reply_markup=main_keyboard(st),
+    )
+
+
 async def ltx_sulphur_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update, context):
         return
@@ -3871,6 +4442,20 @@ async def seconds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     st = get_state(context)
+    if st.get("mode") in {"v2v", "remove_people"}:
+        chunk_seconds = (
+            REMOVE_PEOPLE_CHUNK_SECONDS
+            if st.get("mode") == "remove_people"
+            else V2V_CHUNK_SECONDS
+        )
+        label = "Удаление людей" if st.get("mode") == "remove_people" else "V2V"
+        await send_ui_message(
+            update.message,
+            context,
+            f"{label} всегда обрабатывает исходное видео полностью, частями по ≤{chunk_seconds}с.",
+            reply_markup=main_keyboard(st),
+        )
+        return
     if not context.args:
         await send_ui_message(
             update.message,
@@ -3887,6 +4472,7 @@ async def seconds_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     st["seconds"] = clamp_seconds(sec, st["mode"])
+    st["seconds_manual"] = True  # explicit /seconds → honour it for single-block '#'-free videos
     await send_ui_message(
         update.message,
         context,
@@ -3976,6 +4562,73 @@ async def voice_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await send_ui_message(msg, context, "🎙 Получил голос. Что сделать?", reply_markup=keyboard)
 
 
+async def video_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_if_needed(update, context):
+        return
+
+    msg = update.message
+    media = msg.video or msg.document
+    if not media:
+        return
+    original_name = getattr(media, "file_name", None) or "source.mp4"
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+        suffix = ".mp4"
+
+    tg_file = await context.bot.get_file(media.file_id)
+    file_name = f"tg_v2v_{update.effective_user.id}_{uuid.uuid4().hex}{suffix}"
+    path = TMP_DIR / file_name
+    await tg_file.download_to_drive(custom_path=str(path))
+
+    info = await asyncio.to_thread(probe_video, path)
+    if not info["width"] or not info["height"]:
+        path.unlink(missing_ok=True)
+        await send_ui_message(msg, context, "Не удалось определить размер видео.", reply_markup=main_keyboard(get_state(context)))
+        return
+
+    st = get_state(context)
+    upload_mode = st.get("mode") if st.get("mode") in {"v2v", "remove_people"} else "v2v"
+    if upload_mode == "remove_people":
+        fit_w, fit_h = fit_size_keep_aspect(
+            info["width"], info["height"], REMOVE_PEOPLE_MAX_SIDE, multiple=8
+        )
+    else:
+        max_side = V2V_MAX_SIDE.get(st.get("quality"), V2V_MAX_SIDE["medium"])
+        fit_w, fit_h = fit_size_keep_aspect(info["width"], info["height"], max_side)
+    st["source_video"] = {
+        "path": str(path),
+        "name": file_name,
+        "orig_width": info["width"],
+        "orig_height": info["height"],
+        "fit_width": fit_w,
+        "fit_height": fit_h,
+        "duration": info["duration"],
+        "fps": info["fps"],
+    }
+    st["mode"] = upload_mode
+    st["seconds"] = clamp_seconds(st["seconds"], upload_mode)
+    if upload_mode == "v2v" and (msg.caption or "").strip():
+        st["prompt"] = msg.caption.strip()
+    if upload_mode == "remove_people":
+        chunks = max(1, len(remove_people_chunk_ranges(info["duration"])))
+        chunk_seconds = REMOVE_PEOPLE_CHUNK_SECONDS
+        next_step = "Нажми Generate; промт не нужен."
+        mode_label = "удаления людей"
+    else:
+        chunks = max(1, len(v2v_chunk_ranges(info["duration"])))
+        chunk_seconds = V2V_CHUNK_SECONDS
+        next_step = "Промт взят из подписи; можно сразу нажать Generate." if st.get("prompt") else "Теперь пришли промт."
+        mode_label = "V2V"
+    await send_ui_message(
+        msg,
+        context,
+        f"Видео для {mode_label} сохранено: {info['width']}×{info['height']}, {info['duration']:.1f}с "
+        f"→ {fit_w}×{fit_h}. Будет обработано полностью: {chunks} частей по ≤{chunk_seconds}с. "
+        f"{next_step}",
+        reply_markup=main_keyboard(st),
+    )
+
+
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_if_needed(update, context):
         return
@@ -4002,6 +4655,14 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     }
     remember_media(context, media)
 
+    if st["mode"] in {"v2v", "remove_people"}:
+        await send_ui_message(
+            update.message,
+            context,
+            "Для этого режима пришли видеофайл, не фото.",
+            reply_markup=main_keyboard(st),
+        )
+        return
     if st["mode"] in SINGLE_PHOTO_MODES:
         st["video_source"] = media
         await send_ui_message(
@@ -4027,28 +4688,58 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if await reject_if_needed(update, context):
         return
 
-    text = (update.message.text or "").strip()
+    # Works for both new messages AND in-place edits: editing the prompt message (long-press →
+    # «Изменить») re-fires this handler as update.edited_message, so the prompt updates without
+    # re-sending the whole text. effective_message covers both cases.
+    msg = update.effective_message
+    edited = update.edited_message is not None
+    text = (msg.text or "").strip()
     if not text or text.startswith("/"):
         return
 
     st = get_state(context)
 
     st["prompt"] = text
+    tag = "✏️ Промт обновлён (правка на месте)" if edited else "Текст принят как промт"
 
-    # 📖 Story hint: if a >6s video prompt was split into '#' blocks, preview the part count so
-    # the user knows it'll render as a chained story (parts = number of '#'-separated blocks).
-    if st.get("mode") == "video" and int(st.get("seconds") or 0) > VIDEO_NATIVE_MAX_SECONDS and "#" in text:
+    # 📖 Story hint: a '#' in a 🎬 Video prompt makes it a chained multi-part film. The number of
+    # '#'-separated blocks sets the length automatically (parts × chunk) — the user never picks a
+    # duration by hand: 3 parts → 18с, 2 parts → 12с, и т.д.
+    if st.get("mode") == "video":
         parts = [p.strip() for p in text.split("#") if p.strip()]
         chunk = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
+        if len(parts) >= 2:
+            # '#' story → the split drives the length; drop any hand-picked duration.
+            st["seconds"] = len(parts) * chunk
+            st["seconds_manual"] = False
+            await send_ui_message(
+                msg, context,
+                f"📖 {tag}: история из {len(parts)} частей по ~{chunk}с — "
+                f"длина выставлена автоматически на ≈{len(parts) * chunk}с. "
+                f"Жми ▶️ Генерировать.",
+                reply_markup=main_keyboard(st),
+            )
+            return
+        # Single block, no '#'. If the user hand-picked a length, honour it (one continuous clip
+        # at that duration — WAN may loop past ~6s, that's fine). Otherwise default to one native clip.
+        if st.get("seconds_manual"):
+            await send_ui_message(
+                msg, context,
+                f"{tag}: один ролик ~{st['seconds']}с (без «#», длину задал вручную). "
+                f"Больше ~{VIDEO_NATIVE_MAX_SECONDS}с может слегка зацикливаться. Жми ▶️ Генерировать.",
+                reply_markup=main_keyboard(st),
+            )
+            return
+        st["seconds"] = VIDEO_NATIVE_MAX_SECONDS
         await send_ui_message(
-            update.message, context,
-            f"📖 Принято: история из {len(parts)} частей по ~{chunk}с (≈{len(parts) * chunk}с). "
-            f"Жми ▶️ Генерировать.",
+            msg, context,
+            f"{tag}: один ролик ~{VIDEO_NATIVE_MAX_SECONDS}с (без «#»). "
+            f"Для длинной истории раздели промт значком «#», или задай секунды кнопкой ➕2s.",
             reply_markup=main_keyboard(st),
         )
         return
 
-    await send_ui_message(update.message, context, "Текст принят как промт.", reply_markup=main_keyboard(st))
+    await send_ui_message(msg, context, f"{tag}.", reply_markup=main_keyboard(st))
 
 
 async def run_expand_flow(
@@ -4120,14 +4811,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "noop":
         return
 
+    if data == "prompt:show":
+        chat_id = query.message.chat_id
+        # Prefer the LIVE prompt (st) so this never sends a stale/old prompt; the finished-job
+        # snapshot in CHAT_STATUS is only a fallback for when the state was cleared.
+        prompt_txt = str(st.get("prompt") or CHAT_STATUS.get(chat_id, {}).get("copy_prompt") or "").strip()
+        if prompt_txt:
+            safe = prompt_txt.replace("```", "'''")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📝 Текущий промпт:\n```\n{safe}\n```",
+                parse_mode="Markdown",
+            )
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="Промпт пока не задан.")
+        return
+
     if data.startswith("acl:"):
         await handle_acl_callback(update, context, data)
         return
 
     if data.startswith("mode:"):
         st["mode"] = data.split(":", 1)[1]
+        if st["mode"] == "remove_people":
+            st["repeat"] = 1
         st["seconds"] = clamp_seconds(st["seconds"], st["mode"])
-        await replace_ui_message_from_callback(query, context, f"Режим: {st['mode']}", reply_markup=main_keyboard(st))
+        mode_text = (
+            "Режим: удалить всех людей. Пришли видео и нажми Generate; промт не нужен."
+            if st["mode"] == "remove_people"
+            else f"Режим: {st['mode']}"
+        )
+        await replace_ui_message_from_callback(query, context, mode_text, reply_markup=main_keyboard(st))
         return
 
     if data.startswith("quality:"):
@@ -4140,6 +4854,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         delta = data.split(":", 1)[1]
         step = -2 if delta == "-2" else 2
         st["seconds"] = clamp_seconds(st["seconds"] + step, st["mode"])
+        st["seconds_manual"] = True  # user chose the length by hand → honour it for single clips
         await replace_ui_message_from_callback(
             query,
             context,
@@ -4463,9 +5178,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             query,
             context,
             f"📖 Длина куска истории: {nxt}с.\n"
-            f"Когда поставишь секунды >6 и нажмёшь Generate, бот попросит промт на каждую часть "
-            f"(по {nxt}с). Число частей = секунды ÷ {nxt}с. Больше {VIDEO_NATIVE_MAX_SECONDS}с на кусок "
-            f"WAN может слегка зацикливать — если увидишь повтор, вернись на 6с.",
+            f"Пиши один промт, части раздели значком «#» — сколько частей, столько кусков по {nxt}с. "
+            f"Длина считается сама: части × {nxt}с (3 части → {3*nxt}с, 2 → {2*nxt}с). "
+            f"Больше {VIDEO_NATIVE_MAX_SECONDS}с на кусок WAN может слегка зацикливать — "
+            f"если увидишь повтор, вернись на 6с.",
             reply_markup=main_keyboard(st),
         )
         return
@@ -4553,42 +5269,37 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_ui_message(target, context, "📖 История временно отключена — переключил на 🔥 LTX Eros.", reply_markup=main_keyboard(st))
         return
 
-    # 📖 Story: video >6s is a chained multi-part film. Split ONE prompt into parts by '#'
-    # (one block per part). Chunk 1 animates the REAL photo (no redraw); each next part chains
-    # off the previous last frame. No Ollama split, no per-part Q&A. Number of parts = # of blocks.
-    if st.get("mode") == "video" and int(st.get("seconds") or 0) > VIDEO_NATIVE_MAX_SECONDS:
+    # 🎬 Video length is ALWAYS derived from the '#'-separated blocks in the prompt, so it can never
+    # inherit a stale duration from a previous run: ≥2 parts → chained story of parts × chunk;
+    # a single block (no '#') → one native clip (VIDEO_NATIVE_MAX_SECONDS). Chunk 1 animates the REAL
+    # photo (no redraw); each next part chains off the previous last frame.
+    if st.get("mode") == "video":
         prompt = (st.get("prompt") or "").strip()
         chunk = int(st.get("story_chunk") or VIDEO_STORY_CHUNK_SECS)
-        if not prompt:
-            await send_ui_message(
-                target, context,
-                "Сначала задай промт. Для истории (>6с) раздели части значком «#», "
-                "например: «она сосёт член#он кончает ей на лицо#она улыбается в камеру».",
-                reply_markup=main_keyboard(st),
-            )
-            return
-        if not (st.get("video_source") or {}).get("path"):
-            await send_ui_message(target, context, "Для истории (>6с) сначала пришли фото.", reply_markup=main_keyboard(st))
-            return
         parts = [p.strip() for p in prompt.split("#") if p.strip()]
-        if len(parts) < 2:
-            await send_ui_message(
-                target, context,
-                f"📖 Видео {st['seconds']}с — это история из нескольких частей, но в промте нет разделителей «#».\n\n"
-                f"Раздели сюжет значком #, по одному блоку на часть (каждая ~{chunk}с), например:\n"
-                f"«она сосёт член#он кончает ей на лицо#она улыбается в камеру» — 3 части.\n\n"
-                f"Сейчас у тебя только 1 блок — не хватает ещё минимум одной части.",
-                reply_markup=main_keyboard(st),
-            )
+        if len(parts) >= 2:
+            if not (st.get("video_source") or {}).get("path"):
+                await send_ui_message(target, context, "Для истории (части через «#») сначала пришли фото.", reply_markup=main_keyboard(st))
+                return
+            st["seconds"] = len(parts) * chunk
+            st["seconds_manual"] = False
+            await enqueue_story_job(update, context, parts, chunk)
             return
-        await enqueue_story_job(update, context, parts, chunk)
-        return
+        # No '#' → a single continuous clip. Honour a hand-picked length (WAN may loop past ~6s,
+        # which the user accepts); otherwise reset a stale story length back to one native clip.
+        if not st.get("seconds_manual"):
+            st["seconds"] = VIDEO_NATIVE_MAX_SECONDS
 
-    if not st.get("prompt"):
+    if st.get("mode") != "remove_people" and not st.get("prompt"):
         await send_ui_message(target, context, "Сначала задай промт.", reply_markup=main_keyboard(st))
         return
 
-    if st["mode"] in SINGLE_PHOTO_MODES:
+    if st["mode"] in {"v2v", "remove_people"}:
+        if not st["source_video"].get("path"):
+            mode_name = "удаления людей" if st["mode"] == "remove_people" else "V2V"
+            await send_ui_message(target, context, f"Для {mode_name} сначала пришли исходное видео.", reply_markup=main_keyboard(st))
+            return
+    elif st["mode"] in SINGLE_PHOTO_MODES:
         # mopmix can run text-only (txt2img); a photo is optional there (img2img if present).
         if st["mode"] != "mopmix" and not st["video_source"].get("path"):
             await send_ui_message(target, context, f"Для {st['mode']} сначала пришли фото.", reply_markup=main_keyboard(st))
@@ -4604,6 +5315,8 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     repeat = max(1, int(st.get("repeat", 1)))
     # A story is already many clips; never fan it out into repeat×films by accident.
     if st["mode"] == "story":
+        repeat = 1
+    elif st["mode"] == "remove_people":
         repeat = 1
     first_job_id = JOB_SEQ + 1
     last_job_id = first_job_id + repeat - 1
@@ -4636,6 +5349,7 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
             seed=make_seed(),
             video_source=copy.deepcopy(st["video_source"]),
+            source_video=copy.deepcopy(st["source_video"]),
             duo_photos=copy.deepcopy(st["duo_photos"]),
             video_loras=list(st.get("video_loras") or []),
             quality=(st.get("quality") or "medium").strip().lower(),
@@ -4685,6 +5399,7 @@ async def enqueue_story_job(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             video_fps=int(st.get("video_fps") or QUALITY_PRESETS["medium"]["video_fps"]),
             seed=make_seed(),
             video_source=copy.deepcopy(st["video_source"]),
+            source_video=copy.deepcopy(st["source_video"]),
             duo_photos=copy.deepcopy(st["duo_photos"]),
             video_loras=list(st.get("video_loras") or []),
             quality=(st.get("quality") or "medium").strip().lower(),
@@ -4737,6 +5452,52 @@ async def submit_image_job(app: Application, job: Job) -> None:
 STORY_DRIVER_KEYS = {"wan_scene_change", "wan_bg_change", "wan_set_reveal"}
 # Pre-edit the start frame (Qwen) to bake wardrobe + location in before animating; on by default.
 STORY_PRE_EDIT = os.getenv("STORY_PRE_EDIT", "1").strip().lower() not in {"0", "false", "no", "off"}
+# Face-lock: over a long '#'-chain the face drifts (chunk N starts from chunk N-1's last frame, so
+# identity errors compound — "старик" turns into "молодой пацан" after a few cuts). Before each new
+# chunk we ReActor-swap the ORIGINAL first frame's face(s) back onto that chunk's start frame, so the
+# same person is re-anchored at every cut instead of only being described in the prompt. On by default.
+STORY_FACE_LOCK = os.getenv("STORY_FACE_LOCK", "1").strip().lower() not in {"0", "false", "no", "off"}
+STORY_FACELOCK_TIMEOUT = int(os.getenv("STORY_FACELOCK_TIMEOUT", "180"))
+
+
+def build_reactor_swap_workflow(source_image_name: str, target_image_name: str) -> dict[str, Any]:
+    """Minimal ReActor graph: take the face(s) from `source_image_name` and paste them onto
+    `target_image_name`, restoring with GFPGAN. Up to two faces (couples) are routed by position."""
+    return {
+        "1": {"class_type": "LoadImage", "inputs": {"image": target_image_name}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": source_image_name}},
+        "3": {"class_type": "ReActorFaceSwap", "inputs": {
+            "enabled": True,
+            "input_image": ["1", 0],
+            "source_image": ["2", 0],
+            "swap_model": REACTOR_SWAP_MODEL,
+            "facedetection": REACTOR_FACE_DETECTION,
+            "face_restore_model": REACTOR_FACE_RESTORE_MODEL,
+            "face_restore_visibility": 1,
+            "codeformer_weight": 0.5,
+            "detect_gender_input": "no",
+            "detect_gender_source": "no",
+            "input_faces_index": "0,1",
+            "source_faces_index": "0,1",
+            "console_log_level": 1,
+        }},
+        "4": {"class_type": "SaveImage", "inputs": {"images": ["3", 0], "filename_prefix": "story_facelock"}},
+    }
+
+
+async def facelock_chain_frame(source_face_name: str, frame_path: Path, out_path: Path) -> Path:
+    """ReActor-swap the original first frame's face(s) onto a chained start frame. Returns the
+    swapped PNG path (also copied into the Comfy input dir so it's ready to animate). Best-effort:
+    on any failure the original frame_path is returned unchanged so the chain never stalls."""
+    target_name = await asyncio.to_thread(upload_image_to_comfy, str(frame_path), frame_path.name)
+    wf = build_reactor_swap_workflow(source_face_name, target_name)
+    pid = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
+    res = await wait_for_result_from_prompt(pid, preferred_node="4", timeout=STORY_FACELOCK_TIMEOUT)
+    blob = await asyncio.to_thread(fetch_file, res["filename"], res.get("subfolder", ""), res.get("type", "output"))
+    await asyncio.to_thread(delete_comfy_result_file, res["filename"], res.get("subfolder", ""))
+    await asyncio.to_thread(save_bytes, out_path, blob)
+    await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / out_path.name, blob)
+    return out_path
 
 # Rolling log of the last few video generations (prompt, beats, per-chunk loras/seeds, audio, paths)
 # so the bot doesn't spam the chat with scenario/lora details the user can't act on — instead they
@@ -4865,6 +5626,9 @@ async def submit_video_story(app: Application, job: Job) -> None:
     else:
         beats = await asyncio.to_thread(break_story_into_beats, job.prompt, identity, parts)
     current_image_name = await asyncio.to_thread(upload_image_to_comfy, start_path, start_name)
+    # Keep the ORIGINAL start frame as the identity anchor for face-lock: every chained chunk gets
+    # its face(s) re-swapped from THIS frame, so the person doesn't drift over a long story.
+    source_face_name = current_image_name
     try:
         for i in range(parts):
             if chat_id in STORY_CANCEL:
@@ -4933,6 +5697,17 @@ async def submit_video_story(app: Application, job: Job) -> None:
                 # drift over a long story).
                 frame_path = story_dir / f"frame_{i:02d}.png"
                 await asyncio.to_thread(extract_last_frame, raw_path, frame_path)
+                # Re-anchor the face(s) from the original first frame onto this chained start frame
+                # so identity doesn't drift across cuts. Best-effort: if ReActor fails, animate the
+                # raw chained frame as before.
+                if STORY_FACE_LOCK:
+                    try:
+                        await asyncio.to_thread(free_comfy_memory)
+                        locked = story_dir / f"frame_{i:02d}_face.png"
+                        frame_path = await facelock_chain_frame(source_face_name, frame_path, locked)
+                        chunk_log[-1]["face_locked"] = True
+                    except Exception:
+                        log.exception("Story face-lock failed on chunk %d; using the raw chained frame", i)
                 current_image_name = await asyncio.to_thread(upload_image_to_comfy, str(frame_path), frame_path.name)
 
             # Stop this part's live timer and self-tune the per-part average for the next ETA.
@@ -4955,7 +5730,16 @@ async def submit_video_story(app: Application, job: Job) -> None:
         caption_txt = f"🎬 История{take} · {parts}×{chunk_secs}с ≈ {parts * chunk_secs}с"[:MAX_CAPTION]
         await app.bot.send_video(chat_id=chat_id, video=InputFile(io.BytesIO(film), filename=filename), caption=caption_txt)
         await mirror_to_admins(app, {"chat_id": chat_id, "prompt": job.prompt, "mode": "video"}, film, filename, caption_txt)
-        await finish_chat_status(app, chat_id, f"✅ История готова{take} ({parts}×{chunk_secs}с)", show_menu=True)
+        if job.batch_index == job.batch_total:
+            await finish_chat_status(
+                app,
+                chat_id,
+                f"✅ История готова{take} ({parts}×{chunk_secs}с)",
+                show_menu=True,
+                prompt=job.prompt,
+            )
+        else:
+            await delete_chat_status_message(app.bot, chat_id)
         await asyncio.to_thread(log_generation, {
             "mode": "video_story", "chat_id": chat_id, "job_id": job.job_id,
             "prompt": job.prompt, "seconds": job.seconds, "parts": parts,
@@ -4980,9 +5764,11 @@ async def submit_video_job(app: Application, job: Job) -> None:
     if not src or not src.get("path"):
         raise RuntimeError("Для video сначала пришли фото.")
 
-    # >6s → chained WAN story (native 6s chunks) instead of RIFE slow-motion: real new content
-    # each chunk, no boomerang, and the act isn't eaten by the single-clip undress ramp-up.
-    if job.seconds > VIDEO_NATIVE_MAX_SECONDS:
+    # A '#'-split prompt (job.story_prompts set) → chained WAN story (native chunks): real new
+    # content each chunk, no boomerang, and the act isn't eaten by the single-clip undress ramp-up.
+    # A single-block prompt with a hand-picked length stays ONE continuous clip — patch_video_workflow
+    # RIFE-stretches it to the requested duration (per the user: keep the chosen time even if it loops).
+    if job.story_prompts:
         return await submit_video_story(app, job)
 
     wf = await asyncio.to_thread(load_workflow, WORKFLOW_VIDEO)
@@ -5038,6 +5824,262 @@ async def submit_video_job(app: Application, job: Job) -> None:
         "prompt": job.prompt,
         "video_loras": job.video_loras,
     }
+
+
+async def submit_v2v_job(app: Application, job: Job) -> None:
+    src = job.source_video
+    if not src or not src.get("path"):
+        raise RuntimeError("Для V2V сначала пришли исходное видео.")
+
+    source_path = Path(src["path"])
+    duration = float(src.get("duration") or 0)
+    if duration <= 0:
+        duration = float((await asyncio.to_thread(probe_video, source_path))["duration"])
+    if duration <= 0:
+        raise RuntimeError("Не удалось определить длительность исходного видео.")
+
+    await asyncio.to_thread(free_comfy_memory)
+    workflow_prompt = await asyncio.to_thread(translate_to_english, job.prompt)
+    max_side = V2V_MAX_SIDE.get(job.quality, V2V_MAX_SIDE["medium"])
+    width, height = fit_size_keep_aspect(int(src["orig_width"]), int(src["orig_height"]), max_side)
+    chunk_ranges = v2v_chunk_ranges(duration)
+    chunk_count = len(chunk_ranges)
+    workdir = TMP_DIR / f"v2v_{job.job_id}_{uuid.uuid4().hex[:8]}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    segments: list[Path] = []
+    STORY_CANCEL.discard(job.chat_id)
+
+    try:
+        for index, (start, chunk_duration) in enumerate(chunk_ranges):
+            if job.chat_id in STORY_CANCEL:
+                await finish_chat_status(
+                    app, job.chat_id,
+                    f"⛔ V2V остановлен на части {index + 1}/{chunk_count}.",
+                    show_menu=True,
+                )
+                return
+
+            await update_chat_status(
+                app.bot,
+                job.chat_id,
+                f"🎞 V2V: часть {index + 1}/{chunk_count} · "
+                f"{start:.0f}–{start + chunk_duration:.0f}с",
+            )
+
+            chunk_input = workdir / f"input_{index:04d}.mp4"
+            await asyncio.to_thread(
+                extract_v2v_chunk,
+                source_path,
+                chunk_input,
+                start_seconds=start,
+                duration=chunk_duration,
+                width=width,
+                height=height,
+            )
+            uploaded_name = await asyncio.to_thread(
+                upload_image_to_comfy, str(chunk_input), chunk_input.name
+            )
+            workflow = build_v2v_workflow(
+                video_name=uploaded_name,
+                prompt=workflow_prompt,
+                width=width,
+                height=height,
+                seconds=chunk_duration,
+                seed=job.seed,
+            )
+            prompt_id = await asyncio.to_thread(queue_prompt, workflow, str(uuid.uuid4()))
+            result = await wait_for_result_from_prompt(
+                prompt_id,
+                preferred_node="11",
+                timeout=STORY_SEGMENT_TIMEOUT,
+            )
+            blob = await asyncio.to_thread(
+                fetch_file,
+                result["filename"],
+                result.get("subfolder", ""),
+                result.get("type", "output"),
+            )
+            await asyncio.to_thread(
+                delete_comfy_result_file,
+                result["filename"],
+                result.get("subfolder", ""),
+            )
+            segment_path = workdir / f"segment_{index:04d}.mp4"
+            await asyncio.to_thread(save_bytes, segment_path, blob)
+            segments.append(segment_path)
+            try:
+                (COMFY_INPUT_DIR / uploaded_name).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        await update_chat_status(app.bot, job.chat_id, "🎞 V2V: склеиваю полное видео и возвращаю звук…")
+        joined_path = workdir / "joined.mp4"
+        final_path = workdir / "v2v_full.mp4"
+        await asyncio.to_thread(concat_story_segments, segments, joined_path, workdir)
+        await asyncio.to_thread(finalize_v2v_video, joined_path, source_path, final_path, duration)
+
+        caption = (
+            f"{job.prompt}\n\nV2V Edit · {duration:.1f}с · "
+            f"{chunk_count}×≤{V2V_CHUNK_SECONDS}с · {job.quality}"
+        )[:MAX_CAPTION]
+        with final_path.open("rb") as f:
+            await app.bot.send_video(
+                chat_id=job.chat_id,
+                video=InputFile(f, filename="v2v_full.mp4"),
+                caption=caption,
+            )
+        final_blob = await asyncio.to_thread(final_path.read_bytes)
+        await mirror_to_admins(
+            app,
+            {"chat_id": job.chat_id, "prompt": job.prompt, "mode": "v2v"},
+            final_blob,
+            "v2v_full.mp4",
+            caption,
+        )
+        await finish_chat_status(
+            app,
+            job.chat_id,
+            f"✅ V2V готов полностью: {duration:.1f}с ({chunk_count} частей)",
+            show_menu=True,
+        )
+    finally:
+        STORY_CANCEL.discard(job.chat_id)
+        await asyncio.to_thread(shutil.rmtree, workdir, True)
+
+
+async def submit_remove_people_job(app: Application, job: Job) -> None:
+    src = job.source_video
+    if not src or not src.get("path"):
+        raise RuntimeError("Для удаления людей сначала пришли исходное видео.")
+
+    source_path = Path(src["path"])
+    duration = float(src.get("duration") or 0)
+    if duration <= 0:
+        duration = float((await asyncio.to_thread(probe_video, source_path))["duration"])
+    if duration <= 0:
+        raise RuntimeError("Не удалось определить длительность исходного видео.")
+
+    source_fps = float(src.get("fps") or 30.0)
+    fps = max(1.0, min(REMOVE_PEOPLE_MAX_FPS, source_fps))
+    width, height = fit_size_keep_aspect(
+        int(src["orig_width"]),
+        int(src["orig_height"]),
+        REMOVE_PEOPLE_MAX_SIDE,
+        multiple=8,
+    )
+    chunk_ranges = remove_people_chunk_ranges(duration)
+    chunk_count = len(chunk_ranges)
+    workdir = TMP_DIR / f"remove_people_{job.job_id}_{uuid.uuid4().hex[:8]}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    segments: list[Path] = []
+    STORY_CANCEL.discard(job.chat_id)
+
+    await asyncio.to_thread(free_comfy_memory)
+    try:
+        for index, (start, chunk_duration) in enumerate(chunk_ranges):
+            if job.chat_id in STORY_CANCEL:
+                await finish_chat_status(
+                    app,
+                    job.chat_id,
+                    f"⛔ Удаление людей остановлено на части {index + 1}/{chunk_count}.",
+                    show_menu=True,
+                )
+                return
+
+            await update_chat_status(
+                app.bot,
+                job.chat_id,
+                f"🧹 Удаляю людей: часть {index + 1}/{chunk_count} · "
+                f"{start:.0f}–{start + chunk_duration:.0f}с",
+            )
+            chunk_input = workdir / f"input_{index:04d}.mp4"
+            await asyncio.to_thread(
+                extract_remove_people_chunk,
+                source_path,
+                chunk_input,
+                start_seconds=start,
+                duration=chunk_duration,
+                width=width,
+                height=height,
+                fps=fps,
+            )
+            uploaded_name = await asyncio.to_thread(
+                upload_image_to_comfy, str(chunk_input), chunk_input.name
+            )
+            workflow = build_remove_people_workflow(
+                video_name=uploaded_name,
+                width=width,
+                height=height,
+                seconds=chunk_duration,
+                fps=fps,
+            )
+            prompt_id = await asyncio.to_thread(queue_prompt, workflow, str(uuid.uuid4()))
+            result = await wait_for_result_from_prompt(
+                prompt_id,
+                preferred_node="6",
+                timeout=REMOVE_PEOPLE_TIMEOUT,
+            )
+            blob = await asyncio.to_thread(
+                fetch_file,
+                result["filename"],
+                result.get("subfolder", ""),
+                result.get("type", "output"),
+            )
+            await asyncio.to_thread(
+                delete_comfy_result_file,
+                result["filename"],
+                result.get("subfolder", ""),
+            )
+            segment_path = workdir / f"segment_{index:04d}.mp4"
+            await asyncio.to_thread(save_bytes, segment_path, blob)
+            segments.append(segment_path)
+            try:
+                (COMFY_INPUT_DIR / uploaded_name).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        await update_chat_status(
+            app.bot,
+            job.chat_id,
+            "🧹 Склеиваю полное видео и возвращаю исходный звук…",
+        )
+        joined_path = workdir / "joined.mp4"
+        final_path = workdir / "remove_people_full.mp4"
+        await asyncio.to_thread(concat_story_segments, segments, joined_path, workdir)
+        await asyncio.to_thread(
+            finalize_remove_people_video,
+            joined_path,
+            source_path,
+            final_path,
+        )
+
+        caption = (
+            f"Люди удалены · ProPainter · {duration:.1f}с · "
+            f"{chunk_count}×≤{REMOVE_PEOPLE_CHUNK_SECONDS}с · {width}×{height} · {fps:.2f} fps"
+        )[:MAX_CAPTION]
+        with final_path.open("rb") as f:
+            await app.bot.send_video(
+                chat_id=job.chat_id,
+                video=InputFile(f, filename="remove_people_full.mp4"),
+                caption=caption,
+            )
+        final_blob = await asyncio.to_thread(final_path.read_bytes)
+        await mirror_to_admins(
+            app,
+            {"chat_id": job.chat_id, "prompt": "remove all people", "mode": "remove_people"},
+            final_blob,
+            "remove_people_full.mp4",
+            caption,
+        )
+        await finish_chat_status(
+            app,
+            job.chat_id,
+            f"✅ Люди удалены из полного видео: {duration:.1f}с ({chunk_count} частей)",
+            show_menu=True,
+        )
+    finally:
+        STORY_CANCEL.discard(job.chat_id)
+        await asyncio.to_thread(shutil.rmtree, workdir, True)
 
 
 async def submit_video_clean_job(app: Application, job: Job) -> None:
@@ -5339,7 +6381,16 @@ async def submit_story_job(app: Application, job: Job) -> None:
             {"chat_id": chat_id, "prompt": job.prompt, "mode": "story"},
             film, "story.mp4", caption_txt,
         )
-        await finish_chat_status(app, chat_id, f"✅ История готова ({parts} сцен)", show_menu=True)
+        if job.batch_index == job.batch_total:
+            await finish_chat_status(
+                app,
+                chat_id,
+                f"✅ История готова ({parts} сцен)",
+                show_menu=True,
+                prompt=job.prompt,
+            )
+        else:
+            await delete_chat_status_message(app.bot, chat_id)
     finally:
         STORY_CANCEL.discard(chat_id)
         await asyncio.to_thread(shutil.rmtree, story_dir, True)
@@ -5511,10 +6562,21 @@ async def cleanup_loop(app: Application) -> None:
 
 
 async def post_init(app: Application) -> None:
-    asyncio.create_task(submit_worker_loop(app))
-    asyncio.create_task(monitor_loop(app))
-    asyncio.create_task(cleanup_loop(app))
+    global BACKGROUND_TASKS
+    BACKGROUND_TASKS = {
+        asyncio.create_task(submit_worker_loop(app), name="submit-worker"),
+        asyncio.create_task(monitor_loop(app), name="result-monitor"),
+        asyncio.create_task(cleanup_loop(app), name="cleanup-loop"),
+    }
     log.info("Bot initialized")
+
+
+async def post_shutdown(app: Application) -> None:
+    for task in BACKGROUND_TASKS:
+        task.cancel()
+    if BACKGROUND_TASKS:
+        await asyncio.gather(*BACKGROUND_TASKS, return_exceptions=True)
+    BACKGROUND_TASKS.clear()
 
 
 # ============================================================
@@ -5543,6 +6605,7 @@ def main() -> None:
         .concurrent_updates(True)
         .persistence(persistence)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
@@ -5559,6 +6622,8 @@ def main() -> None:
 
     app.add_handler(CommandHandler("video", video_cmd))
     app.add_handler(CommandHandler("videoclean", video_clean_cmd))
+    app.add_handler(CommandHandler("v2v", v2v_cmd))
+    app.add_handler(CommandHandler("removepeople", remove_people_cmd))
     app.add_handler(CommandHandler("ltxsulphur", ltx_sulphur_cmd))
     app.add_handler(CommandHandler("ltxeros", ltx_eros_cmd))
     app.add_handler(CommandHandler("image", image_cmd))
@@ -5575,6 +6640,7 @@ def main() -> None:
     app.add_handler(CommandHandler("go", go_cmd))
 
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, video_upload_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))

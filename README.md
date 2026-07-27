@@ -14,6 +14,8 @@ Telegram-бот, который ставит задачи в очередь к C
 |-----------------|-----------------------------|----------------------------------|
 | `video`         | `workflow_video.json`       | WAN 2.2 I2V NSFW (GGUF) + MMAudio NSFW |
 | `video_clean` (Clean Video) | `workflow_video.json` (тот же граф, патчится в коде) | Авто-конвейер: Ollama (чистый сценарий) → Qwen-Edit (clean) → сток WAN 2.2 I2V → чистый MMAudio |
+| `v2v` (V2V Edit) | собирается в коде (`build_v2v_workflow`) | VACE-Wan 2.1 1.3B: редактирование исходного видео по промту |
+| `remove_people` | собирается в коде (`build_remove_people_workflow`) | YOLO person segmentation + ProPainter video inpainting |
 | `ltx_sulphur`   | `LTX2.3_2.json`              | LTX-2.3 Sulphur (видео+аудио)    |
 | `ltx_eros`      | `workflow_ltx_eros.json`     | LTX-2.3 10Eros (видео+аудио)     |
 | `image` (Edit Photo) | собирается в коде (`build_image_edit_workflow`) | Qwen-Image-Edit-2509 |
@@ -57,6 +59,7 @@ git clone https://github.com/kijai/ComfyUI-PromptRelay.git
 git clone https://github.com/whatdreamscost/whatdreamscost-comfyui.git
 git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack comfyui-impact-pack
 git clone https://github.com/ltdrdata/ComfyUI-Impact-Subpack comfyui-impact-subpack
+git clone https://github.com/daniabib/ComfyUI_ProPainter_Nodes.git
 git clone https://github.com/Gourieff/ComfyUI-ReActor.git
 git clone https://github.com/vrgamegirl19/comfyui-vrgamedevgirl
 git clone https://github.com/kijai/ComfyUI-Florence2 comfyui-florence2
@@ -92,6 +95,37 @@ git clone https://github.com/lrzjason/Comfyui-QwenEditUtils qweneditutils
 - CLIP/VAE — те же, что у `video` (берутся из воркфлоу как есть).
 - Звук: `mmaudio_large_44k_v2_fp16.safetensors` (чистый сток MMAudio, в `models/mmaudio/`) — **https://huggingface.co/Kijai/MMAudio_safetensors**. `video_clean` входит в `SILENT_VIDEO_MODES`, но `video_audio_model_for_mode()`/`video_audio_negative_for_mode()` дают ему именно эту чистую модель и «чистый» audio-негатив (вместо NSFW-Foley `nsfw_gold`, который остаётся у режима `video`). VAE/synchformer/CLIP для MMAudio общие с режимом `video`. Меняется через env `VIDEO_CLEAN_AUDIO_MODEL` / `VIDEO_CLEAN_AUDIO_NEGATIVE`.
 - `sigma_shift` для clean форсится в `5.0` (`VIDEO_CLEAN_SIGMA_SHIFT`), а не 8 как у NSFW-базы: сток-эксперты + внешний Lightx2v-дистилл при shift=8 не дорешают латент и кадр рассыпается в «пыль/туман». NSFW-база — fast-финтюн, заточенный под 8, поэтому у `video` shift не трогаем.
+
+### `v2v` (VACE video-to-video)
+
+Принимает MP4/MOV/WebM через Telegram (подпись к файлу можно использовать как промт),
+сохраняет движение и исходную аудиодорожку, а
+визуальную часть меняет по текстовому промту. Видео обрабатывается полностью: бот режет
+его на VACE-проходы по 5 секунд, последовательно рендерит, склеивает и возвращает исходный
+звук. Размер прохода меняется через `V2V_CHUNK_SECONDS`. Разрешения L/M/H: до
+480/576/704 px по длинной стороне.
+
+- `Wan2_1-T2V-1_3B_fp8_e4m3fn.safetensors` → `models/diffusion_models/`
+- `Wan2_1-VACE_module_1_3B_bf16.safetensors` → `models/diffusion_models/`
+- Использует уже установленные `Wan2_1_VAE_bf16.safetensors` и `umt5-xxl-enc-bf16.safetensors`.
+- Настройки: `V2V_STEPS=20`, `V2V_CFG=4`, `V2V_SHIFT=8`, `V2V_FPS=16`.
+- Источники: https://github.com/ali-vilab/VACE и https://github.com/kijai/ComfyUI-WanVideoWrapper
+
+### `remove_people` (автоматическое удаление людей)
+
+Принимает видео без промта. `person_yolov8m-seg.pt` создаёт маски людей на всех кадрах,
+Impact Pack объединяет соседние маски, а ProPainter восстанавливает фон с временной
+согласованностью. Бот обрабатывает полное видео частями по 10 секунд, склеивает их и
+возвращает исходный звук. Кнопка: `🧹 Удалить людей`, команда: `/removepeople`.
+
+- Custom node: https://github.com/daniabib/ComfyUI_ProPainter_Nodes
+- Детектор: `models/ultralytics/segm/person_yolov8m-seg.pt`
+- Веса `raft-things.pth`, `recurrent_flow_completion.pth`, `ProPainter.pth` автоматически
+  скачиваются в `ComfyUI_ProPainter_Nodes/weights/` при первом запуске.
+- Используется исходный FPS без прореживания кадров; разрешение сохраняется до 1024 px
+  по длинной стороне (техническое округление до кратности 8). Env:
+  `REMOVE_PEOPLE_MAX_FPS`, `REMOVE_PEOPLE_CHUNK_SECONDS`, `REMOVE_PEOPLE_MODEL`,
+  `REMOVE_PEOPLE_TIMEOUT`.
 
 #### «Умная» кнопка: авто-конвейер `submit_video_clean_job`
 Clean Video — не просто анимация фото, а цепочка из трёх локальных моделей (фото + идея → готовый ролик, без доп. кнопок). Каждая стадия при ошибке деградирует к предыдущей (генерация не падает):
