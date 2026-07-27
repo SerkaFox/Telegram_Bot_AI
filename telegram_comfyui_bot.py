@@ -5461,27 +5461,35 @@ STORY_FACELOCK_TIMEOUT = int(os.getenv("STORY_FACELOCK_TIMEOUT", "180"))
 
 
 def build_reactor_swap_workflow(source_image_name: str, target_image_name: str) -> dict[str, Any]:
-    """Minimal ReActor graph: take the face(s) from `source_image_name` and paste them onto
-    `target_image_name`, restoring with GFPGAN. Up to two faces (couples) are routed by position."""
-    return {
-        "1": {"class_type": "LoadImage", "inputs": {"image": target_image_name}},
-        "2": {"class_type": "LoadImage", "inputs": {"image": source_image_name}},
-        "3": {"class_type": "ReActorFaceSwap", "inputs": {
+    """ReActor graph that re-anchors face(s) from `source_image_name` onto `target_image_name`,
+    restoring with GFPGAN.
+
+    TWO gender-pinned passes (female→female, then male→male on top) instead of one positional
+    swap: with a couple in frame, index 0/1 is ordered left-to-right by the detector and flips
+    seed-to-seed, so the man's face used to land on the woman. detect_gender pins each swap to the
+    matching person; on a single-person frame the other gender simply finds no face and is a no-op."""
+    def _swap(node_in: list[Any], gender: str) -> dict[str, Any]:
+        return {"class_type": "ReActorFaceSwap", "inputs": {
             "enabled": True,
-            "input_image": ["1", 0],
+            "input_image": node_in,
             "source_image": ["2", 0],
             "swap_model": REACTOR_SWAP_MODEL,
             "facedetection": REACTOR_FACE_DETECTION,
             "face_restore_model": REACTOR_FACE_RESTORE_MODEL,
             "face_restore_visibility": 1,
             "codeformer_weight": 0.5,
-            "detect_gender_input": "no",
-            "detect_gender_source": "no",
-            "input_faces_index": "0,1",
-            "source_faces_index": "0,1",
+            "detect_gender_input": gender,
+            "detect_gender_source": gender,
+            "input_faces_index": "0",
+            "source_faces_index": "0",
             "console_log_level": 1,
-        }},
-        "4": {"class_type": "SaveImage", "inputs": {"images": ["3", 0], "filename_prefix": "story_facelock"}},
+        }}
+    return {
+        "1": {"class_type": "LoadImage", "inputs": {"image": target_image_name}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": source_image_name}},
+        "3": _swap(["1", 0], "female"),   # woman's face → woman
+        "5": _swap(["3", 0], "male"),     # man's face → man, on top of pass 1
+        "4": {"class_type": "SaveImage", "inputs": {"images": ["5", 0], "filename_prefix": "story_facelock"}},
     }
 
 
