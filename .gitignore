@@ -29,7 +29,8 @@ bot_state.pkl
 allowlist.json
 # Personal audio sample
 tati.mp3
-# Scratch experiment scripts (contain a hardcoded bot token — never commit)
+# Scratch experiment scripts + outputs (hardcoded bot token, PII, explicit test images — never commit)
+tools/
 animate_scene.py
 doggy_pipeline.py
 newlora_test.py

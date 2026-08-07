@@ -140,9 +140,41 @@ PONY_FURRY_CFG = float(os.getenv("PONY_FURRY_CFG", "7.0"))
 # img2img strength for mopmix: 0 keeps the uploaded photo untouched, 1 regenerates it
 # from scratch. 0.6 redraws per the prompt while keeping the photo's pose/composition.
 MOPMIX_DENOISE = float(os.getenv("MOPMIX_DENOISE", "0.6"))
-# Duo's starting image is a rough side-by-side composite of two unrelated photos, not one
-# coherent photo, so it needs more repainting than single-photo MopMix to merge into one scene.
-MOPMIX_DUO_DENOISE = float(os.getenv("MOPMIX_DUO_DENOISE", "0.85"))
+# Duo's starting image is a side-by-side composite of two photos. In Duo, BODY (height/build/hair/
+# clothing) comes ONLY from this composite surviving img2img — ReActor below swaps FACES only, never
+# the body. At 0.85 denoise SDXL repainted the whole body from scratch (skewing toward its generic
+# young/athletic bias → "ниже ростом, потеряла формы"), so keep the denoise low enough that the real
+# proportions survive. 0.6 still blends the two into one scene but keeps each person's build.
+MOPMIX_DUO_DENOISE = float(os.getenv("MOPMIX_DUO_DENOISE", "0.6"))
+# Duo generates LANDSCAPE to match the side-by-side composite's aspect. The old graph forced a
+# PORTRAIT 1152x1536 latent while the composite was landscape ~2150x1536, so ImageResizeKJv2's
+# center-crop threw away ~500px off each side — it chopped the OUTER half of each body, and img2img
+# then reinvented the missing half at the wrong height/build. Matching aspects makes that crop a
+# no-op so both full bodies reach the sampler.
+MOPMIX_DUO_WIDTH = int(os.getenv("MOPMIX_DUO_WIDTH", "1216"))
+MOPMIX_DUO_HEIGHT = int(os.getenv("MOPMIX_DUO_HEIGHT", "832"))
+# GFPGAN restore visibility on the two face swaps. inswapper_128 is only 128px; GFPGAN at full 1.0
+# over-smooths the tiny swapped face toward a generic look ("не я"). ~0.7 keeps more real likeness.
+MOPMIX_DUO_FACE_RESTORE_VIS = float(os.getenv("MOPMIX_DUO_FACE_RESTORE_VIS", "0.7"))
+# MopMix Duo is now Qwen-Image-Edit-2509 with TWO reference photos (image1+image2): it composes one
+# scene while preserving each real identity/figure, far better than the old SDXL composite+ReActor.
+# For explicit requests an NSFW "Unchained-XXX" lora (Civitai 2163063, needs CFG≈4, no lightning) is
+# stacked in front of the female-nudity lora; a soft female-nudity strength keeps her clothing on so
+# she isn't stripped fully. A final in-graph ReActor pass stamps the real faces back.
+DUO_XXX_LORA = os.getenv("DUO_XXX_LORA", "Unchained-XXX.safetensors")
+DUO_XXX_STRENGTH = float(os.getenv("DUO_XXX_STRENGTH", "0.7"))
+DUO_NUDE_STRENGTH = float(os.getenv("DUO_NUDE_STRENGTH", "0.45"))
+DUO_XXX_CFG = float(os.getenv("DUO_XXX_CFG", "4"))
+DUO_XXX_STEPS = int(os.getenv("DUO_XXX_STEPS", "20"))
+# Explicit-intent detector: switches Duo between the soft lightning path and the Unchained-XXX path.
+DUO_EXPLICIT_RE = re.compile(
+    r"(секс|трах|ебат|ебл|минет|сос[её]т|раком|порн|голая|голый|обнаж|киск|пизд|член|хуй|сперм|"
+    r"конч|penetrat|fuck|blowjob|pussy|cock|penis|cum\b|nude|naked|\bsex\b|nsfw|riding|doggy|"
+    r"missionary|cowgirl|anal|hardcore)", re.IGNORECASE)
+
+
+def duo_prompt_is_explicit(text: str) -> bool:
+    return bool(DUO_EXPLICIT_RE.search(text or ""))
 
 # LTX Eros (workflow_ltx_eros.json) target generation resolution per quality level
 # (width, height fed to the MultiImageLoader; portrait orientation by default).
@@ -296,6 +328,16 @@ OLLAMA_DIALOGUE_SYSTEM_PROMPT = (
 # finish). Cum loras are grouped so only one is ever chosen.
 CUM_LORA_KEYS = {"eros_joyshot", "eros_facials", "eros_epic_cum", "eros_creampie", "eros_cumsplash",
                  "wan_cumshot", "wan_facial"}
+# Full-body POSITION loras — mutually exclusive: two stacked on one scene/part blend into an
+# impossible in-between pose ("между миссионеркой и наездницей"). The picker prompt already says
+# "не совмещай две позы", but the CPU 32B doesn't always obey, so we cap it to ONE per part in code
+# (same guarantee as cum loras). Per-part in the story chain each # part is picked independently, so
+# each part still gets its own single pose.
+POSE_LORA_KEYS = {
+    "wan_missionary", "wan_doggy", "wan_revcowgirl", "wan_standing", "wan_spoon",
+    "wan_cowgirl", "wan_anal", "wan_dp", "wan_atm",
+    "eros_riding", "eros_doggy", "eros_anal", "eros_takerpov",
+}
 OLLAMA_LORA_SYSTEM_PROMPT = (
     "Ты подбираешь видео-лоры (LoRA) для эротической видео-сцены по её описанию. "
     "Доступные лоры (ключ: назначение):\n{catalog}\n\n"
@@ -464,12 +506,16 @@ def video_model_cfg(key: str | None) -> dict[str, Any]:
 # it loop/boomerang (replay the arc or repeat). So we cap the GENERATED length here and, when the
 # user asks for longer, RIFE-interpolate the native clip up to the requested duration (smooth
 # slow-motion, one continuous arc, no boomerang). Clean video mode is left untouched.
-VIDEO_NATIVE_MAX_SECONDS = int(os.getenv("VIDEO_NATIVE_MAX_SECONDS", "6"))
+VIDEO_NATIVE_MAX_SECONDS = int(os.getenv("VIDEO_NATIVE_MAX_SECONDS", "8"))
 # 📖 Story (video >6s): length of EACH chained chunk. The user drives the story by typing one prompt
 # per part, so we don't Ollama-split; each part is this many seconds. Selectable 6/8/10 via 🎬 button.
 VIDEO_STORY_CHUNK_SECS = int(os.getenv("VIDEO_STORY_CHUNK_SECS", "8"))
 VIDEO_STORY_CHUNK_CHOICES = [6, 8, 10]
 VIDEO_RIFE_CKPT = os.getenv("VIDEO_RIFE_CKPT", "rife49.pth")
+# 🪶 Smoothness DISABLED (default 1): RIFE frame-interpolation warped faces and fused bodies into
+# clothing, so we no longer interpolate for smoothness. RIFE is still used only for slow-mo STRETCH
+# of legacy single clips. Set >1 to re-enable interpolation smoothing (not recommended).
+VIDEO_SMOOTH_MULT = int(os.getenv("VIDEO_SMOOTH_MULT", "1"))
 # SageAttention mode (KJNodes PathchSageAttentionKJ): "auto" picks the best kernel for the GPU.
 VIDEO_SAGE_MODE = os.getenv("VIDEO_SAGE_MODE", "auto")
 VIDEO_FP16_ACCUM = os.getenv("VIDEO_FP16_ACCUM", "1") == "1"
@@ -675,6 +721,12 @@ class Job:
     story_prompts: list[str] = field(default_factory=list)
     # 📖 Story: seconds per chained chunk (0 → VIDEO_NATIVE_MAX_SECONDS)
     story_chunk_secs: int = 0
+    # 🎯 Chain face-lock. OFF by default: each next chunk simply CONTINUES from the previous last
+    # frame — at 8s WAN boomerangs back to a clean frontal face, so identity carries naturally. ON
+    # re-stamps the ORIGINAL face onto every chained frame via ReActor; on angled/mid-motion faces
+    # that looks redrawn/distorted (inswapper_128 → 128px paste + GFPGAN), so only enable it if the
+    # face actually drifts over a long chain.
+    face_lock: bool = False
 
 
 # ============================================================
@@ -765,10 +817,12 @@ def fit_to_pixel_budget(src_width: int, src_height: int, target_pixels: int, mul
     return max(multiple, w), max(multiple, h)
 
 
-def build_duo_composite(path_a: str, path_b: str, *, height: int = 1536, half_width: int = 1075) -> Image.Image:
+def build_duo_composite(path_a: str, path_b: str, *, height: int = MOPMIX_DUO_HEIGHT, half_width: int = MOPMIX_DUO_WIDTH // 2) -> Image.Image:
     """Side-by-side composite of two source photos, used as the img2img starting latent for
     MopMix Duo so body/hair/age/clothing come from the real photos instead of being imagined
-    by the model from scratch (which a pure txt2img + final face-swap can't fix)."""
+    by the model from scratch (which a pure txt2img + final face-swap can't fix). Sized so the
+    composite's aspect equals the Duo latent (MOPMIX_DUO_WIDTH x MOPMIX_DUO_HEIGHT) — otherwise the
+    graph's center-crop resize chops the outer half of each body before the sampler ever sees it."""
     canvas = Image.new("RGB", (half_width * 2, height))
     for i, path in enumerate((path_a, path_b)):
         with Image.open(path) as im:
@@ -776,6 +830,47 @@ def build_duo_composite(path_a: str, path_b: str, *, height: int = 1536, half_wi
             fitted = ImageOps.fit(im, (half_width, height), method=Image.LANCZOS, centering=(0.5, 0.3))
         canvas.paste(fitted, (i * half_width, 0))
     return canvas
+
+
+def build_duo_prompt(translated: str, caption_a: str, caption_b: str,
+                     gender_a: str, gender_b: str) -> str:
+    """Assemble the MopMix Duo positive prompt. The SDXL bigASP checkpoint is strongly female-biased,
+    so when person A is a man — often just a head-and-shoulders selfie with no body in the composite
+    for img2img to preserve — it renders him as another woman, and the male-gated face swap then
+    finds no male target and silently skips (→ "женщина в моей рубашке, не я"). Leading with explicit
+    booru gender tags ("1boy and 1girl", which bigASP responds to) plus gendered appearance labels
+    forces the correct sex for each side so a male body is actually invented and his face can land."""
+    def who(g: str) -> tuple[str, str, str]:
+        # weight the male tag up — the checkpoint's default pull is female, so an unweighted "1boy"
+        # loses on many seeds and the left person comes out as a woman in his shirt
+        if g == "male":
+            return "(1boy:1.3)", "The man", "man"
+        if g == "female":
+            return "1girl", "The woman", "woman"
+        return "1person", "The person", "person"
+    tag_a, label_a, sex_a = who(gender_a)
+    tag_b, label_b, sex_b = who(gender_b)
+    parts = [
+        f"{tag_a} and {tag_b}",
+        f"a {sex_a} on the left and a {sex_b} on the right, two people together in one scene",
+        translated.strip(" ."),
+    ]
+    if caption_a:
+        parts.append(f"{label_a} on the left ({tag_a}), match exactly: {caption_a}")
+    if caption_b:
+        parts.append(f"{label_b} on the right ({tag_b}), match exactly: {caption_b}")
+    return ". ".join(p for p in parts if p)
+
+
+def duo_negative_suppression(gender_a: str, gender_b: str) -> str:
+    """Extra negative tags to stop the female-biased checkpoint from collapsing a mixed couple into
+    two women (or, rarely, two men). Empty when genders are unknown/identical."""
+    pair = {gender_a, gender_b}
+    if pair == {"male", "female"}:
+        return "2girls, two women, both female, 2boys, two men, both male"
+    if pair == {"male"}:
+        return "woman, female, 1girl"
+    return ""
 
 
 def save_bytes(path: Path, blob: bytes) -> None:
@@ -1018,7 +1113,9 @@ def normalize_story_segment(raw_path: Path, out_path: Path, width: int, height: 
     """Re-encode a story clip to canonical H.264/yuv420p at fixed size+fps WITH an AAC audio track
     (real if present, else silent), so every segment is byte-compatible for concat -c copy. LTX Eros
     voices natively, so keeping the real audio preserves the per-scene dialogue in the final film."""
-    common_v = ["-vf", f"scale={int(width)}:{int(height)},fps={int(fps)}",
+    # fps<=0 → keep the source fps (preserve RIFE-smoothed 32fps chunks instead of snapping to 16).
+    vf = f"scale={int(width)}:{int(height)}" + (f",fps={int(fps)}" if int(fps) > 0 else "")
+    common_v = ["-vf", vf,
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast"]
     if _segment_has_audio(raw_path):
         run_cmd(["ffmpeg", "-y", "-i", str(raw_path), *common_v,
@@ -1479,6 +1576,9 @@ def initial_state() -> dict[str, Any]:
         "story_chunk": VIDEO_STORY_CHUNK_SECS,
         "auto_dialogue": False,
         "auto_lora": False,
+        # 🎯 Chain face-lock: re-stamp the original face on each chained frame. OFF → natural
+        # continuation from the last frame (see Job.face_lock).
+        "face_lock": False,
         # True once the user picks a duration by hand (➖/➕2s or /seconds). A single-block (no '#')
         # 🎬 Video then honours that length instead of snapping back to VIDEO_NATIVE_MAX_SECONDS.
         "seconds_manual": False,
@@ -1511,6 +1611,8 @@ def get_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
         st["auto_dialogue"] = False
     if "auto_lora" not in st:
         st["auto_lora"] = False
+    if "face_lock" not in st:
+        st["face_lock"] = False
     if "seconds_manual" not in st:
         st["seconds_manual"] = False
     if "dub_voice" not in st:
@@ -1659,25 +1761,91 @@ async def replace_ui_message_from_callback(query, context: ContextTypes.DEFAULT_
 # ============================================================
 # UI
 # ============================================================
-def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+def _prompt_button(st: dict[str, Any] | None) -> InlineKeyboardButton:
+    prompt_txt = str((st or {}).get("prompt") or "").strip()
+    if prompt_txt and len(prompt_txt) <= COPY_TEXT_MAX_LENGTH:
+        return InlineKeyboardButton("📋 Промпт", copy_text=CopyTextButton(prompt_txt))
+    return InlineKeyboardButton("📋 Промпт", callback_data="prompt:show")
+
+
+def video_menu_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    """🎬 Под-меню видео-режимов (было россыпью на главном экране)."""
+    rows = [
+        [
+            InlineKeyboardButton("🎬 Video", callback_data="mode:video"),
+            InlineKeyboardButton("🌸 Clean Video", callback_data="mode:video_clean"),
+        ],
+        [
+            InlineKeyboardButton("🎞 V2V Edit", callback_data="mode:v2v"),
+            InlineKeyboardButton("🧹 Удалить людей", callback_data="mode:remove_people"),
+        ],
+        [
+            InlineKeyboardButton("🧪 LTX Sulphur", callback_data="mode:ltx_sulphur"),
+            InlineKeyboardButton("🔥 LTX Eros", callback_data="mode:ltx_eros"),
+        ],
+        *([[InlineKeyboardButton(f"📖 История V1 ({STORY_PARTS} сцен)", callback_data="mode:story")]] if STORY_ENABLED else []),
+        [InlineKeyboardButton("↩️ Назад", callback_data="menu:main")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def photo_menu_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    """🖼 Под-меню фото-режимов."""
+    rows = [
+        [
+            InlineKeyboardButton("✏️ Edit Photo", callback_data="mode:image"),
+            InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
+        ],
+        [
+            InlineKeyboardButton("🎨 MopMix", callback_data="mode:mopmix"),
+            InlineKeyboardButton("👯 MopMix Duo", callback_data="mode:mopmix_duo"),
+        ],
+        [InlineKeyboardButton("↩️ Назад", callback_data="menu:main")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def toggles_menu_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    """⚙️ Под-меню всех чекбоксов (рулетка/дубляж/furry/реплики/авто-лоры/фейслок)."""
     roulette_on = bool(st.get("roulette")) if st else False
     dub_voice_on = bool(st.get("dub_voice")) if st else False
     furry_on = bool(st.get("furry")) if st else False
     auto_dialogue_on = bool(st.get("auto_dialogue")) if st else False
     auto_lora_on = bool(st.get("auto_lora")) if st else False
+    face_lock_on = bool(st.get("face_lock")) if st else False
     roulette_label = f"🎰 Рулетка: {'✅ ВКЛ' if roulette_on else '⬜ выкл'}"
     dub_voice_label = f"🎙 Дубляж: {'✅ ВКЛ' if dub_voice_on else '⬜ выкл'}"
     furry_label = f"🐾 Furry: {'✅ ВКЛ' if furry_on else '⬜ выкл'}"
     auto_dialogue_label = f"💬 Реплики: {'✅ ВКЛ' if auto_dialogue_on else '⬜ выкл'}"
     auto_lora_label = f"🧠 Авто-лоры: {'✅ ВКЛ' if auto_lora_on else '⬜ выкл'}"
-    prompt_txt = str((st or {}).get("prompt") or "").strip()
-    if prompt_txt and len(prompt_txt) <= COPY_TEXT_MAX_LENGTH:
-        prompt_button = InlineKeyboardButton(
-            "📋 Промпт",
-            copy_text=CopyTextButton(prompt_txt),
-        )
-    else:
-        prompt_button = InlineKeyboardButton("📋 Промпт", callback_data="prompt:show")
+    face_lock_label = f"🎯 Фейслок: {'✅ ВКЛ' if face_lock_on else '⬜ выкл'}"
+    rows = [
+        [
+            InlineKeyboardButton(roulette_label, callback_data="do:roulette"),
+            InlineKeyboardButton(dub_voice_label, callback_data="do:dubvoice"),
+        ],
+        [
+            InlineKeyboardButton(furry_label, callback_data="do:furry"),
+            InlineKeyboardButton(auto_dialogue_label, callback_data="do:autodialogue"),
+        ],
+        [
+            InlineKeyboardButton(auto_lora_label, callback_data="do:autolora"),
+            InlineKeyboardButton(face_lock_label, callback_data="do:facelock"),
+        ],
+    ]
+    if furry_on:
+        base = (st.get("furry_base") if st else "pony") or "pony"
+        base_label = f"🧬 База: {'AutismMix (арт)' if base == 'yiffy' else 'Pony (фото)'}"
+        rows.append([InlineKeyboardButton(base_label, callback_data="do:furrybase")])
+    if dub_voice_on:
+        voice_name = st.get("dub_voice_name", DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME
+        rows.append([InlineKeyboardButton(f"🎙 Голос: {voice_name}", callback_data="voice:list")])
+    rows.append([InlineKeyboardButton("↩️ Назад", callback_data="menu:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    prompt_button = _prompt_button(st)
     if st and st.get("mode") == "remove_people":
         quality_row = [
             InlineKeyboardButton("🎞 Native · исходный FPS", callback_data="noop"),
@@ -1697,28 +1865,18 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("➕2s", callback_data="sec:+2"),
         ])
 
+    # Компактный главный экран: режимы спрятаны в 3 группы (видео / фото / тумблеры), внизу —
+    # общие настройки (качество, длина, повтор, фото/лоры/сброс, промпт) и кнопка Генерации.
+    mode_now = (st or {}).get("mode") or "video"
+    video_modes = {"video", "video_clean", "v2v", "remove_people", "ltx_sulphur", "ltx_eros", "story"}
+    vid_mark = "🎬 Видео-режимы" + (" ✅" if mode_now in video_modes else "")
+    pho_mark = "🖼 Фото-режимы" + (" ✅" if mode_now not in video_modes else "")
     rows = [
         [
-            InlineKeyboardButton("🎬 Video", callback_data="mode:video"),
-            InlineKeyboardButton("🌸 Clean Video", callback_data="mode:video_clean"),
+            InlineKeyboardButton(vid_mark, callback_data="menu:video"),
+            InlineKeyboardButton(pho_mark, callback_data="menu:photo"),
         ],
-        [
-            InlineKeyboardButton("🎞 V2V Edit", callback_data="mode:v2v"),
-            InlineKeyboardButton("🧹 Удалить людей", callback_data="mode:remove_people"),
-        ],
-        [
-            InlineKeyboardButton("✏️ Edit Photo", callback_data="mode:image"),
-            InlineKeyboardButton("✨ Развить идею", callback_data="do:expand"),
-        ],
-        [
-            InlineKeyboardButton("🧪 LTX Sulphur", callback_data="mode:ltx_sulphur"),
-            InlineKeyboardButton("🔥 LTX Eros", callback_data="mode:ltx_eros"),
-        ],
-        *([[InlineKeyboardButton(f"📖 История V1 ({STORY_PARTS} сцен)", callback_data="mode:story")]] if STORY_ENABLED else []),
-        [
-            InlineKeyboardButton("🎨 MopMix", callback_data="mode:mopmix"),
-            InlineKeyboardButton("👯 MopMix Duo", callback_data="mode:mopmix_duo"),
-        ],
+        [InlineKeyboardButton("⚙️ Тумблеры / опции", callback_data="menu:toggles")],
         quality_row,
         [
             InlineKeyboardButton("1x", callback_data="repeat:1"),
@@ -1730,31 +1888,13 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎚 LoRA", callback_data="lora:list"),
             InlineKeyboardButton("🧹 Reset", callback_data="do:reset"),
         ],
-        [
-            InlineKeyboardButton(roulette_label, callback_data="do:roulette"),
-            InlineKeyboardButton(dub_voice_label, callback_data="do:dubvoice"),
-        ],
-        [
-            InlineKeyboardButton(furry_label, callback_data="do:furry"),
-            InlineKeyboardButton(auto_dialogue_label, callback_data="do:autodialogue"),
-        ],
-        [
-            prompt_button,
-            InlineKeyboardButton(auto_lora_label, callback_data="do:autolora"),
-        ],
+        [prompt_button],
     ]
-    if furry_on:
-        base = (st.get("furry_base") if st else "pony") or "pony"
-        base_label = f"🧬 База: {'AutismMix (арт)' if base == 'yiffy' else 'Pony (фото)'}"
-        rows.append([InlineKeyboardButton(base_label, callback_data="do:furrybase")])
     # NSFW video base model picker — only relevant in the 🎬 Video mode.
     if st and st.get("mode") == "video":
         vm = st.get("video_model") or VIDEO_MODEL_DEFAULT
         vm_label = video_model_cfg(vm)["label"]
         rows.append([InlineKeyboardButton(f"🎛 Модель: {vm_label}", callback_data="do:videomodel")])
-    if dub_voice_on:
-        voice_name = st.get("dub_voice_name", DEFAULT_VOICE_NAME) if st else DEFAULT_VOICE_NAME
-        rows.append([InlineKeyboardButton(f"🎙 Голос: {voice_name}", callback_data="voice:list")])
     # Owner-only: manage who can use the bot. Only the admin's state carries is_admin=True.
     if st and st.get("is_admin"):
         rows.append([InlineKeyboardButton("👥 Пользователи", callback_data="acl:list")])
@@ -1808,20 +1948,53 @@ def selected_lora_labels(st: dict[str, Any], limit: int = 4) -> str:
     return ", ".join(labels)
 
 
+def active_lora_origin(st: dict[str, Any]) -> str:
+    """Which lora engine actually fires for the current mode: LTX-2.3 (Eros / Sulphur graphs) or the
+    WAN i2v graph. apply_eros_loras / apply_sulphur_loras take only origin=="Eros"; apply_video_loras
+    takes only WAN loras — the other engine's picks are silently skipped. The menu marks the inactive
+    group so the user stops selecting loras that do nothing in the current mode."""
+    return "Eros" if st.get("mode") in ("ltx_eros", "ltx_sulphur") else "WAN"
+
+
+# 🎚 catalog is split by engine so the two incompatible sets aren't jumbled together. Order: the
+# engine active in the current mode is shown first.
+LORA_GROUP_TITLE = {"Eros": "🧬 LTX (Eros / Sulphur)", "WAN": "🎬 WAN (Видео)"}
+LORA_GROUP_FALLBACK_ORDER = ("Eros", "WAN")
+
+
 def lora_keyboard(st: dict[str, Any]) -> InlineKeyboardMarkup:
     selected = set(st.get("video_loras") or [])
-    rows = []
+    active = active_lora_origin(st)
+    buckets: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for i, opt in enumerate(VIDEO_LORA_OPTIONS):
-        mark = "✓" if opt["key"] in selected else "○"
-        rows.append([InlineKeyboardButton(f"{mark} {opt['label']}", callback_data=f"lora:toggle:{i}")])
+        buckets.setdefault(lora_origin(opt), []).append((i, opt))
+    # active engine first, then a stable fallback order for the rest
+    def group_rank(origin: str) -> tuple:
+        base = LORA_GROUP_FALLBACK_ORDER.index(origin) if origin in LORA_GROUP_FALLBACK_ORDER else 9
+        return (origin != active, base)
+
+    rows = []
+    for origin in sorted(buckets, key=group_rank):
+        opts = buckets[origin]
+        if not opts:
+            continue
+        title = LORA_GROUP_TITLE.get(origin, origin)
+        flag = "🟢 работают сейчас" if origin == active else "⚪ не для этого режима"
+        rows.append([InlineKeyboardButton(f"— {title} · {flag} —", callback_data="noop")])
+        for i, opt in opts:
+            mark = "✓" if opt["key"] in selected else "○"
+            rows.append([InlineKeyboardButton(f"{mark} {opt['label']}", callback_data=f"lora:toggle:{i}")])
     rows.append([InlineKeyboardButton("Clear", callback_data="lora:clear"), InlineKeyboardButton("↩️ Back", callback_data="show:status")])
     return InlineKeyboardMarkup(rows)
 
 
 def lora_text(st: dict[str, Any]) -> str:
     selected = st.get("video_loras") or []
+    active = active_lora_origin(st)
+    active_title = LORA_GROUP_TITLE.get(active, active)
     lines = [
-        "LoRA для LTX Eros (🔥), Sulphur (🧪) и 🎬 Video (WAN) — выбери эффекты, триггер добавится в промпт",
+        "LoRA разделены по движку: 🧬 LTX (Eros/Sulphur) и 🎬 WAN (Видео).",
+        f"Сейчас активен режим → работают только лоры «{active_title}» (🟢). Лоры другого движка (⚪) молча игнорируются.",
         "",
         f"Выбрано: {len(selected)}/{VIDEO_MAX_LORAS}",
     ]
@@ -2477,6 +2650,7 @@ def patch_video_workflow(
     continuity_negative: str = "",
     clean: bool = False,
     video_model: str | None = None,
+    smooth_mult: int = VIDEO_SMOOTH_MULT,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
     prompt_parts = [prompt]
@@ -2509,8 +2683,13 @@ def patch_video_workflow(
     wf["243"]["inputs"]["value"] = native_seconds
     wf["373:359"]["inputs"]["value"] = str(gen_frames)
     out_fps = fps
-    if not clean and req_seconds > native_seconds:
-        mult = -(-req_seconds // native_seconds)  # ceil division
+    # One RIFE pass covers two jobs: (a) slow-mo STRETCH when asked for longer than the native window,
+    # and (b) SMOOTHNESS — interpolate up to smooth_mult×fps so WAN plays as fluid as LTX Eros. Both
+    # fold into a single multiplier so we never chain two RIFE nodes. Clean mode stays untouched.
+    stretch_mult = -(-req_seconds // native_seconds) if (not clean and req_seconds > native_seconds) else 1
+    smooth = max(1, int(smooth_mult)) if not clean else 1
+    total_mult = stretch_mult * smooth
+    if total_mult > 1:
         img_src = wf["314"]["inputs"].get("images", ["373:363", 0])
         wf["tg_rife"] = {
             "class_type": "RIFE VFI",
@@ -2518,7 +2697,7 @@ def patch_video_workflow(
                 "frames": img_src,
                 "ckpt_name": VIDEO_RIFE_CKPT,
                 "clear_cache_after_n_frames": 8,
-                "multiplier": int(mult),
+                "multiplier": int(total_mult),
                 "fast_mode": True,
                 "ensemble": True,
                 "scale_factor": 1.0,
@@ -2528,7 +2707,7 @@ def patch_video_workflow(
             },
         }
         wf["314"]["inputs"]["images"] = ["tg_rife", 0]
-        total_frames = (gen_frames - 1) * int(mult) + 1
+        total_frames = (gen_frames - 1) * int(total_mult) + 1
         out_fps = max(1, round(total_frames / req_seconds))
     wf["314"]["inputs"]["frame_rate"] = out_fps
     wf["141"]["inputs"]["seed"] = int(seed)
@@ -2700,6 +2879,106 @@ def build_image_edit_workflow(
     return wf
 
 
+def build_duo_edit_instruction(translated: str, gender_a: str, gender_b: str, explicit: bool) -> tuple[str, str]:
+    """Positive+negative instruction for Qwen-Image-Edit's two-reference compose. Naming each
+    picture's sex (and, for explicit scenes, hard gender-locking + a 'keep her dress on' clause)
+    stops the Unchained-XXX lora's male bias from turning the couple into two men or stripping her
+    fully naked."""
+    sex_a = "a man" if gender_a == "male" else "a woman" if gender_a == "female" else "a person"
+    sex_b = "a man" if gender_b == "male" else "a woman" if gender_b == "female" else "a person"
+    if explicit:
+        pos = (
+            f"A straight heterosexual couple, one man and one woman (1boy and 1girl). Combine the two "
+            f"source pictures into ONE photorealistic explicit image. Picture 1 is {sex_a} (keep this "
+            f"sex); picture 2 is {sex_b} (keep this sex). Keep BOTH faces, hair, body type, height and "
+            "CLOTHING as in the source pictures. The clothed person still wears their outfit, only "
+            "pulled up/aside for the act — not fully naked, expose only what the act needs. "
+            f"Scene: {translated.strip(' .')}."
+        )
+        neg = ("2boys, two men, both male, gay, futanari, the woman has a penis, she is a man, "
+               "clothed over genitals, censored, deformed, extra limbs, extra person")
+    else:
+        pos = (
+            f"Combine the two source pictures into ONE photorealistic image. Picture 1 is {sex_a}; "
+            f"picture 2 is {sex_b}. Put them together in the same scene, close to each other. "
+            "Keep BOTH people's faces, hairstyle, body type, height and clothing EXACTLY as in their "
+            "source pictures — do not change their identities, ages, sex or proportions. "
+            f"Scene: {translated.strip(' .')}."
+        )
+        neg = "deformed, extra limbs, extra person, disfigured"
+    return pos, neg
+
+
+def _reactor_swap_node(input_chain: list, source_node: str, gender: str) -> dict[str, Any]:
+    return {"class_type": "ReActorFaceSwap", "inputs": {
+        "enabled": True, "input_image": input_chain, "source_image": [source_node, 0],
+        "swap_model": REACTOR_SWAP_MODEL, "facedetection": REACTOR_FACE_DETECTION,
+        "face_restore_model": REACTOR_FACE_RESTORE_MODEL, "face_restore_visibility": MOPMIX_DUO_FACE_RESTORE_VIS,
+        "codeformer_weight": 0.5, "detect_gender_input": gender, "detect_gender_source": gender,
+        "input_faces_index": "0", "source_faces_index": "0", "console_log_level": 1}}
+
+
+def build_duo_edit_workflow(
+    *,
+    image_name_a: str,
+    image_name_b: str,
+    prompt: str,
+    negative: str,
+    width: int,
+    height: int,
+    seed: int,
+    explicit: bool,
+    gender_a: str,
+    gender_b: str,
+) -> dict[str, Any]:
+    """MopMix Duo via Qwen-Image-Edit-2509 MULTI-image reference (image1 + image2). Qwen conditions
+    on BOTH real photos and composes one coherent scene, preserving each person's actual face and
+    figure — unlike the old SDXL composite + ReActor, which regenerated both bodies (keeping only a
+    generic 'type') and turned the man into a woman. explicit=True stacks the Unchained-XXX NSFW lora
+    (CFG≈4, no lightning) + a soft female-nudity lora; otherwise the 4-step lightning path (CFG 1) is
+    used for clean/softcore. A final in-graph ReActor pass stamps each real face back by gender."""
+    wf = {
+        "72": {"class_type": "CLIPLoader", "inputs": {"clip_name": IMAGE_EDIT_QWEN_CLIP, "type": "qwen_image"}},
+        "71": {"class_type": "VAELoader", "inputs": {"vae_name": IMAGE_EDIT_QWEN_VAE}},
+        "73": {"class_type": "UNETLoader", "inputs": {"unet_name": IMAGE_EDIT_QWEN_UNET, "weight_dtype": "default"}},
+        "41": {"class_type": "LoadImage", "inputs": {"image": image_name_a}},
+        "42": {"class_type": "LoadImage", "inputs": {"image": image_name_b}},
+        "68": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["72", 0], "prompt": prompt, "vae": ["71", 0], "image1": ["41", 0], "image2": ["42", 0]}},
+        "69": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["72", 0], "prompt": negative, "vae": ["71", 0], "image1": ["41", 0], "image2": ["42", 0]}},
+        "66": {"class_type": "EmptySD3LatentImage", "inputs": {"width": int(width), "height": int(height), "batch_size": 1}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["65", 0], "vae": ["71", 0]}},
+    }
+    if explicit:
+        wf["77"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["73", 0], "lora_name": DUO_XXX_LORA, "strength_model": DUO_XXX_STRENGTH}}
+        wf["76"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["77", 0], "lora_name": IMAGE_EDIT_NSFW_LORA, "strength_model": DUO_NUDE_STRENGTH}}
+        wf["67"] = {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["76", 0], "shift": IMAGE_EDIT_SHIFT}}
+        cfg, steps = DUO_XXX_CFG, DUO_XXX_STEPS
+    else:
+        wf["74"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["73", 0], "lora_name": IMAGE_EDIT_LIGHTNING_LORA, "strength_model": 1.0}}
+        wf["67"] = {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["74", 0], "shift": IMAGE_EDIT_SHIFT}}
+        cfg, steps = IMAGE_EDIT_CFG, IMAGE_EDIT_STEPS
+    wf["65"] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "model": ["67", 0], "seed": int(seed), "steps": steps, "cfg": cfg,
+            "sampler_name": "euler", "scheduler": "simple", "positive": ["68", 0], "negative": ["69", 0],
+            "latent_image": ["66", 0], "denoise": 1,
+        },
+    }
+    # Final ReActor pass: stamp each real face back onto the matching-gender person in the scene.
+    chain: list = ["8", 0]
+    male_node = "41" if gender_a == "male" else "42" if gender_b == "male" else None
+    female_node = "41" if gender_a == "female" else "42" if gender_b == "female" else None
+    nid = 80
+    for node, gender in ((male_node, "male"), (female_node, "female")):
+        if node:
+            wf[str(nid)] = _reactor_swap_node(chain, node, gender)
+            chain = [str(nid), 0]
+            nid += 1
+    wf["128"] = {"class_type": "SaveImage", "inputs": {"images": chain, "filename_prefix": "tg_mopmix_duo"}}
+    return wf
+
+
 def patch_ltx_sulphur_workflow(
     wf: dict[str, Any],
     *,
@@ -2756,6 +3035,38 @@ def strip_scene_details(caption: str) -> str:
         if kept_clauses:
             kept_sentences.append(", ".join(kept_clauses))
     return ". ".join(s.strip(" .") for s in kept_sentences if s.strip(" ."))
+
+
+def identity_only(caption: str) -> str:
+    """The story chain prepends a fixed 'who she is' prefix to EVERY beat so the person stays the
+    same across cuts. But Florence's caption bakes in the INPUT frame's pose, camera-gaze,
+    expression and clothing ('sitting on a couch, looking directly at the camera with a slight
+    smile, wearing a black tank top'). Prepended to every beat, those become contradictions once
+    the beat has her on her knees / undressed / doing a blowjob — WAN tries to satisfy both the
+    frozen input pose AND the new action and produces mush (mangled bodies, a face-to-face 'kiss'
+    when a dick approaches a smiling camera-facing mouth). Keep only durable appearance clauses
+    (age, build, hair, skin); drop the frame-specific ones so identity locks WHO she is, not what
+    she was doing in the reference shot."""
+    c = caption
+    # pose the reference frame happened to be in
+    c = re.sub(r"\b(sitting|seated|standing|lying|laying|kneeling|leaning|posing|crouching)\b[^,.]*", "", c, flags=re.IGNORECASE)
+    # camera-gaze + facial expression
+    c = re.sub(r"\b(looking|staring|gazing|facing)\b[^,.]*", "", c, flags=re.IGNORECASE)
+    c = re.sub(r"\bwith (?:a|an|the)\b[^,.]*\b(smile|expression|look|grin)\b[^,.]*", "", c, flags=re.IGNORECASE)
+    c = re.sub(r"\b(smiling|grinning|frowning|smirking)\b[^,.]*", "", c, flags=re.IGNORECASE)
+    # outfit — the story undresses/redresses her, so a frozen outfit fights the beats
+    c = re.sub(r"\b(wearing|dressed in|clad in)\b[^,.]*", "", c, flags=re.IGNORECASE)
+    # tidy up the gaps left behind: dangling "she is", stray commas, empty sentences
+    c = re.sub(r"\b(she|he|who) (is|has|appears to be)\s*(?=[,.]|$)", "", c, flags=re.IGNORECASE)
+    # dangling linking verbs left where a clause was cut ("...blonde hair, is." / "...and .")
+    c = re.sub(r",\s*(is|are|was|were|and|with|has|have)\s*(?=[.,]|$)", "", c, flags=re.IGNORECASE)
+    c = re.sub(r"\s+([,.])", r"\1", c)
+    c = re.sub(r"(,\s*)+", ", ", c)
+    c = re.sub(r"[.,\s]*\.[.\s]*", ". ", c)
+    c = re.sub(r"\s{2,}", " ", c)
+    kept = [s.strip(" ,.") for s in re.split(r"(?<=[.!?])\s+", c)]
+    kept = [s for s in kept if len(s.split()) >= 2]
+    return ". ".join(kept).strip(" .")
 
 
 def guess_gender(caption: str) -> str:
@@ -2942,6 +3253,7 @@ def select_loras_for_scene(scene: str, origin: str = "Eros") -> list[str]:
         raw_keys = re.findall(rf"{key_prefix}[a-z0-9_]+", text)
     out: list[str] = []
     cum_used = False
+    pose_used = False
     for k in raw_keys:
         if k not in valid or k in out:
             continue
@@ -2949,6 +3261,11 @@ def select_loras_for_scene(scene: str, origin: str = "Eros") -> list[str]:
             if cum_used:
                 continue
             cum_used = True
+        if k in POSE_LORA_KEYS:
+            # one body-position lora per scene/part — a second would blend into an impossible pose
+            if pose_used:
+                continue
+            pose_used = True
         out.append(k)
         if len(out) >= 3:
             break
@@ -3184,6 +3501,14 @@ def patch_mopmix_duo_workflow(
     wf = json.loads(json.dumps(wf))
     wf["109"]["inputs"]["text"] = prompt
     wf["18"]["inputs"]["resolution"] = resolution
+    # Force the Duo latent to LANDSCAPE matching the composite so the center-crop resize (node 301)
+    # doesn't chop the outer half of each body. width_override/height_override take precedence over
+    # the resolution string above.
+    wf["18"]["inputs"]["width_override"] = MOPMIX_DUO_WIDTH
+    wf["18"]["inputs"]["height_override"] = MOPMIX_DUO_HEIGHT
+    extra_neg = duo_negative_suppression(gender_a, gender_b)
+    if extra_neg and wf.get("6", {}).get("inputs", {}).get("text") is not None:
+        wf["6"]["inputs"]["text"] = f'{wf["6"]["inputs"]["text"]}, {extra_neg}'
     wf["300"]["inputs"]["image"] = composite_image_name
     wf["400"]["inputs"]["image"] = image_name_a
     wf["401"]["inputs"]["image"] = image_name_b
@@ -3204,6 +3529,7 @@ def patch_mopmix_duo_workflow(
         inputs["swap_model"] = REACTOR_SWAP_MODEL
         inputs["facedetection"] = REACTOR_FACE_DETECTION
         inputs["face_restore_model"] = REACTOR_FACE_RESTORE_MODEL
+        inputs["face_restore_visibility"] = MOPMIX_DUO_FACE_RESTORE_VIS
         g = genders[node_id] if genders[node_id] in ("female", "male") else "no"
         if g != "no" and gender_a != gender_b:
             inputs["detect_gender_input"] = g
@@ -3428,13 +3754,17 @@ def build_video_audio_workflow(
     seed: int,
     model: str = VIDEO_AUDIO_MODEL,
     negative_prompt: str = VIDEO_AUDIO_NEGATIVE_PROMPT,
+    load_fps: int = 0,
 ) -> dict[str, Any]:
+    # Preserve the clip's real fps when given (keeps RIFE-smoothed 32fps through MMAudio instead of
+    # resampling down to the fixed VIDEO_AUDIO_LOAD_FPS); fall back to the default when unknown.
+    force_rate = int(load_fps) if int(load_fps) > 0 else int(VIDEO_AUDIO_LOAD_FPS)
     return {
         "1": {
             "class_type": "VHS_LoadVideo",
             "inputs": {
                 "video": video_name,
-                "force_rate": int(VIDEO_AUDIO_LOAD_FPS),
+                "force_rate": force_rate,
                 "custom_width": 0,
                 "custom_height": 0,
                 "frame_load_cap": 0,
@@ -3522,6 +3852,11 @@ async def run_video_audio_postprocess(blob: bytes, meta: dict[str, Any], filenam
     input_name = f"tg_mmaudio_{uuid.uuid4().hex}.mp4"
     input_path = COMFY_INPUT_DIR / input_name
     save_bytes(input_path, blob)
+    # Keep the clip's real (RIFE-smoothed) fps through MMAudio instead of snapping to 25.
+    try:
+        src_fps = int(round(probe_video(input_path).get("fps") or 0))
+    except Exception:
+        src_fps = 0
 
     try:
         wf = build_video_audio_workflow(
@@ -3530,6 +3865,7 @@ async def run_video_audio_postprocess(blob: bytes, meta: dict[str, Any], filenam
             seed=make_seed(),
             model=video_audio_model_for_mode(meta.get("mode")),
             negative_prompt=video_audio_negative_for_mode(meta.get("mode")),
+            load_fps=src_fps,
         )
         prompt_id = await asyncio.to_thread(queue_prompt, wf, str(uuid.uuid4()))
         result = await wait_for_result_from_prompt(
@@ -4831,6 +5167,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await handle_acl_callback(update, context, data)
         return
 
+    if data in ("menu:video", "menu:photo", "menu:toggles", "menu:main"):
+        which = data.split(":", 1)[1]
+        builder = {"video": video_menu_keyboard, "photo": photo_menu_keyboard,
+                   "toggles": toggles_menu_keyboard}.get(which, main_keyboard)
+        title = {"video": "🎬 Видео-режимы — выбери и вернись «Назад»:",
+                 "photo": "🖼 Фото-режимы — выбери и вернись «Назад»:",
+                 "toggles": "⚙️ Тумблеры и опции:",
+                 "main": help_text(st)}[which]
+        await replace_ui_message_from_callback(query, context, title, reply_markup=builder(st))
+        return
+
     if data.startswith("mode:"):
         st["mode"] = data.split(":", 1)[1]
         if st["mode"] == "remove_people":
@@ -5094,17 +5441,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton(f"{'✅ ' if n == st.get('dub_voice_name') else ''}{n}", callback_data=f"voice:pick:{n}")]
             for n in names
         ]
-        rows.append([InlineKeyboardButton("↩️ Back", callback_data="show:status")])
+        rows.append([InlineKeyboardButton("↩️ Назад", callback_data="menu:toggles")])
         await replace_ui_message_from_callback(query, context, "Выбери голос для дубляжа:", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if data.startswith("voice:pick:"):
         name = data.split(":", 2)[2]
         if not voice_path(name):
-            await replace_ui_message_from_callback(query, context, "Этот голос больше не найден.", reply_markup=main_keyboard(st))
+            await replace_ui_message_from_callback(query, context, "Этот голос больше не найден.", reply_markup=toggles_menu_keyboard(st))
             return
         st["dub_voice_name"] = name
-        await replace_ui_message_from_callback(query, context, f"🎙 Активный голос для дубляжа: «{name}».", reply_markup=main_keyboard(st))
+        await replace_ui_message_from_callback(query, context, f"🎙 Активный голос для дубляжа: «{name}».", reply_markup=toggles_menu_keyboard(st))
         return
 
     if data == "do:roulette":
@@ -5116,7 +5463,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"🎰 Рулетка {state_text}.\n"
             f"При repeat ≥ 2 каждые {ROULETTE_GROUP_SIZE} видео промт будет переписываться заново "
             f"через Ollama (та же идея, другие детали) — на 10x получится 5 вариаций, на 30x — 15.",
-            reply_markup=main_keyboard(st),
+            reply_markup=toggles_menu_keyboard(st),
         )
         return
 
@@ -5131,7 +5478,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Выкл → обычный MopMix (bigASP, фотореалистичные люди).\n"
             f"Это txt2img — генерит по тексту с нуля, фото не нужно. Базу можно переключить "
             f"кнопкой 🧬 (Pony-фото / AutismMix-арт).",
-            reply_markup=main_keyboard(st),
+            reply_markup=toggles_menu_keyboard(st),
         )
         return
 
@@ -5143,7 +5490,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context,
             f"🧬 База для Furry: {chosen}.\n"
             f"Оба на Pony-тегах (score_9…, anthro) — промпты не меняются, отличается стиль/виды.",
-            reply_markup=main_keyboard(st),
+            reply_markup=toggles_menu_keyboard(st),
         )
         return
 
@@ -5197,7 +5544,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"сочинит одну короткую фразу в характере под сцену, а LTX её озвучит (один раз, "
             f"без повторов). Если реплика в кавычках уже есть — берётся твоя.\n"
             f"⚠️ Ollama крутится на CPU и добавляет пару минут к каждому ролику.",
-            reply_markup=main_keyboard(st),
+            reply_markup=toggles_menu_keyboard(st),
         )
         return
 
@@ -5219,7 +5566,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"1-3 лоры своего движка (поза + при необходимости раздевание/камшот), перебивая ручной "
             f"выбор. В чат придёт список выбранных.\n"
             f"⚠️ Ollama крутится на CPU и добавляет ~минуту к ролику.",
-            reply_markup=main_keyboard(st),
+            reply_markup=toggles_menu_keyboard(st),
+        )
+        return
+
+    if data == "do:facelock":
+        st["face_lock"] = not st.get("face_lock")
+        state_text = "включён" if st["face_lock"] else "выключен"
+        await replace_ui_message_from_callback(
+            query,
+            context,
+            f"🎯 Фейслок при склейке {state_text}.\n"
+            f"Выкл (по умолчанию) → каждый следующий кусок ПРОДОЛЖАЕТСЯ с последнего кадра "
+            f"предыдущего: на {VIDEO_NATIVE_MAX_SECONDS}с WAN бумерангом возвращается к лицу крупно, "
+            f"и лицо тянется естественно, без перерисовки.\n"
+            f"Вкл → на каждый склеенный кадр заново штампуется ОРИГИНАЛЬНОЕ лицо через ReActor. "
+            f"На повёрнутых/движущихся лицах это выглядит перерисованным/искажённым (inswapper 128px "
+            f"+ GFPGAN) — включай только если лицо реально уплывает в другую женщину на длинной цепочке.",
+            reply_markup=toggles_menu_keyboard(st),
         )
         return
 
@@ -5232,7 +5596,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"🎙 Дубляж голоса {state_text}.\n"
             f"Работает только для LTX Sulphur/LTX Eros — после генерации голос в дорожке "
             f"заменяется на голос «{st.get('dub_voice_name', DEFAULT_VOICE_NAME)}», остальные звуки (шлепки/стоны) сохраняются.",
-            reply_markup=main_keyboard(st),
+            reply_markup=toggles_menu_keyboard(st),
         )
         return
 
@@ -5285,8 +5649,26 @@ async def enqueue_generation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             st["seconds_manual"] = False
             await enqueue_story_job(update, context, parts, chunk)
             return
-        # No '#' → a single continuous clip. Honour a hand-picked length (WAN may loop past ~6s,
-        # which the user accepts); otherwise reset a stale story length back to one native clip.
+        # No '#' → single prompt. If the user hand-picked a length LONGER than one native window,
+        # don't RIFE-slow-mo a 6s clip into 24s (harsh slow motion) — instead fan the single prompt
+        # into ceil(seconds/chunk) native chunks and chain them like a story: REAL generated motion
+        # for the whole duration, chained off each last frame + facelock. One native clip stays a
+        # single clip. A stale story length (not manual) resets back to one native clip.
+        if st.get("seconds_manual") and int(st.get("seconds") or 0) > VIDEO_NATIVE_MAX_SECONDS and prompt:
+            if not (st.get("video_source") or {}).get("path"):
+                await send_ui_message(target, context, "Для длинного видео (>6с) сначала пришли фото.", reply_markup=main_keyboard(st))
+                return
+            # Fan out at the NATIVE window (6s) so each chunk is pure generated motion with zero
+            # RIFE slow-mo stretch — the whole point is real movement, not stretched frames.
+            fan_chunk = VIDEO_NATIVE_MAX_SECONDS
+            n_chunks = -(-int(st["seconds"]) // fan_chunk)  # ceil
+            fan = [prompt] * n_chunks
+            # Snap the shown length to the whole-chunk total but KEEP seconds_manual=True, so the
+            # hand-picked duration sticks for the next run instead of silently resetting to one
+            # native window (the user set it on purpose — don't clear it every generation).
+            st["seconds"] = n_chunks * fan_chunk
+            await enqueue_story_job(update, context, fan, fan_chunk)
+            return
         if not st.get("seconds_manual"):
             st["seconds"] = VIDEO_NATIVE_MAX_SECONDS
 
@@ -5414,6 +5796,7 @@ async def enqueue_story_job(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             video_model=st.get("video_model") or VIDEO_MODEL_DEFAULT,
             story_prompts=prompts,
             story_chunk_secs=chunk,
+            face_lock=bool(st.get("face_lock")),
         )
         await GEN_QUEUE.put(job)
 
@@ -5620,10 +6003,13 @@ async def submit_video_story(app: Application, job: Job) -> None:
     if pre_edited:
         driver_loras = []
 
-    # 2) Identity anchor: caption the (edited) start frame (appearance only; strip_scene_details
-    #    drops the location) and prepend it to EVERY chunk's prompt + feed it to the beat splitter,
-    #    so she keeps the same face/hair/body across chunks instead of morphing into another woman.
+    # 2) Identity anchor: caption the (edited) start frame and prepend it to EVERY chunk's prompt +
+    #    feed it to the beat splitter, so she keeps the same face/hair/body across chunks instead of
+    #    morphing into another woman. identity_only() strips the reference frame's POSE / camera-gaze
+    #    / expression / outfit — those are not "who she is" and, frozen onto every beat, they fight
+    #    the action (couch-sit vs on-knees, camera-smile vs blowjob) and garble the video.
     identity = await asyncio.to_thread(caption_photo, start_path, "story_identity.png")
+    identity = identity_only(identity)
     await asyncio.to_thread(free_comfy_memory)
 
     # Split the prompt into `parts` chronological beats so EACH 6s chunk advances the story with
@@ -5695,7 +6081,9 @@ async def submit_video_story(app: Application, job: Job) -> None:
                 except Exception:
                     log.exception("Story segment %d MMAudio failed; segment stays silent", i)
             norm_path = story_dir / f"seg_{i:02d}.mp4"
-            await asyncio.to_thread(normalize_story_segment, seg_source, norm_path, src["fit_width"], src["fit_height"], job.video_fps)
+            # fps=0 → preserve the chunk's RIFE-smoothed rate (patch_video_workflow lifts 16→32fps);
+            # all chunks share the same treatment, so they stay concat-uniform.
+            await asyncio.to_thread(normalize_story_segment, seg_source, norm_path, src["fit_width"], src["fit_height"], 0)
             normalized.append(norm_path)
             chunk_log.append({"i": i, "beat_ru": beat_ru, "prompt_en": chunk_prompt,
                               "loras": chunk_loras, "seed": seed, "audio": audio_ok})
@@ -5708,7 +6096,7 @@ async def submit_video_story(app: Application, job: Job) -> None:
                 # Re-anchor the face(s) from the original first frame onto this chained start frame
                 # so identity doesn't drift across cuts. Best-effort: if ReActor fails, animate the
                 # raw chained frame as before.
-                if STORY_FACE_LOCK:
+                if job.face_lock:
                     try:
                         await asyncio.to_thread(free_comfy_memory)
                         locked = story_dir / f"frame_{i:02d}_face.png"
@@ -6457,9 +6845,6 @@ async def submit_mopmix_duo_job(app: Application, job: Job) -> None:
     if not photo_a.get("path") or not photo_b.get("path"):
         raise RuntimeError("Для mopmix_duo нужны два фото.")
 
-    resolution = MOPMIX_RESOLUTIONS.get(job.quality, MOPMIX_RESOLUTIONS["medium"])
-
-    wf = await asyncio.to_thread(load_workflow, WORKFLOW_MOPMIX_DUO)
     uploaded_a = await asyncio.to_thread(upload_image_to_comfy, photo_a["path"], photo_a["name"])
     uploaded_b = await asyncio.to_thread(upload_image_to_comfy, photo_b["path"], photo_b["name"])
     translated_prompt = await asyncio.to_thread(translate_to_english, job.prompt)
@@ -6468,35 +6853,22 @@ async def submit_mopmix_duo_job(app: Application, job: Job) -> None:
         asyncio.to_thread(caption_photo, photo_a["path"], photo_a["name"]),
         asyncio.to_thread(caption_photo, photo_b["path"], photo_b["name"]),
     )
-    appearance_notes = []
-    if caption_a:
-        appearance_notes.append(f"Person A appearance (match exactly): {caption_a}")
-    if caption_b:
-        appearance_notes.append(f"Person B appearance (match exactly): {caption_b}")
-    if appearance_notes:
-        translated_prompt = translated_prompt + ". " + ". ".join(appearance_notes)
-
-    # Infer each source's gender from its caption so ReActor can route each face onto the
-    # matching-gender person in the scene instead of a flip-prone positional index.
+    # Sex of each source picture: names the man/woman in the Qwen instruction (so the male-biased
+    # NSFW lora keeps him male) and routes the final ReActor face swap onto the matching person.
     gender_a, gender_b = guess_gender(caption_a), guess_gender(caption_b)
-
-    composite = await asyncio.to_thread(build_duo_composite, photo_a["path"], photo_b["path"])
-    composite_path = TMP_DIR / f"tg_duo_composite_{uuid.uuid4().hex}.jpg"
-    await asyncio.to_thread(composite.save, composite_path, "JPEG", quality=95)
-    try:
-        uploaded_composite = await asyncio.to_thread(upload_image_to_comfy, str(composite_path), composite_path.name)
-    finally:
-        composite_path.unlink(missing_ok=True)
+    explicit = duo_prompt_is_explicit(job.prompt)
+    pos, neg = build_duo_edit_instruction(translated_prompt, gender_a, gender_b, explicit)
 
     wf = await asyncio.to_thread(
-        patch_mopmix_duo_workflow,
-        wf,
-        prompt=translated_prompt,
-        resolution=resolution,
+        build_duo_edit_workflow,
         image_name_a=uploaded_a,
         image_name_b=uploaded_b,
-        composite_image_name=uploaded_composite,
+        prompt=pos,
+        negative=neg,
+        width=MOPMIX_DUO_WIDTH,
+        height=MOPMIX_DUO_HEIGHT,
         seed=job.seed,
+        explicit=explicit,
         gender_a=gender_a,
         gender_b=gender_b,
     )
