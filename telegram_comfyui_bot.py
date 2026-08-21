@@ -587,6 +587,7 @@ VIDEO_LORA_OPTIONS = [
     {"key": "eros_blowjob", "label": "Blowjob", "origin": "Eros", "lora": "LTX23_blowjob_animation_I2V_v1.safetensors", "trigger": "blowjob animation, her mouth is wrapped around the penis", "strength": 0.9},
     {"key": "eros_deepthroat", "label": "Deepthroat", "origin": "Eros", "lora": "ltxdeepthroat_v01.safetensors", "trigger": "LTXdeepthroat", "strength": 0.9},
     {"key": "eros_ult_dt", "label": "Ultimate Deepthroat", "origin": "Eros", "lora": "ltx23-ultimatedt-NSFW_k3nk.safetensors", "trigger": "", "strength": 0.9},
+    {"key": "eros_rev_dt", "label": "Реверс-дипгорло", "origin": "Eros", "lora": "LTX23_ReverseDeepthroatV1_1.safetensors", "trigger": "reverse deepthroat video", "strength": 0.9},
     # — positions —
     {"key": "eros_allinone", "label": "General NSFW (multi)", "origin": "Eros", "lora": "Penile_Praxis_V4_LTX23.safetensors", "trigger": "", "strength": 0.85},
     {"key": "eros_riding", "label": "Riding/Cowgirl", "origin": "Eros", "lora": "riding_fbs_10Eros_i2v_v1.safetensors", "trigger": "Riding frontshot animation", "strength": 0.9},
@@ -636,6 +637,11 @@ VIDEO_LORA_OPTIONS = [
     {"key": "wan_cowgirl", "label": "Поза: наездница лицом", "origin": "WAN", "high": "WAN-2.2-I2V-POV-Cowgirl-HIGH-v1.0-fixed.safetensors", "low": "WAN-2.2-I2V-POV-Cowgirl-LOW-v1.0-fixed.safetensors", "trigger": "cowgirl position, she rides his cock facing him, bouncing up and down", "strength": 0.4},
     {"key": "wan_anal", "label": "Анал", "origin": "WAN", "high": "wan22_i2v_anal_v1_high_noise.safetensors", "low": "wan22_i2v_anal_v1_low_noise.safetensors", "trigger": "anal sex, he penetrates her ass, anal insertion", "strength": 0.4},
     {"key": "wan_deepthroat", "label": "Дипгорло", "origin": "WAN", "high": "jfj-deepthroat-W22-I2V-HN.safetensors", "low": "jfj-deepthroat-W22-I2V-LN.safetensors", "trigger": "deepthroat, she takes his cock deep in her throat", "strength": 0.4},
+    # — новые WAN 2.2 I2V экшн-лоры (Civitai, high/low пары) —
+    {"key": "wan_rev_deepthroat", "label": "Реверс-дипгорло", "origin": "WAN", "high": "WAN22_14B_I2V_reversedeepthroatV2_high_noise.safetensors", "low": "WAN22_14B_I2V_reversedeepthroatV2_low_noise.safetensors", "trigger": "reverse deepthroat video, her head hangs back off the edge and he thrusts into her throat", "strength": 0.4},
+    {"key": "wan_chasing_bj", "label": "Минет (chasing)", "origin": "WAN", "high": "chasing_blowjob_wan22_v1.0_high_noise.safetensors", "low": "chasing_blowjob_wan22_v1.0_low_noise.safetensors", "trigger": "she performs a blowjob, sucking his cock", "strength": 0.4},
+    {"key": "wan_finger_lick", "label": "Пальцы: лизать/сосать", "origin": "WAN", "high": "wan_finger_licking_i2vA14B_HIGHNOISE_v01.safetensors", "low": "wan_finger_licking_i2vA14B_LOWNOISE_v01.safetensors", "trigger": "she licks and sucks his fingers, licking her lips", "strength": 0.4},
+    {"key": "wan_bounce", "label": "Прыгающая грудь", "origin": "WAN", "high": "BounceHighWan2_2.safetensors", "low": "BounceLowWan2_2.safetensors", "trigger": "her breasts bouncing up and down", "strength": 0.4},
     {"key": "wan_cumshot", "label": "Камшот/сперма", "origin": "WAN", "high": "Wan22_CumV3_High.safetensors", "low": "Wan22_CumV3_Low.safetensors", "trigger": "cumshot, he cums, thick white cum", "strength": 0.45},
     {"key": "wan_facial", "label": "Камшот на лицо", "origin": "WAN", "high": "wan22-f4c3spl4sh-100epoc-high-k3nk.safetensors", "low": "wan22-f4c3spl4sh-154epoc-low-k3nk.safetensors", "trigger": "f4c3spl4sh, he cums on her face, facial cumshot", "strength": 0.45},
 ]
