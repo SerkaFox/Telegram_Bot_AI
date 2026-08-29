@@ -6,6 +6,7 @@ import os
 import re
 import copy
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -1904,6 +1905,9 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
     # Owner-only: manage who can use the bot. Only the admin's state carries is_admin=True.
     if st and st.get("is_admin"):
         rows.append([InlineKeyboardButton("👥 Пользователи", callback_data="acl:list")])
+    rows.append([InlineKeyboardButton("🧩 КОМПЛЕКС (авто-сцены)", callback_data="cx:menu")])
+    rows.append([InlineKeyboardButton("🧩📷 ПОЛУКОМПЛЕКС (фото→выбор)", callback_data="cxh:menu")])
+    rows.append([InlineKeyboardButton("🧩🎯 КОМПЛЕКС по лицу (фото)", callback_data="cx:photo")])
     rows.append(
         [
             InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
@@ -1911,6 +1915,104 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
         ]
     )
     return InlineKeyboardMarkup(rows)
+
+
+# ============================================================
+# 🧩 КОМПЛЕКС — standalone auto-scenario batch (tools/complex_gen.py)
+# The button collects engine + prompt + count and launches the proven script as a detached
+# subprocess (it queues to ComfyUI on its own and posts results straight to the chat). ⏹ Стоп
+# terminates it. Kept out-of-process so a long batch never blocks the bot's event loop.
+# ============================================================
+COMPLEX_SCRIPT = Path(__file__).with_name("tools") / "complex_gen.py"
+CX_PROCS: dict[int, subprocess.Popen] = {}
+CX_COUNTS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 30, 50)
+
+def cx_engine_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 ВАН", callback_data="cx:eng:wan"),
+         InlineKeyboardButton("🧬 Эрос", callback_data="cx:eng:eros")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:main")],
+    ])
+
+def cx_partner_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 По сценариям (банк 100)", callback_data="cx:pt:stories")],
+        [InlineKeyboardButton("🎲 Микс (секс+соло)", callback_data="cx:pt:mix")],
+        [InlineKeyboardButton("👥 Секс с мужиком", callback_data="cx:pt:man")],
+        [InlineKeyboardButton("👤 Соло", callback_data="cx:pt:solo"),
+         InlineKeyboardButton("🧠 По промту", callback_data="cx:pt:auto")],
+    ])
+
+def cx_count_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(str(n), callback_data=f"cx:n:{n}") for n in (1, 2, 3, 4, 5)],
+        [InlineKeyboardButton(str(n), callback_data=f"cx:n:{n}") for n in (6, 7, 8, 9, 10)],
+        [InlineKeyboardButton("30 клипов", callback_data="cx:n:30"),
+         InlineKeyboardButton("50 клипов", callback_data="cx:n:50")],
+    ])
+
+def cx_stop_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⏹ Стоп КОМПЛЕКС", callback_data="cx:stop")]])
+
+def cx_is_running(chat_id: int) -> bool:
+    p = CX_PROCS.get(chat_id)
+    return bool(p and p.poll() is None)
+
+CX_ANIM: dict[int, list[subprocess.Popen]] = {}   # ПОЛУКОМПЛЕКС per-photo animate jobs
+
+def cx_launch(chat_id: int, engine: str, prompt: str, count: int, face: str = "", photos: bool = False,
+              partner: str = "auto") -> None:
+    args = [sys.executable, str(COMPLEX_SCRIPT), "-n", str(count), "--engine", engine,
+            "--chat", str(chat_id), "--audio", "1", "--partner", partner, "--prompt", prompt]
+    if face:
+        args += ["--face", face]   # 'tati' or an uploaded image filename in ComfyUI/input
+    if photos:
+        args += ["--photos"]       # ПОЛУКОМПЛЕКС: render stills only, animate later on tap
+    # own session/process group so cx_stop can kill the whole batch (python + ffmpeg children)
+    CX_PROCS[chat_id] = subprocess.Popen(args, cwd=str(Path(__file__).parent), start_new_session=True)
+
+def cx_animate(chat_id: int, runid: str, idxstr: str) -> None:
+    """ПОЛУКОМПЛЕКС: animate one chosen still (its own detached subprocess). Several may run;
+    ComfyUI serialises the queue. Tracked so cx_stop kills them too."""
+    args = [sys.executable, str(COMPLEX_SCRIPT), "--chat", str(chat_id),
+            "--animate", f"{runid}:{idxstr}"]
+    p = subprocess.Popen(args, cwd=str(Path(__file__).parent), start_new_session=True)
+    CX_ANIM.setdefault(chat_id, []).append(p)
+    CX_ANIM[chat_id] = [q for q in CX_ANIM[chat_id] if q.poll() is None]  # prune finished
+
+def cx_stop(chat_id: int) -> bool:
+    """Kill the whole КОМПЛЕКС batch AND interrupt/clear the ComfyUI job it already queued.
+    Killing only the python (old p.terminate) let the in-flight ComfyUI prompt finish and, worse,
+    the subprocess kept re-queuing the next beat — so generation appeared to never stop."""
+    p = CX_PROCS.get(chat_id)
+    stopped = False
+    if p and p.poll() is None:
+        try: os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+        except Exception:
+            try: p.terminate()
+            except Exception: pass
+        try: p.wait(timeout=5)
+        except Exception:
+            try: os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except Exception:
+                try: p.kill()
+                except Exception: pass
+        stopped = True
+    CX_PROCS.pop(chat_id, None)
+    # also kill any ПОЛУКОМПЛЕКС per-photo animate jobs
+    for q in CX_ANIM.pop(chat_id, []):
+        if q.poll() is None:
+            try: os.killpg(os.getpgid(q.pid), signal.SIGKILL)
+            except Exception:
+                try: q.kill()
+                except Exception: pass
+            stopped = True
+    # free the GPU now: interrupt the running prompt and drop anything the batch queued
+    try: interrupt_current()
+    except Exception: pass
+    try: clear_comfy_queue()
+    except Exception: pass
+    return stopped
 
 
 def media_preview_caption(media: dict[str, Any], index: int, total: int) -> str:
@@ -4983,6 +5085,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     path = TMP_DIR / file_name
     await tg_file.download_to_drive(custom_path=str(path))
 
+    # 🧩📷 КОМПЛЕКС по фото — this photo is the face-lock source, not a generation input
+    if st.pop("cx_face_await_photo", False):
+        face_name = f"cxface_{update.effective_user.id}_{uuid.uuid4().hex}.jpg"
+        await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / face_name, path.read_bytes())
+        st["cx_mode"] = "full"
+        st["cx_face"] = face_name
+        await send_ui_message(update.message, context,
+            "📷 Лицо принято — будет на всех клипах.\n\nВыбери движок:", reply_markup=cx_engine_keyboard())
+        return
+
     with Image.open(path) as img:
         width, height = img.size
 
@@ -5040,6 +5152,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     st = get_state(context)
+
+    # 🧩 КОМПЛЕКС is waiting for its body/scene description — capture it and offer the count buttons.
+    if st.pop("cx_await", False):
+        st["cx_prompt"] = text
+        await send_ui_message(
+            msg, context,
+            f"🧩 Принято описание:\n{text}\n\nСколько клипов сгенерировать?",
+            reply_markup=cx_count_keyboard(),
+        )
+        return
 
     st["prompt"] = text
     tag = "✏️ Промт обновлён (правка на месте)" if edited else "Текст принят как промт"
@@ -5169,6 +5291,149 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await context.bot.send_message(chat_id=chat_id, text="Промпт пока не задан.")
         return
 
+    if data == "cx:menu":
+        st["cx_mode"] = "full"
+        st["cx_face"] = ""; st.pop("cx_face_pick", None); st.pop("cx_face_await_photo", None)   # normal complex — random faces
+        txt = ("🧩 КОМПЛЕКС — авто-конвейер сцен с развитием.\n\n"
+               "Промт задаёт: возраст · пропорции тела · число персонажей (партнёр: муж/жен/антро/соло).\n"
+               "Рандом: сценарий · поза · движение · одежда · локация · этнос.\n\n"
+               "Выбери движок:")
+        await replace_ui_message_from_callback(query, context, txt, reply_markup=cx_engine_keyboard())
+        return
+
+    if data == "cxh:menu":
+        st["cx_mode"] = "photos"
+        st["cx_face"] = ""; st.pop("cx_face_pick", None); st.pop("cx_face_await_photo", None)
+        txt = ("🧩📷 ПОЛУКОМПЛЕКС — сначала все ФОТО, потом ты выбираешь, какие оживить.\n\n"
+               "Всё как в КОМПЛЕКСЕ (тот же промт/рандом), но видео не рендерится сразу — "
+               "под каждым фото будет кнопка 🎬 Анимировать.\n\nВыбери движок:")
+        await replace_ui_message_from_callback(query, context, txt, reply_markup=cx_engine_keyboard())
+        return
+
+    if data == "cx:photo":
+        # Face-lock is a FULL complex run. Do not inherit a stale "photos" value from a
+        # previously opened semi-complex menu.
+        st["cx_mode"] = "full"
+        st["cx_face_await_photo"] = True; st["cx_face"] = ""; st.pop("cx_face_pick", None)
+        await replace_ui_message_from_callback(
+            query, context,
+            "🎯 КОМПЛЕКС по лицу: пришли ОДНО фото с чётким лицом анфас — это лицо будет на всех клипах "
+            "(хоть Таня, хоть другое), ИЛИ выбери из недавних.\nПричёска будет рандомной — ReActor переносит только лицо.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📷 Выбрать из недавних (10)", callback_data="cxface:recent")]]))
+        return
+
+    if data == "cxface:recent":
+        user_id = update.effective_user.id if update.effective_user else 0
+        library = rebuild_media_library_from_disk(context, user_id, st["max_side"])
+        if not library:
+            await replace_ui_message_from_callback(query, context,
+                "Пока нет сохранённых фото — пришли одно.", reply_markup=None)
+            return
+        st["cx_face_pick"] = True; st.pop("cx_face_await_photo", None)
+        await replace_media_preview_from_callback(query, context, index=0)
+        return
+
+    if data.startswith("cx:eng:"):
+        eng = data.split(":")[2]
+        st["cx_engine"] = eng if eng in ("wan", "eros") else "wan"
+        note = "🎬 ВАН (визуал/действие)" if st["cx_engine"] == "wan" else "🧬 Эрос (нативный голос + ИИ-диалоги)"
+        await replace_ui_message_from_callback(
+            query, context,
+            f"Движок: {note}.\n\nКто в кадре? (чтобы не выходило одно соло-дрочево)\n"
+            "• 🎲 Микс — вперемешку секс с мужиком и соло\n"
+            "• 👥 Секс с мужиком — почти всегда ебля/минет\n"
+            "• 👤 Соло — только сама\n"
+            "• 🧠 По промту — как напишешь (соло, если партнёр не назван)",
+            reply_markup=cx_partner_keyboard(),
+        )
+        return
+
+    if data.startswith("cx:pt:"):
+        pt = data.split(":")[2]
+        st["cx_partner"] = pt if pt in ("mix", "man", "solo", "auto", "stories") else "auto"
+        st["cx_await"] = True
+        pt_lbl = {"mix": "🎲 Микс", "man": "👥 Секс с мужиком", "solo": "👤 Соло", "auto": "🧠 По промту",
+                  "stories": "📖 По банку сценариев (100)"}[st["cx_partner"]]
+        await replace_ui_message_from_callback(
+            query, context,
+            f"Состав: {pt_lbl}.\n\n✍️ Пришли ОДНИМ сообщением описание тела:\n"
+            "возраст · пропорции (грудь/жопа/рост) · этнос если важен.\n\n"
+            "Пример: «зрелая женщина 40 лет, большая силиконовая грудь, большая жопа»\n"
+            "Партнёра писать не обязательно — состав уже выбран кнопкой.",
+            reply_markup=None,
+        )
+        return
+
+    if data.startswith("cx:n:"):
+        chat_id = query.message.chat_id
+        count = int(data.split(":")[2])
+        prompt = str(st.get("cx_prompt") or "").strip()
+        if not prompt:
+            await replace_ui_message_from_callback(query, context,
+                "Сначала пришли описание — нажми 🧩 КОМПЛЕКС заново.", reply_markup=main_keyboard(st))
+            return
+        if cx_is_running(chat_id):
+            await context.bot.send_message(chat_id,
+                "🧩 КОМПЛЕКС уже работает. Останови текущую пачку перед новой.", reply_markup=cx_stop_keyboard())
+            return
+        eng = st.get("cx_engine", "wan")
+        face = str(st.get("cx_face") or "")
+        photos = st.get("cx_mode") == "photos"
+        partner = str(st.get("cx_partner") or "auto")
+        cx_launch(chat_id, eng, prompt, count, face, photos=photos, partner=partner)
+
+        async def _cx_watchdog(cid: int) -> None:
+            # catch an instant crash (e.g. bad args) so it doesn't look like a 20-min hang
+            await asyncio.sleep(15)
+            p = CX_PROCS.get(cid)
+            if p and p.poll() is not None and p.returncode not in (0, None):
+                await context.bot.send_message(cid,
+                    f"⚠️ КОМПЛЕКС упал на старте (код {p.returncode}) — ничего не генерится. "
+                    "Скорее всего скрипт был перезаписан. Запусти заново.")
+        asyncio.create_task(_cx_watchdog(chat_id))
+
+        face_line = f"\n🎯 Фейслок: {face}" if face else ""
+        pt_lbl = {"mix": "🎲 микс (секс+соло)", "man": "👥 секс с мужиком",
+                  "solo": "👤 соло", "auto": "🧠 по промту"}.get(partner, partner)
+        head = ("🧩📷 ПОЛУКОМПЛЕКС запущен: генерирую {n} ФОТО · {e}.{f}\n"
+                "Под каждым фото будет 🎬 Анимировать — оживлю выбранные."
+                if photos else
+                "🧩 Запущено: {n} клипов · {e}.{f}\nРезультаты придут сюда по мере готовности.")
+        await replace_ui_message_from_callback(
+            query, context,
+            head.format(n=count, e=('🎬 ВАН' if eng == 'wan' else '🧬 Эрос→ВАН'), f=face_line)
+            + f"\nСостав: {pt_lbl}\nТело: {prompt[:150]}",
+            reply_markup=cx_stop_keyboard(),
+        )
+        return
+
+    if data.startswith("cxa:"):   # ПОЛУКОМПЛЕКС: animate one chosen still  cxa:<runid>:<idx>
+        chat_id = query.message.chat_id
+        parts = data.split(":")
+        if len(parts) != 3:
+            await query.answer("Плохая кнопка", show_alert=False); return
+        _, runid, idxstr = parts
+        cx_animate(chat_id, runid, idxstr)
+        try:
+            await query.answer("🎬 Оживляю это фото…", show_alert=False)
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⏳ В очереди на анимацию", callback_data="cxa:done")]]))
+        except Exception:
+            pass
+        return
+
+    if data == "cxa:done":
+        await query.answer("Уже в очереди", show_alert=False)
+        return
+
+    if data == "cx:stop":
+        chat_id = query.message.chat_id
+        stopped = cx_stop(chat_id)
+        await replace_ui_message_from_callback(query, context,
+            "⏹ КОМПЛЕКС остановлен." if stopped else "Активной КОМПЛЕКС-пачки нет.",
+            reply_markup=main_keyboard(st))
+        return
+
     if data.startswith("acl:"):
         await handle_acl_callback(update, context, data)
         return
@@ -5295,6 +5560,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await replace_ui_message_from_callback(query, context, "Файл этого фото уже удалён с диска. Пришли его заново.", reply_markup=main_keyboard(st))
             return
 
+        if st.pop("cx_face_pick", False):   # 🧩🎯 picking the face-lock source from recent photos
+            user_id = update.effective_user.id if update.effective_user else 0
+            face_name = f"cxface_{user_id}_{uuid.uuid4().hex}.jpg"
+            await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / face_name, Path(media["path"]).read_bytes())
+            st["cx_mode"] = "full"
+            st["cx_face"] = face_name
+            await replace_ui_message_from_callback(query, context,
+                "📷 Лицо из недавних выбрано — будет на всех клипах.\n\nВыбери движок:",
+                reply_markup=cx_engine_keyboard())
+            return
+
         if st["mode"] in DUO_PHOTO_MODES:
             duo = st["duo_photos"]
             slot = 0 if not duo[0].get("path") else 1
@@ -5311,6 +5587,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "queue:stopclear":
         try:
             STORY_CANCEL.add(query.message.chat_id)
+            cx_killed = cx_stop(query.message.chat_id)  # kill any КОМПЛЕКС batch so it stops re-queuing
             await asyncio.to_thread(interrupt_current)
             active_cleared = clear_active_prompts()
             comfy_resp = await asyncio.to_thread(clear_comfy_queue)
@@ -5318,7 +5595,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await replace_ui_message_from_callback(
                 query,
                 context,
-                f"Остановлено и очищено.\n• active prompt сброшено: {active_cleared}\n"
+                f"Остановлено и очищено.\n• КОМПЛЕКС остановлен: {'да' if cx_killed else 'нет'}\n"
+                f"• active prompt сброшено: {active_cleared}\n"
                 f"• локальных задач удалено: {local_cleared}\n• ответ ComfyUI: {comfy_resp}",
                 reply_markup=main_keyboard(st),
             )
