@@ -1,8 +1,8 @@
 """Capability registry advertised to FOX MIX.
 
 Every capability the server *could* do is listed so FOX can discover/describe it, but only the
-Phase-1 subset is ENABLED. A capability that is described but not enabled is refused at runtime with
-`unsupported_in_current_phase` — described != usable until its own tests pass.
+ENABLED subset actually executes. A capability that is described but not enabled is refused at
+runtime with `unsupported_in_current_phase` — described != usable until its own tests pass.
 """
 from __future__ import annotations
 
@@ -19,27 +19,39 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     "adult.video.eros",
 )
 
-# Actually wired + tested in this phase. ONLY safe MopMix images.
-ENABLED_CAPABILITIES: frozenset[str] = frozenset({"safe.image.mopmix"})
+# Actually wired + tested. Phase G2 adds safe.image.edit and safe.video.clean to safe.image.mopmix.
+# safe.video.wan/ltx/v2v stay advertised-but-disabled; all adult stays execution-disabled.
+ENABLED_CAPABILITIES: frozenset[str] = frozenset({
+    "safe.image.mopmix",
+    "safe.image.edit",
+    "safe.video.clean",
+})
 
 
 def is_enabled(capability: str) -> bool:
     return capability in ENABLED_CAPABILITIES
 
 
-def capability_for_job(job_type: str, content_class: str) -> str | None:
-    """Map a job's (type, content_class) to a capability key, or None if we don't model it.
+def capability_for_job(job_type: str, mode: str, content_class: str) -> str | None:
+    """Map a job's (type, mode, content_class) to a capability key, or None if we don't model it.
 
-    Phase-1 only needs safe image → safe.image.mopmix. Other combinations resolve to their catalogue
-    key (so the reason for refusal is 'unsupported_in_current_phase', not 'unknown')."""
+    Routing is explicit per (type, mode, content_class) so an adult job can never resolve to a safe
+    capability, and image/mopmix vs image/edit never collide."""
     t = (job_type or "").strip().lower()
+    m = (mode or "").strip().lower()
     c = (content_class or "").strip().lower()
-    if t == "image" and c == "safe":
-        return "safe.image.mopmix"
-    if t == "image" and c == "adult":
-        return "adult.image"
-    if t == "video" and c == "safe":
-        return "safe.video.wan"
-    if t == "video" and c == "adult":
-        return "adult.video.wan"
+    if c == "safe":
+        if t == "image" and m in ("", "mopmix"):
+            return "safe.image.mopmix"
+        if t == "image" and m == "edit":
+            return "safe.image.edit"
+        if t == "video" and m == "clean":
+            return "safe.video.clean"
+        if t == "video":
+            return "safe.video.wan"        # advertised, not enabled
+    elif c == "adult":
+        if t == "image":
+            return "adult.image"
+        if t == "video":
+            return "adult.video.wan"
     return None

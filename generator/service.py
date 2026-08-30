@@ -71,6 +71,13 @@ def _png_dims(path: Path) -> tuple[Optional[int], Optional[int]]:
         return None, None
 
 
+def _write_test_mp4(path: Path) -> None:
+    """Minimal well-formed-enough MP4 (ftyp box) for FOX_WORKER_MOCK_GENERATION video tests."""
+    ftyp = b"ftypmp42" + b"\x00\x00\x00\x00" + b"mp42isom"
+    box = (len(ftyp) + 4).to_bytes(4, "big") + ftyp
+    path.write_bytes(box + b"\x00" * 64)
+
+
 def _write_test_png(path: Path, w: int = 64, h: int = 64, rgb: tuple[int, int, int] = (255, 140, 0)) -> None:
     """Pure-stdlib tiny solid-colour PNG for FOX_WORKER_MOCK_GENERATION (no PIL / no GPU)."""
     raw = bytearray()
@@ -162,6 +169,122 @@ class SafeGeneratorService:
             metadata={"engine": engine, "mode": mode,
                       "generation_seconds": round(time.time() - started, 2)},
         )
+
+
+    def edit_image(
+        self,
+        *,
+        instruction: str,
+        source_path: str,
+        out_dir: Path,
+        count: int = 1,
+        quality: str = "medium",
+        seed: Optional[int] = None,
+        mock: bool = False,
+        timeout: int = 300,
+        should_cancel: Optional[Callable[[], bool]] = None,
+        on_progress: Optional[Callable[[int, str], None]] = None,
+    ) -> GenerationResult:
+        if not instruction or not instruction.strip():
+            raise GenerationError("empty instruction", error_code="invalid_prompt")
+        if not source_path or not Path(source_path).is_file():
+            raise GenerationError("source image missing", error_code="missing_source")
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        count = max(1, int(count))
+        started = time.time()
+
+        if mock:
+            paths = []
+            for i in range(count):
+                if should_cancel and should_cancel() and i > 0:
+                    break
+                p = out_dir / f"mock_edit_{i:02d}.png"
+                _write_test_png(p, rgb=(60, 120, 200))
+                paths.append(p)
+                if on_progress:
+                    on_progress(int(round((i + 1) / count * 100)), f"mock edit {i + 1}/{count}")
+            engine, mode = "mock", "edit"
+        else:
+            try:
+                from .image import edit_qwen_images
+            except Exception as e:  # pragma: no cover
+                raise GenerationError(f"generator backend unavailable: {e}", error_code="backend_unavailable")
+            try:
+                paths = edit_qwen_images(
+                    instruction, source_path, count=count, quality=quality, seed=seed,
+                    out_dir=out_dir, timeout=timeout, should_cancel=should_cancel, on_progress=on_progress,
+                )
+            except TimeoutError as e:
+                raise GenerationError(str(e), error_code="timeout", retryable=True)
+            except FileNotFoundError as e:
+                raise GenerationError(str(e), error_code="missing_source")
+            except Exception as e:
+                raise GenerationError(str(e), error_code="generation_failed")
+            engine, mode = "qwen_image_edit_2509", "edit"
+
+        artifacts = []
+        for p in paths:
+            w, h = _png_dims(p)
+            artifacts.append(ArtifactFile(path=p, kind="image", mime_type=_mime_for(p), width=w, height=h))
+        return GenerationResult(artifacts=artifacts,
+                                metadata={"engine": engine, "mode": mode,
+                                          "generation_seconds": round(time.time() - started, 2)})
+
+    def generate_clean_video(
+        self,
+        *,
+        prompt: str,
+        source_path: str,
+        out_dir: Path,
+        quality: str = "medium",
+        seconds: Optional[int] = None,
+        seed: Optional[int] = None,
+        mock: bool = False,
+        timeout: int = 900,
+        should_cancel: Optional[Callable[[], bool]] = None,
+        on_progress: Optional[Callable[[int, str], None]] = None,
+    ) -> GenerationResult:
+        if not prompt or not prompt.strip():
+            raise GenerationError("empty prompt", error_code="invalid_prompt")
+        if not source_path or not Path(source_path).is_file():
+            raise GenerationError("source image missing", error_code="missing_source")
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+
+        if mock:
+            if should_cancel and should_cancel():
+                raise GenerationError("cancelled", error_code="cancelled")
+            p = out_dir / "mock_clean.mp4"
+            _write_test_mp4(p)
+            if on_progress:
+                on_progress(100, "mock video")
+            paths, engine, mode = [p], "mock", "clean"
+        else:
+            try:
+                from .video import clean_video
+            except Exception as e:  # pragma: no cover
+                raise GenerationError(f"generator backend unavailable: {e}", error_code="backend_unavailable")
+            try:
+                paths = clean_video(
+                    prompt, source_path, quality=quality, seconds=seconds, seed=seed,
+                    out_dir=out_dir, timeout=timeout, should_cancel=should_cancel, on_progress=on_progress,
+                )
+            except TimeoutError as e:
+                raise GenerationError(str(e), error_code="timeout", retryable=True)
+            except FileNotFoundError as e:
+                raise GenerationError(str(e), error_code="missing_source")
+            except Exception as e:
+                raise GenerationError(str(e), error_code="generation_failed")
+            engine, mode = "wan22_i2v_clean", "clean"
+
+        artifacts = [ArtifactFile(path=p, kind="video", mime_type=_mime_for(p)) for p in paths]
+        return GenerationResult(artifacts=artifacts,
+                                metadata={"engine": engine, "mode": mode,
+                                          "generation_seconds": round(time.time() - started, 2)})
 
 
 class AdultGeneratorService:

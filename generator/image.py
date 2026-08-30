@@ -147,3 +147,81 @@ def generate_mopmix_images(
     if not written:
         raise RuntimeError("MopMix produced no images")
     return written
+
+
+def _source_dims(path: Path) -> tuple[int, int]:
+    """Source image dimensions via PIL (available in the bot venv); PNG-header fallback."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return int(im.width), int(im.height)
+    except Exception:
+        w, h = _png_dimensions(path)
+        return (w or 1024, h or 1024)
+
+
+def edit_qwen_images(
+    instruction: str,
+    source_path: str,
+    *,
+    count: int = 1,
+    quality: str = "medium",
+    seed: Optional[int] = None,
+    out_dir: Path,
+    timeout: int = 300,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[int, str], None]] = None,
+) -> list[Path]:
+    """Edit `source_path` per `instruction` with the existing Qwen-Image-Edit graph (clean=True:
+    no NSFW LoRA). Preserves the source aspect ratio, honours cooperative cancel between items."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    count = max(1, int(count))
+    src = Path(source_path)
+    if not src.is_file():
+        raise FileNotFoundError(f"source image not found: {source_path}")
+
+    if on_progress:
+        on_progress(5, "loading")
+    english = b.translate_to_english(instruction)
+    sw, sh = _source_dims(src)
+    qw, qh = b.IMAGE_EDIT_QUALITY.get(quality, b.IMAGE_EDIT_QUALITY["medium"])
+    ew, eh = b.fit_to_pixel_budget(sw, sh, qw * qh)
+    uploaded_name = b.upload_image_to_comfy(str(src), src.name)
+
+    written: list[Path] = []
+    for i in range(count):
+        if should_cancel and should_cancel() and i > 0:
+            break
+        item_seed = (int(seed) + i) if seed is not None else b.make_seed()
+        wf = b.build_image_edit_workflow(
+            image_name=uploaded_name, prompt=english, width=ew, height=eh, seed=item_seed, clean=True,
+        )
+        _wait_for_gpu_gate(should_cancel)
+        if should_cancel and should_cancel() and i > 0:
+            break
+        prompt_id = b.queue_prompt(wf, str(uuid.uuid4()))
+        deadline = time.time() + timeout
+        result = None
+        while time.time() < deadline:
+            item = b.get_history(prompt_id).get(prompt_id)
+            if item and item.get("outputs"):
+                result = b.pick_first_result_from_outputs(item["outputs"], preferred_node="9")
+                break
+            time.sleep(b.POLL_SECONDS)
+        if result is None:
+            raise TimeoutError(f"Qwen-Edit timed out (prompt_id={prompt_id})")
+        blob = b.fetch_file(result["filename"], subfolder=result.get("subfolder", ""),
+                            file_type=result.get("type", "output"))
+        dest = out_dir / f"edit_{i:02d}_{result['filename']}"
+        dest.write_bytes(blob)
+        written.append(dest)
+        try:
+            b.delete_comfy_result_file(result["filename"], result.get("subfolder", ""))
+        except Exception:
+            pass
+        if on_progress:
+            on_progress(int(round((i + 1) / count * 100)), f"edited {i + 1}/{count}")
+    if not written:
+        raise RuntimeError("Qwen-Edit produced no images")
+    return written

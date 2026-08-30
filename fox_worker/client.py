@@ -121,6 +121,30 @@ class FoxCoreClient:
                          "current_job_id": current_job_id, "metadata": metadata},
                    expect=(200, 204))
 
+    def download(self, url: str, dest: Path) -> Path:
+        """Fetch a source artifact the job points to (proposed contract: job.options.source_url).
+        Sends the worker Bearer token only when the URL is on the FOX CORE host; a presigned/public
+        URL is fetched without our credentials. Streams to `dest`."""
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        headers = self._headers() if url.startswith(self.cfg.core_url.rstrip("/")) else {}
+        try:
+            with self._session.get(url, headers=headers, timeout=self.cfg.request_timeout,
+                                   stream=True) as r:
+                if r.status_code in (401, 403):
+                    raise FoxCoreError(f"auth rejected downloading source ({r.status_code})",
+                                       status=r.status_code, retryable=False)
+                if r.status_code != 200:
+                    raise FoxCoreError(f"source download failed ({r.status_code})",
+                                       status=r.status_code, retryable=r.status_code >= 500)
+                with open(dest, "wb") as fh:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk:
+                            fh.write(chunk)
+        except requests.RequestException as e:
+            raise FoxCoreError(f"network error downloading source: {e.__class__.__name__}", retryable=True)
+        return dest
+
     def get_control(self, job_id: str) -> dict:
         r = self._get(f"/jobs/{job_id}/control", expect=(200,))
         return r.json() if (r.content or b"").strip() else {}

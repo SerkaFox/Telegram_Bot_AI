@@ -16,6 +16,8 @@ import logging
 import threading
 import time
 
+from generator import GenerationError
+
 from . import capabilities as caps
 from .artifacts import JobWorkspace, prune_old_jobs
 from .client import FoxCoreClient, FoxCoreError
@@ -131,7 +133,7 @@ class Worker:
         self._status = "busy"
         self._current_job_id = job.id
         try:
-            cap = caps.capability_for_job(job.type, job.content_class)
+            cap = caps.capability_for_job(job.type, job.mode, job.content_class)
             if cap is None or not caps.is_enabled(cap):
                 reason = "unsupported_in_current_phase"
                 log.info("job.failed id=%s reason=%s cap=%s", job.id, reason, cap)
@@ -139,7 +141,7 @@ class Worker:
                                         f"capability {cap} not enabled")
                 self.metrics.jobs_failed += 1
                 return
-            await self._run_safe_image(job)
+            await self._execute_job(job, cap)
         except FoxCoreError as e:
             # Reporting to CORE failed — log and move on; do not crash.
             log.warning("job.error id=%s core reporting failed: %s", job.id, e)
@@ -154,19 +156,22 @@ class Worker:
             self._status = "idle"
             self._current_job_id = None
 
-    async def _run_safe_image(self, job: Job) -> None:
+    async def _execute_job(self, job: Job, cap: str) -> None:
+        """Shared executor for every enabled capability: started → progress → produce (behind the
+        GPU gate) → upload → complete/failed. The GPU gate + cancel + finally-release live in the
+        producer / this frame so one FOX job can never wedge the shared GPU or the bot."""
         ws = JobWorkspace(self.cfg.jobs_dir, job.id).open()
         cancel_event = threading.Event()
         control_task = asyncio.create_task(self._poll_control(job.id, cancel_event))
-        log.info("job.started id=%s cap=safe.image.mopmix", job.id)
+        log.info("job.started id=%s cap=%s", job.id, cap)
         await asyncio.to_thread(self.client.started, job.id)
 
-        # Throttled progress reporter (called from the generation thread).
-        last = {"pct": -10}
+        # Throttled progress reporter (called from the generation thread and this frame).
+        last = {"pct": -10, "stage": ""}
 
         def on_progress(pct: int, stage: str) -> None:
-            if pct - last["pct"] >= 5 or pct >= 100:
-                last["pct"] = pct
+            if pct - last["pct"] >= 5 or pct >= 100 or stage != last["stage"]:
+                last["pct"], last["stage"] = pct, stage
                 try:
                     self.client.progress(job.id, pct, stage)
                     log.info("job.progress id=%s pct=%s stage=%s", job.id, pct, stage)
@@ -174,16 +179,10 @@ class Worker:
                     log.debug("progress post failed id=%s: %s", job.id, e)
 
         try:
-            await asyncio.to_thread(self.client.progress, job.id, 1, "rendering")
+            await asyncio.to_thread(self.client.progress, job.id, 1, "queued")
             ws.set_state("rendering")
             gen_start = time.time()
-            result = await asyncio.to_thread(
-                self.safe.generate_image,
-                prompt=job.prompt, out_dir=ws.out_dir, count=job.count, quality=job.quality,
-                seed=job.options.get("seed"), image_path=None,
-                mock=self.cfg.mock_generation, should_cancel=cancel_event.is_set,
-                on_progress=on_progress,
-            )
+            result = await asyncio.to_thread(self._produce, job, cap, ws, cancel_event, on_progress)
             self.metrics.gen_seconds_total += time.time() - gen_start
             ws.set_state("generated")
 
@@ -193,8 +192,8 @@ class Worker:
                 log.info("job.failed id=%s reason=cancelled", job.id)
                 return
 
-            # Upload each artifact, then complete.
             up_start = time.time()
+            on_progress(90, "uploading")
             artifact_ids: list[str] = []
             for art in result.artifacts:
                 aid = await asyncio.to_thread(
@@ -210,7 +209,8 @@ class Worker:
             self.metrics.jobs_completed += 1
             log.info("job.completed id=%s artifacts=%s meta=%s", job.id, len(artifact_ids), result.metadata)
         except Exception as e:
-            # Generation error → report failed with its code where available.
+            # Any generation/source error → report failed with its code; the gate is already released
+            # (the producer thread has returned), so nothing stays locked.
             code = getattr(e, "error_code", "generation_failed")
             log.warning("job.failed id=%s code=%s: %s", job.id, code, e)
             try:
@@ -224,8 +224,45 @@ class Worker:
                 await control_task
             except asyncio.CancelledError:
                 pass
-            # Keep the workspace for retention-based cleanup (files survive until confirmed upload
-            # and the retention window). Prune happens in the main loop.
+            # Workspace kept for retention-based cleanup (prune runs in the main loop).
+
+    def _fetch_source(self, job: Job, ws: JobWorkspace) -> str:
+        """Fetch the source image a job points to. PROPOSED minimal contract: job.options.source_url
+        (worker Bearer only when on the CORE host). Fails with `missing_source` when absent, so an
+        image.edit / clean.video job without a source is reported cleanly (never a crash)."""
+        opts = job.options or {}
+        url = opts.get("source_url") or opts.get("source_image_url") or opts.get("source_download_url")
+        if not url:
+            raise GenerationError("no source_url in job.options", error_code="missing_source")
+        dest = ws.root / "source"
+        self.client.download(str(url), dest)
+        return str(dest)
+
+    def _produce(self, job: Job, cap: str, ws: JobWorkspace, cancel_event: threading.Event, on_progress):
+        """Sync producer run in a worker thread → GenerationResult. Source fetch (edit/clean) happens
+        here so a download failure is reported as a normal job failure, releasing the GPU gate."""
+        mock = self.cfg.mock_generation
+        if cap == "safe.image.mopmix":
+            return self.safe.generate_image(
+                prompt=job.prompt, out_dir=ws.out_dir, count=job.count, quality=job.quality,
+                seed=job.options.get("seed"), image_path=None, mock=mock,
+                should_cancel=cancel_event.is_set, on_progress=on_progress)
+        if cap == "safe.image.edit":
+            src = self._fetch_source(job, ws)
+            on_progress(10, "waiting_gpu")
+            return self.safe.edit_image(
+                instruction=job.prompt, source_path=src, out_dir=ws.out_dir, count=job.count,
+                quality=job.quality, seed=job.options.get("seed"), mock=mock,
+                should_cancel=cancel_event.is_set, on_progress=on_progress)
+        if cap == "safe.video.clean":
+            src = self._fetch_source(job, ws)
+            on_progress(10, "waiting_gpu")
+            return self.safe.generate_clean_video(
+                prompt=job.prompt, source_path=src, out_dir=ws.out_dir, quality=job.quality,
+                seconds=job.options.get("duration") or job.options.get("seconds"),
+                seed=job.options.get("seed"), mock=mock,
+                should_cancel=cancel_event.is_set, on_progress=on_progress)
+        raise GenerationError(f"no producer for {cap}", error_code="unsupported_in_current_phase")
 
     async def _poll_control(self, job_id: str, cancel_event: threading.Event) -> None:
         """Background: ask CORE whether this job was cancelled; flip the event so generation bails

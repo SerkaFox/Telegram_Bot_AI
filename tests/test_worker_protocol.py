@@ -142,6 +142,71 @@ def test_cancel_stops_batch_after_current_item(tmp_path):
     assert len(res.artifacts) == 1
 
 
+def test_image_edit_full_lifecycle(core, tmp_path):
+    core.enqueue_job({"id": "job-e", "type": "image", "mode": "edit", "content_class": "safe",
+                      "prompt": "change the background to a news studio", "count": 1, "quality": "M",
+                      "options": {"source_url": core.source_url}})
+    cfg = make_cfg(core.url, core.token, tmp_path)
+    drive_worker(cfg, predicate=lambda: len(core.completed) >= 1, timeout=12)
+    assert not core.failed, f"unexpected failures: {core.failed}"
+    assert core.source_downloads >= 1                       # source image was fetched from CORE
+    arts = [a for a in core.artifacts if a["job_id"] == "job-e"]
+    assert len(arts) == 1 and arts[0]["kind"] == "image"
+    assert any(s["job_id"] == "job-e" for s in core.started)
+
+
+def test_clean_video_full_lifecycle(core, tmp_path):
+    core.enqueue_job({"id": "job-v", "type": "video", "mode": "clean", "content_class": "safe",
+                      "prompt": "the fox smiles at the camera", "count": 1, "quality": "M",
+                      "options": {"source_url": core.source_url, "duration": 4}})
+    cfg = make_cfg(core.url, core.token, tmp_path)
+    drive_worker(cfg, predicate=lambda: len(core.completed) >= 1, timeout=12)
+    assert not core.failed, f"unexpected failures: {core.failed}"
+    arts = [a for a in core.artifacts if a["job_id"] == "job-v"]
+    assert len(arts) == 1 and arts[0]["kind"] == "video"
+
+
+def test_edit_missing_source_fails_then_worker_recovers(core, tmp_path):
+    # edit job WITHOUT source_url -> missing_source; worker must stay healthy and do the next job.
+    core.enqueue_job({"id": "job-nosrc", "type": "image", "mode": "edit", "content_class": "safe",
+                      "prompt": "edit me", "count": 1, "quality": "M", "options": {}})
+    core.enqueue_job({"id": "job-ok", "type": "image", "mode": "mopmix", "content_class": "safe",
+                      "prompt": "a fox", "count": 1, "quality": "M", "options": {}})
+    cfg = make_cfg(core.url, core.token, tmp_path)
+    drive_worker(cfg, predicate=lambda: len(core.completed) >= 1 and len(core.failed) >= 1, timeout=12)
+    assert any(f["job_id"] == "job-nosrc" and f["error_code"] == "missing_source" for f in core.failed)
+    assert any(c["job_id"] == "job-ok" for c in core.completed)   # recovered, no wedge
+
+
+def test_video_wan_unsupported_in_current_phase(core, tmp_path):
+    # safe.video.wan is advertised but NOT enabled -> refused, never generated.
+    core.enqueue_job({"id": "job-w", "type": "video", "mode": "wan", "content_class": "safe",
+                      "prompt": "x", "count": 1, "quality": "M", "options": {"source_url": core.source_url}})
+    cfg = make_cfg(core.url, core.token, tmp_path)
+    drive_worker(cfg, predicate=lambda: len(core.failed) >= 1, timeout=10)
+    assert core.failed[0]["error_code"] == "unsupported_in_current_phase"
+    assert not core.completed and not core.artifacts
+
+
+def test_gpu_gate_yields_then_proceeds(monkeypatch):
+    gi = pytest.importorskip("generator.image")
+    calls = {"n": 0}
+    def fake_queue():
+        calls["n"] += 1
+        return {"queue_running": [], "queue_pending": []} if calls["n"] >= 3 else {"queue_running": [1]}
+    monkeypatch.setattr(gi.b, "get_queue_state", fake_queue)
+    monkeypatch.setattr(gi.time, "sleep", lambda *_a, **_k: None)
+    gi._wait_for_gpu_gate(None)                 # loops while ComfyUI busy, then returns
+    assert calls["n"] >= 3
+
+
+def test_gpu_gate_cancel_short_circuits(monkeypatch):
+    gi = pytest.importorskip("generator.image")
+    monkeypatch.setattr(gi.b, "get_queue_state", lambda: {"queue_running": [1]})
+    monkeypatch.setattr(gi.time, "sleep", lambda *_a, **_k: None)
+    gi._wait_for_gpu_gate(lambda: True)         # cancel requested → returns immediately (no hang)
+
+
 def test_worker_polls_control_endpoint(core, tmp_path):
     # A completed job means the control endpoint was reachable and polled without breaking flow.
     core.enqueue_job({"id": "job-c", "type": "image", "content_class": "safe",

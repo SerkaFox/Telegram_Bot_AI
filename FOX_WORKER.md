@@ -54,8 +54,29 @@ All calls send `Authorization: Bearer <FOX_WORKER_TOKEN>`.
 Advertised catalogue: `safe.image.mopmix`, `safe.image.edit`, `safe.video.clean`, `safe.video.wan`,
 `safe.video.ltx`, `safe.video.v2v`, `adult.image`, `adult.video.wan`, `adult.video.eros`.
 
-**Enabled now:** `safe.image.mopmix` only. Everything else (all video, all adult) is refused with
-`unsupported_in_current_phase` until wired + tested in a later phase.
+**Enabled now (Phase G2):** `safe.image.mopmix`, `safe.image.edit` (Qwen-Image-Edit), `safe.video.clean`
+(WAN 2.2 clean i2v + MMAudio). Everything else (`safe.video.wan/ltx/v2v`, all adult) is advertised
+but refused with `unsupported_in_current_phase` until wired + tested.
+
+Routing is by `(type, mode, content_class)`:
+`image/mopmix/safe → safe.image.mopmix` · `image/edit/safe → safe.image.edit` ·
+`video/clean/safe → safe.video.clean`. An adult job can never resolve to a safe capability.
+
+### Source image transport (image.edit / clean.video) — PROPOSED contract
+Those two capabilities need a **source image**, and the FOX CORE OpenAPI currently exposes **no
+artifact-download endpoint**. The worker therefore reads the source from the job:
+
+> `job.options.source_url` — an HTTP(S) URL the worker GETs (sends the worker Bearer token **only**
+> when the URL is on the FOX CORE host; a presigned/public URL is fetched without credentials).
+
+Aliases accepted: `source_image_url`, `source_download_url`. If none is present the job fails cleanly
+with `missing_source`. **FOX-side must populate this** (or add a CORE download endpoint) before a real
+image.edit / clean.video job can run — this is a contract point to confirm, not a silent assumption.
+
+### Progress stages (coarse)
+Image: `queued → loading → waiting_gpu → rendering/edited → uploading`.
+Video: `queued → preparing → waiting_gpu → rendering → audio → encoding → uploading`.
+Percentages are coarse (the underlying ComfyUI workflow does not expose true progress).
 
 ## GPU sharing
 

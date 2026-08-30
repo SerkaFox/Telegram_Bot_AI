@@ -9,11 +9,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 import threading
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 API_BASE = "/internal/generator/v1"
+
+
+def _tiny_png(w: int = 32, h: int = 32, rgb: tuple[int, int, int] = (200, 120, 40)) -> bytes:
+    """Small solid PNG the mock serves as a source artifact (pure stdlib, no PIL)."""
+    raw = bytearray()
+    row = bytes(rgb) * w
+    for _ in range(h):
+        raw.append(0)
+        raw += row
+
+    def chunk(typ: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + typ + data
+                + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw)))
+            + chunk(b"IEND", b""))
 
 
 def parse_multipart(body: bytes, boundary: bytes) -> dict[str, Any]:
@@ -60,6 +80,8 @@ class MockFoxCore:
         self.completed: list[dict] = []
         self.artifacts: list[dict] = []
         self.heartbeats: list[dict] = []
+        self.source_downloads = 0
+        self.source_png = _tiny_png()
         self._artifact_seq = 0
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -78,6 +100,11 @@ class MockFoxCore:
         assert self._server is not None
         host, port = self._server.server_address
         return f"http://127.0.0.1:{port}"
+
+    @property
+    def source_url(self) -> str:
+        """CORE-hosted source image URL (worker will send Bearer for it)."""
+        return f"{self.url}{API_BASE}/source/test.png"
 
     def start(self) -> "MockFoxCore":
         core = self
@@ -106,6 +133,16 @@ class MockFoxCore:
                 if not self._auth_ok():
                     return self._send(401, {"error": "unauthorized"})
                 path = self.path
+                if path.startswith(API_BASE + "/source/"):
+                    with core._lock:
+                        core.source_downloads += 1
+                    body = core.source_png
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if path.startswith(API_BASE) and path.endswith("/control"):
                     job_id = path[len(API_BASE):].strip("/").split("/")[1]
                     with core._lock:
