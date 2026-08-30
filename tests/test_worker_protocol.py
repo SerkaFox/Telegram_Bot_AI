@@ -27,7 +27,7 @@ def core():
 
 def make_cfg(core_url: str, token: str, tmp_path, *, mock_generation=True, heartbeat=1000.0) -> Config:
     return Config(
-        core_url=core_url, worker_token=token, worker_id="test-worker",
+        core_url=core_url, worker_token=token, worker_id="test-worker", worker_name="test-worker",
         poll_seconds=0.05, heartbeat_seconds=heartbeat, mock_generation=mock_generation,
         jobs_dir=tmp_path, retention_hours=24, api_base=API_BASE,
         comfy_base="http://127.0.0.1:8188", request_timeout=5,
@@ -57,25 +57,27 @@ def drive_worker(cfg, predicate, timeout=10):
 
 
 # ---------- protocol-level ----------
-def test_claim_204_when_no_work(core, tmp_path):
+def test_claim_none_when_no_work(core, tmp_path):
     cfg = make_cfg(core.url, core.token, tmp_path)
     client = FoxCoreClient(cfg)
-    assert client.claim(["safe.image.mopmix"]) is None
+    assert client.claim() is None
 
 
 def test_heartbeat_recorded(core, tmp_path):
     cfg = make_cfg(core.url, core.token, tmp_path)
     client = FoxCoreClient(cfg)
-    client.heartbeat(status="idle", job_id=None, capabilities=["safe.image.mopmix"], local_queue=0)
+    client.heartbeat(status="idle", current_job_id=None, capabilities=["safe.image.mopmix"], metadata=None)
     assert core.heartbeats and core.heartbeats[-1]["status"] == "idle"
     assert core.heartbeats[-1]["worker_id"] == "test-worker"
+    assert core.heartbeats[-1]["name"] == "test-worker"          # CORE requires `name`
+    assert core.heartbeats[-1]["current_job_id"] is None
 
 
 def test_auth_error_non_retryable(core, tmp_path):
     cfg = make_cfg(core.url, "WRONG-TOKEN", tmp_path)
     client = FoxCoreClient(cfg)
     with pytest.raises(FoxCoreError) as ei:
-        client.claim(["safe.image.mopmix"])
+        client.claim()
     assert ei.value.status == 401
     assert ei.value.retryable is False
 
@@ -85,35 +87,31 @@ def test_network_error_retryable(tmp_path):
     cfg = make_cfg("http://127.0.0.1:1", "t", tmp_path)
     client = FoxCoreClient(cfg)
     with pytest.raises(FoxCoreError) as ei:
-        client.claim(["safe.image.mopmix"])
+        client.claim()
     assert ei.value.retryable is True
 
 
 # ---------- full lifecycle ----------
 def test_safe_image_job_full_lifecycle(core, tmp_path):
-    core.enqueue_job({"id": "job-1", "type": "image", "content_class": "safe",
+    core.enqueue_job({"id": "job-1", "type": "image", "mode": "mopmix", "content_class": "safe",
                       "prompt": "cute orange fox mascot", "count": 2, "quality": "M", "options": {}})
     cfg = make_cfg(core.url, core.token, tmp_path, heartbeat=0.2)
     drive_worker(cfg, predicate=lambda: len(core.completed) >= 1, timeout=15)
 
     assert not core.failed, f"unexpected failures: {core.failed}"
+    # complete carries no body in the real contract; just the finalisation call for this job.
     assert len(core.completed) == 1
-    comp = core.completed[0]
-    assert comp["job_id"] == "job-1"
-    assert len(comp["artifact_ids"]) == 2
-    assert comp["metadata"]["engine"] == "mock"
-    assert comp["metadata"]["mode"] == "mopmix"
+    assert core.completed[0]["job_id"] == "job-1"
 
-    # two artifacts uploaded, image/png, 64x64 test PNGs
+    # two artifacts uploaded, 64x64 test PNGs (MIME travels in the file part, not a form field)
     arts = [a for a in core.artifacts if a["job_id"] == "job-1"]
     assert len(arts) == 2
-    assert all(a["kind"] == "image" and a["mime_type"] == "image/png" for a in arts)
+    assert all(a["kind"] == "image" for a in arts)
     assert all(a["width"] == "64" and a["height"] == "64" for a in arts)
     assert all(a["size"] > 0 for a in arts)
 
-    # explicit started (claimed → started) fired before any progress/complete
+    # explicit started (claimed → started) fired for this job
     assert any(s["job_id"] == "job-1" for s in core.started)
-    assert core.started[0]["worker_id"] == "test-worker"
 
     # progress was streamed and heartbeat landed
     assert any(p["job_id"] == "job-1" for p in core.progress)

@@ -81,10 +81,11 @@ class Worker:
         while not self._stop.is_set():
             if self.cfg.has_core:
                 try:
+                    cur = int(self._current_job_id) if self._current_job_id else None
                     await asyncio.to_thread(
                         self.client.heartbeat,
-                        status=self._status, job_id=self._current_job_id,
-                        capabilities=sorted(caps.ENABLED_CAPABILITIES), local_queue=0)
+                        status=self._status, current_job_id=cur,
+                        capabilities=sorted(caps.ENABLED_CAPABILITIES), metadata=None)
                     log.debug("worker.heartbeat status=%s job=%s", self._status, self._current_job_id)
                 except FoxCoreError as e:
                     log.warning("worker.heartbeat failed: %s", e)
@@ -102,8 +103,7 @@ class Worker:
                 await self._sleep(self.cfg.poll_seconds)
                 continue
             try:
-                job_data = await asyncio.to_thread(
-                    self.client.claim, sorted(caps.ENABLED_CAPABILITIES))
+                job_data = await asyncio.to_thread(self.client.claim)
                 backoff = self.cfg.poll_seconds  # healthy call → reset backoff
             except FoxCoreError as e:
                 if not e.retryable:
@@ -136,7 +136,7 @@ class Worker:
                 reason = "unsupported_in_current_phase"
                 log.info("job.failed id=%s reason=%s cap=%s", job.id, reason, cap)
                 await asyncio.to_thread(self.client.failed, job.id, reason,
-                                        f"capability {cap} not enabled", False)
+                                        f"capability {cap} not enabled")
                 self.metrics.jobs_failed += 1
                 return
             await self._run_safe_image(job)
@@ -146,7 +146,7 @@ class Worker:
         except Exception as e:  # pragma: no cover - defensive
             log.exception("job.failed id=%s unexpected: %s", job.id, e)
             try:
-                await asyncio.to_thread(self.client.failed, job.id, "internal_error", str(e), True)
+                await asyncio.to_thread(self.client.failed, job.id, "internal_error", str(e))
             except FoxCoreError:
                 pass
             self.metrics.jobs_failed += 1
@@ -188,7 +188,7 @@ class Worker:
             ws.set_state("generated")
 
             if cancel_event.is_set() and not result.artifacts:
-                await asyncio.to_thread(self.client.failed, job.id, "cancelled", "cancelled by core", False)
+                await asyncio.to_thread(self.client.failed, job.id, "cancelled", "cancelled by core")
                 self.metrics.jobs_failed += 1
                 log.info("job.failed id=%s reason=cancelled", job.id)
                 return
@@ -206,16 +206,15 @@ class Worker:
             self.metrics.upload_seconds_total += time.time() - up_start
             ws.set_state("uploaded")
 
-            await asyncio.to_thread(self.client.complete, job.id, artifact_ids, result.metadata)
+            await asyncio.to_thread(self.client.complete, job.id)
             self.metrics.jobs_completed += 1
             log.info("job.completed id=%s artifacts=%s meta=%s", job.id, len(artifact_ids), result.metadata)
         except Exception as e:
             # Generation error → report failed with its code where available.
             code = getattr(e, "error_code", "generation_failed")
-            retry = getattr(e, "retryable", False)
             log.warning("job.failed id=%s code=%s: %s", job.id, code, e)
             try:
-                await asyncio.to_thread(self.client.failed, job.id, code, str(e), retry)
+                await asyncio.to_thread(self.client.failed, job.id, code, str(e))
             except FoxCoreError:
                 pass
             self.metrics.jobs_failed += 1
@@ -234,7 +233,7 @@ class Worker:
         while not self._stop.is_set():
             try:
                 ctl = await asyncio.to_thread(self.client.get_control, job_id)
-                if ctl.get("cancel"):
+                if ctl.get("cancel_requested"):
                     cancel_event.set()
                     log.info("job.cancel_requested id=%s", job_id)
                     return

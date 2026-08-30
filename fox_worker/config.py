@@ -38,6 +38,7 @@ class Config:
     core_url: str
     worker_token: str
     worker_id: str
+    worker_name: str
     poll_seconds: float
     heartbeat_seconds: float
     mock_generation: bool
@@ -77,6 +78,7 @@ def load_config() -> Config:
         core_url=os.getenv("FOX_CORE_URL", "").strip(),
         worker_token=os.getenv("FOX_WORKER_TOKEN", "").strip(),
         worker_id=os.getenv("FOX_WORKER_ID", "fox-media-worker-1").strip(),
+        worker_name=os.getenv("FOX_WORKER_NAME", os.getenv("FOX_WORKER_ID", "fox-media-worker-1")).strip(),
         poll_seconds=float(os.getenv("FOX_POLL_SECONDS", "5")),
         heartbeat_seconds=float(os.getenv("FOX_HEARTBEAT_SECONDS", "30")),
         mock_generation=_to_bool(os.getenv("FOX_WORKER_MOCK_GENERATION", "false")),

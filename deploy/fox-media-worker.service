@@ -8,9 +8,13 @@
 
 [Unit]
 Description=FOX MEDIA WORKER (FOX MIX compute worker)
-After=network-online.target comfyui.service
-Wants=network-online.target
+After=network-online.target tailscaled.service comfyui.service
+Wants=network-online.target tailscaled.service
 # Does not require the bot; they are independent consumers of ComfyUI.
+# tailscaled is needed to reach FOX CORE over the tailnet.
+# Do not thrash on a persistent failure (e.g. bad config): back off if it crashes repeatedly.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -24,9 +28,6 @@ RestartSec=5
 # systemd creates/owns /var/lib/fox-media-worker (matches FOX_JOBS_DIR in .env); the worker also
 # falls back to a project-local dir if this is ever unavailable.
 StateDirectory=fox-media-worker
-# Do not thrash on a persistent failure (e.g. bad config): back off if it crashes repeatedly.
-StartLimitIntervalSec=60
-StartLimitBurst=5
 # Keep the worker low-priority for the shared GPU relative to interactive bot jobs.
 Nice=10
 # Basic hardening (worker only needs its project dir + the jobs dir).

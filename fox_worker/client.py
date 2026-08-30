@@ -4,14 +4,15 @@ Synchronous (requests); the async worker calls these via asyncio.to_thread so th
 free for heartbeats. The worker ONLY makes OUTBOUND calls to FOX CORE — this box opens no inbound
 port for FOX. The Bearer token is never logged.
 
-Endpoints (base = FOX_CORE_URL + /internal/generator/v1):
-  POST  /jobs/claim                 -> 204 (no work) | 200 job json
-  POST  /jobs/{id}/progress         {progress:0-100, stage}
-  POST  /jobs/{id}/failed           {error_code, message, retryable}
-  POST  /jobs/{id}/artifacts        multipart: file, kind, mime_type, width?, height?, duration?  -> {artifact_id}
-  POST  /jobs/{id}/complete         {artifact_ids:[...], metadata:{...}}
-  POST  /heartbeat                  {worker_id, status, job_id, capabilities, local_queue}
-  GET   /jobs/{id}/control          -> {cancel: bool}
+Endpoints (base = FOX_CORE_URL + /internal/generator/v1) — matches the live CORE OpenAPI:
+  POST  /claim                      {worker_id}                       -> 200 {job: null | ClaimedJob}
+  POST  /jobs/{id}/started          (no body)                         -> {id, status}
+  POST  /jobs/{id}/progress         {progress:0-100, stage?}          -> {id, status}
+  POST  /jobs/{id}/failed           {error_code, error_message}       -> {id, status}
+  POST  /jobs/{id}/artifacts        multipart: file, kind, width?, height?, duration?  -> {id, kind, size_bytes, sha256}
+  POST  /jobs/{id}/complete         (no body)                         -> {id, status}
+  POST  /heartbeat                  {worker_id, name, status, capabilities, current_job_id, metadata} -> {ok}
+  GET   /jobs/{id}/control          -> {cancel_requested: bool}
 """
 from __future__ import annotations
 
@@ -69,34 +70,33 @@ class FoxCoreClient:
         return r
 
     # ---- protocol --------------------------------------------------------
-    def claim(self, capabilities: list[str]) -> Optional[dict]:
-        """Ask for one job. Returns the job dict, or None when there is no work (HTTP 204)."""
-        r = self._post("/jobs/claim",
-                       json={"worker_id": self.cfg.worker_id, "capabilities": capabilities},
-                       expect=(200, 204))
+    def claim(self) -> Optional[dict]:
+        """Ask for one job. CORE always answers 200 with {"job": null | ClaimedJob}; capabilities
+        are advertised via heartbeat, not here. Returns the job dict, or None when idle."""
+        r = self._post("/claim", json={"worker_id": self.cfg.worker_id}, expect=(200, 204))
         if r.status_code == 204 or not (r.content or b"").strip():
             return None
-        return r.json()
+        return (r.json() or {}).get("job")
 
     def started(self, job_id: str) -> None:
-        """Mark the job as started (claimed → started) the moment execution begins."""
-        self._post(f"/jobs/{job_id}/started", json={"worker_id": self.cfg.worker_id},
-                   expect=(200, 204))
+        """Mark the job started (claimed → started) the moment execution begins. No request body."""
+        self._post(f"/jobs/{job_id}/started", expect=(200, 204))
 
     def progress(self, job_id: str, progress: int, stage: str = "") -> None:
         self._post(f"/jobs/{job_id}/progress",
-                   json={"progress": int(progress), "stage": stage}, expect=(200, 204))
+                   json={"progress": int(progress), "stage": stage or None}, expect=(200, 204))
 
-    def failed(self, job_id: str, error_code: str, message: str = "", retryable: bool = False) -> None:
+    def failed(self, job_id: str, error_code: str, error_message: str = "") -> None:
         self._post(f"/jobs/{job_id}/failed",
-                   json={"error_code": error_code, "message": message[:500], "retryable": bool(retryable)},
+                   json={"error_code": error_code, "error_message": (error_message or error_code)[:500]},
                    expect=(200, 204))
 
     def upload_artifact(self, job_id: str, path: Path, *, kind: str, mime_type: str,
                         width: int | None = None, height: int | None = None,
                         duration: float | None = None) -> str:
+        # CORE takes file+kind (+optional dims); the MIME travels in the file part, not a form field.
         path = Path(path)
-        data = {"kind": kind, "mime_type": mime_type}
+        data: dict[str, str] = {"kind": kind}
         if width is not None:
             data["width"] = str(width)
         if height is not None:
@@ -107,17 +107,18 @@ class FoxCoreClient:
             files = {"file": (path.name, fh, mime_type)}
             r = self._post(f"/jobs/{job_id}/artifacts", data=data, files=files, expect=(200, 201))
         body = r.json() if (r.content or b"").strip() else {}
-        return str(body.get("artifact_id", ""))
+        return str(body.get("id", ""))
 
-    def complete(self, job_id: str, artifact_ids: list[str], metadata: dict) -> None:
-        self._post(f"/jobs/{job_id}/complete",
-                   json={"artifact_ids": artifact_ids, "metadata": metadata}, expect=(200, 204))
+    def complete(self, job_id: str) -> None:
+        """Finalise the job. Artifacts were already linked at upload time; no request body."""
+        self._post(f"/jobs/{job_id}/complete", expect=(200, 204))
 
-    def heartbeat(self, *, status: str, job_id: str | None, capabilities: list[str],
-                  local_queue: int = 0) -> None:
+    def heartbeat(self, *, status: str, current_job_id: int | None, capabilities: list[str],
+                  metadata: dict | None = None) -> None:
         self._post("/heartbeat",
-                   json={"worker_id": self.cfg.worker_id, "status": status, "job_id": job_id,
-                         "capabilities": capabilities, "local_queue": local_queue},
+                   json={"worker_id": self.cfg.worker_id, "name": self.cfg.worker_name,
+                         "status": status, "capabilities": capabilities,
+                         "current_job_id": current_job_id, "metadata": metadata},
                    expect=(200, 204))
 
     def get_control(self, job_id: str) -> dict:

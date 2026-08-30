@@ -7,6 +7,7 @@ module was removed in Python 3.13).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -70,7 +71,7 @@ class MockFoxCore:
 
     def set_cancel(self, job_id: str, value: bool = True) -> None:
         with self._lock:
-            self.control[str(job_id)] = {"cancel": value}
+            self.control[str(job_id)] = {"cancel_requested": value}
 
     @property
     def url(self) -> str:
@@ -108,7 +109,7 @@ class MockFoxCore:
                 if path.startswith(API_BASE) and path.endswith("/control"):
                     job_id = path[len(API_BASE):].strip("/").split("/")[1]
                     with core._lock:
-                        return self._send(200, core.control.get(job_id, {"cancel": False}))
+                        return self._send(200, core.control.get(job_id, {"cancel_requested": False}))
                 return self._send(404, {"error": "not found"})
 
             def do_POST(self):
@@ -117,13 +118,12 @@ class MockFoxCore:
                 path = self.path
                 rel = path[len(API_BASE):] if path.startswith(API_BASE) else path
 
-                if rel == "/jobs/claim":
+                if rel == "/claim":
                     self._read_body()
                     with core._lock:
                         job = core.pending.pop(0) if core.pending else None
-                    if job is None:
-                        return self._send(204, None)
-                    return self._send(200, job)
+                    # Real CORE always answers 200 with {"job": null | ClaimedJob}.
+                    return self._send(200, {"job": job})
 
                 if rel == "/heartbeat":
                     core.heartbeats.append(self._read_json())
@@ -153,17 +153,20 @@ class MockFoxCore:
                             fields = parse_multipart(body, boundary)
                         with core._lock:
                             core._artifact_seq += 1
-                            aid = f"art_{core._artifact_seq}"
+                            aid = core._artifact_seq
                         f = fields.get("file") or {}
+                        content = f.get("content", b"") if isinstance(f, dict) else b""
                         core.artifacts.append({
                             "job_id": job_id, "artifact_id": aid,
-                            "kind": fields.get("kind"), "mime_type": fields.get("mime_type"),
+                            "kind": fields.get("kind"),
                             "width": fields.get("width"), "height": fields.get("height"),
                             "duration": fields.get("duration"),
-                            "filename": f.get("filename"),
-                            "size": len(f.get("content", b"")) if isinstance(f, dict) else 0,
+                            "filename": f.get("filename"), "size": len(content),
                         })
-                        return self._send(200, {"artifact_id": aid})
+                        # Real CORE returns {id, kind, size_bytes, sha256}.
+                        return self._send(200, {"id": aid, "kind": fields.get("kind"),
+                                                "size_bytes": len(content),
+                                                "sha256": hashlib.sha256(content).hexdigest()})
                 return self._send(404, {"error": "not found"})
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
