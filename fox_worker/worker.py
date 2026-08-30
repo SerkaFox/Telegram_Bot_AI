@@ -226,16 +226,24 @@ class Worker:
                 pass
             # Workspace kept for retention-based cleanup (prune runs in the main loop).
 
-    def _fetch_source(self, job: Job, ws: JobWorkspace) -> str:
-        """Fetch the source image a job points to. PROPOSED minimal contract: job.options.source_url
-        (worker Bearer only when on the CORE host). Fails with `missing_source` when absent, so an
-        image.edit / clean.video job without a source is reported cleanly (never a crash)."""
+    def _fetch_source(self, job: Job, ws: JobWorkspace, on_progress=None) -> str:
+        """Fetch the source image a job points to (contract: job.options.source_url; Bearer sent only
+        on the CORE host). Downloads into the temp job dir, validates it is an image, and maps HTTP
+        failures to clean error_codes (auth/not_found/mime/…) so the job fails cleanly and the GPU
+        gate is released — never a crash, never an infinite retry."""
         opts = job.options or {}
         url = opts.get("source_url") or opts.get("source_image_url") or opts.get("source_download_url")
         if not url:
             raise GenerationError("no source_url in job.options", error_code="missing_source")
+        if on_progress:
+            on_progress(6, "source_download")
         dest = ws.root / "source"
-        self.client.download(str(url), dest)
+        try:
+            self.client.download(str(url), dest, expected_prefix="image/")
+        except FoxCoreError as e:
+            code = {401: "source_unauthorized", 403: "source_unauthorized",
+                    404: "source_not_found", 415: "invalid_source_mime"}.get(e.status, "source_download_failed")
+            raise GenerationError(str(e), error_code=code, retryable=bool(e.retryable))
         return str(dest)
 
     def _produce(self, job: Job, cap: str, ws: JobWorkspace, cancel_event: threading.Event, on_progress):
@@ -248,14 +256,14 @@ class Worker:
                 seed=job.options.get("seed"), image_path=None, mock=mock,
                 should_cancel=cancel_event.is_set, on_progress=on_progress)
         if cap == "safe.image.edit":
-            src = self._fetch_source(job, ws)
+            src = self._fetch_source(job, ws, on_progress)
             on_progress(10, "waiting_gpu")
             return self.safe.edit_image(
                 instruction=job.prompt, source_path=src, out_dir=ws.out_dir, count=job.count,
                 quality=job.quality, seed=job.options.get("seed"), mock=mock,
                 should_cancel=cancel_event.is_set, on_progress=on_progress)
         if cap == "safe.video.clean":
-            src = self._fetch_source(job, ws)
+            src = self._fetch_source(job, ws, on_progress)
             on_progress(10, "waiting_gpu")
             return self.safe.generate_clean_video(
                 prompt=job.prompt, source_path=src, out_dir=ws.out_dir, quality=job.quality,

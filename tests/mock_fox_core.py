@@ -82,6 +82,8 @@ class MockFoxCore:
         self.heartbeats: list[dict] = []
         self.source_downloads = 0
         self.source_png = _tiny_png()
+        self.source_auth: str | None = None
+        self._flaky_hits = 0
         self._artifact_seq = 0
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -129,20 +131,36 @@ class MockFoxCore:
                 raw = self._read_body()
                 return json.loads(raw) if raw else {}
 
+            def _send_bytes(self, body: bytes, ctype: str, code: int = 200):
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
+                path = self.path
+                # /badmime and /flaky are auth-checked source variants used by download tests.
+                if path.startswith(API_BASE + "/badmime/"):
+                    if not self._auth_ok():
+                        return self._send(401, {"error": "unauthorized"})
+                    return self._send_bytes(core.source_png, "text/plain")   # wrong Content-Type
+                if path.startswith(API_BASE + "/flaky/"):
+                    if not self._auth_ok():
+                        return self._send(401, {"error": "unauthorized"})
+                    with core._lock:
+                        core._flaky_hits += 1
+                        first = core._flaky_hits == 1
+                    if first:
+                        return self._send(500, {"error": "transient"})       # retryable once
+                    return self._send_bytes(core.source_png, "image/png")
                 if not self._auth_ok():
                     return self._send(401, {"error": "unauthorized"})
-                path = self.path
                 if path.startswith(API_BASE + "/source/"):
                     with core._lock:
                         core.source_downloads += 1
-                    body = core.source_png
-                    self.send_response(200)
-                    self.send_header("Content-Type", "image/png")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
+                        core.source_auth = self.headers.get("Authorization")
+                    return self._send_bytes(core.source_png, "image/png")
                 if path.startswith(API_BASE) and path.endswith("/control"):
                     job_id = path[len(API_BASE):].strip("/").split("/")[1]
                     with core._lock:

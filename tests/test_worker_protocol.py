@@ -207,6 +207,69 @@ def test_gpu_gate_cancel_short_circuits(monkeypatch):
     gi._wait_for_gpu_gate(lambda: True)         # cancel requested → returns immediately (no hang)
 
 
+# ---------- source download (image.edit / clean.video) ----------
+def test_source_download_sends_bearer_and_streams(core, tmp_path):
+    client = FoxCoreClient(make_cfg(core.url, core.token, tmp_path))
+    dest = tmp_path / "s.png"
+    client.download(core.source_url, dest, expected_prefix="image/")
+    assert dest.read_bytes() == core.source_png              # streamed byte-exact
+    assert core.source_auth == f"Bearer {core.token}"        # bearer present on CORE host
+
+
+def test_source_download_no_bearer_off_host(tmp_path, monkeypatch):
+    client = FoxCoreClient(make_cfg("http://core.example:8088", "TESTTOK", tmp_path))
+    seen: dict = {}
+
+    class FakeResp:
+        status_code = 200
+        headers = {"Content-Type": "image/png"}
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def iter_content(self, chunk_size=0): return [b"\x89PNG\r\n\x1a\n"]
+
+    def fake_get(url, headers=None, timeout=None, stream=None):
+        seen[url] = headers
+        return FakeResp()
+
+    monkeypatch.setattr(client._session, "get", fake_get)
+    client.download("http://core.example:8088/a", tmp_path / "a", expected_prefix="image/")
+    assert "Authorization" in seen["http://core.example:8088/a"]     # on-host → bearer
+    client.download("https://minio.public/x?sig=1", tmp_path / "b", expected_prefix="image/")
+    assert seen["https://minio.public/x?sig=1"] == {}               # off-host → no creds
+
+
+def test_source_download_401_cleans_partial(core, tmp_path):
+    dest = tmp_path / "s.png"
+    with pytest.raises(FoxCoreError) as ei:
+        FoxCoreClient(make_cfg(core.url, "WRONG", tmp_path)).download(core.source_url, dest, expected_prefix="image/")
+    assert ei.value.status == 401 and ei.value.retryable is False
+    assert not dest.exists()
+
+
+def test_source_download_404(core, tmp_path):
+    dest = tmp_path / "s.png"
+    with pytest.raises(FoxCoreError) as ei:
+        FoxCoreClient(make_cfg(core.url, core.token, tmp_path)).download(
+            core.url + API_BASE + "/nope", dest, expected_prefix="image/")
+    assert ei.value.status == 404 and not dest.exists()
+
+
+def test_source_download_invalid_mime(core, tmp_path):
+    dest = tmp_path / "s.png"
+    with pytest.raises(FoxCoreError) as ei:
+        FoxCoreClient(make_cfg(core.url, core.token, tmp_path)).download(
+            core.url + API_BASE + "/badmime/x", dest, expected_prefix="image/")
+    assert ei.value.status == 415 and not dest.exists()
+
+
+def test_source_download_retry_on_transient(core, tmp_path):
+    dest = tmp_path / "s.png"
+    # /flaky returns 500 once then 200 → bounded retry recovers.
+    FoxCoreClient(make_cfg(core.url, core.token, tmp_path)).download(
+        core.url + API_BASE + "/flaky/x", dest, expected_prefix="image/", retries=1)
+    assert dest.read_bytes() == core.source_png
+
+
 def test_worker_polls_control_endpoint(core, tmp_path):
     # A completed job means the control endpoint was reachable and polled without breaking flow.
     core.enqueue_job({"id": "job-c", "type": "image", "content_class": "safe",

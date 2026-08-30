@@ -121,29 +121,61 @@ class FoxCoreClient:
                          "current_job_id": current_job_id, "metadata": metadata},
                    expect=(200, 204))
 
-    def download(self, url: str, dest: Path) -> Path:
-        """Fetch a source artifact the job points to (proposed contract: job.options.source_url).
-        Sends the worker Bearer token only when the URL is on the FOX CORE host; a presigned/public
-        URL is fetched without our credentials. Streams to `dest`."""
+    def download(self, url: str, dest: Path, *, expected_prefix: str | None = None,
+                retries: int = 1) -> Path:
+        """Fetch a source artifact the job points to (contract: job.options.source_url).
+
+        Sends the worker Bearer token when the URL is on the FOX CORE host (the authenticated CORE
+        download endpoint); a presigned/public URL is fetched without our credentials. Streams to
+        `dest`, validates Content-Type against `expected_prefix` (e.g. "image/"), retries a bounded
+        number of times on transient (network / 5xx) failures only, and always removes a partial
+        file on failure. The token is never logged."""
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        headers = self._headers() if url.startswith(self.cfg.core_url.rstrip("/")) else {}
-        try:
-            with self._session.get(url, headers=headers, timeout=self.cfg.request_timeout,
-                                   stream=True) as r:
-                if r.status_code in (401, 403):
-                    raise FoxCoreError(f"auth rejected downloading source ({r.status_code})",
-                                       status=r.status_code, retryable=False)
-                if r.status_code != 200:
-                    raise FoxCoreError(f"source download failed ({r.status_code})",
-                                       status=r.status_code, retryable=r.status_code >= 500)
-                with open(dest, "wb") as fh:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        if chunk:
-                            fh.write(chunk)
-        except requests.RequestException as e:
-            raise FoxCoreError(f"network error downloading source: {e.__class__.__name__}", retryable=True)
-        return dest
+        on_core = url.startswith(self.cfg.core_url.rstrip("/"))
+        headers = self._headers() if on_core else {}
+
+        def _cleanup() -> None:
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        attempt = 0
+        while True:
+            try:
+                with self._session.get(url, headers=headers, timeout=self.cfg.request_timeout,
+                                       stream=True) as r:
+                    if r.status_code in (401, 403):
+                        raise FoxCoreError(f"auth rejected downloading source ({r.status_code})",
+                                           status=r.status_code, retryable=False)
+                    if r.status_code == 404:
+                        raise FoxCoreError("source not found (404)", status=404, retryable=False)
+                    if r.status_code != 200:
+                        raise FoxCoreError(f"source download failed ({r.status_code})",
+                                           status=r.status_code, retryable=r.status_code >= 500)
+                    ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    if expected_prefix and not ctype.startswith(expected_prefix):
+                        raise FoxCoreError(f"unexpected source content-type: {ctype or 'none'}",
+                                           status=415, retryable=False)
+                    with open(dest, "wb") as fh:
+                        for chunk in r.iter_content(chunk_size=65536):
+                            if chunk:
+                                fh.write(chunk)
+                return dest
+            except FoxCoreError as e:
+                _cleanup()
+                if e.retryable and attempt < retries:
+                    attempt += 1
+                    continue
+                raise
+            except requests.RequestException as e:
+                _cleanup()
+                if attempt < retries:
+                    attempt += 1
+                    continue
+                raise FoxCoreError(f"network error downloading source: {e.__class__.__name__}",
+                                   retryable=True)
 
     def get_control(self, job_id: str) -> dict:
         r = self._get(f"/jobs/{job_id}/control", expect=(200,))
