@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 .env
 .env.*
+# ...but the no-secrets template IS tracked
+!.env.example
 *.log
 character_datasets/
 third_party/Wav2Lip/checkpoints/*.pth
@@ -24,6 +26,9 @@ voices/
 processed/
 
 bot_state.pkl
+
+# FOX MEDIA WORKER per-job artifacts (runtime scratch)
+fox_worker_jobs/
 
 # Runtime allowlist (contains Telegram user IDs / PII)
 allowlist.json
