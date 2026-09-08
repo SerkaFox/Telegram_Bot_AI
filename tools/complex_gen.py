@@ -1452,7 +1452,7 @@ async def animate_scenario(png,wd,meta,audio,N):
 async def one_scenario(idx,plan,climaxes,mode,neg,still_t,audio,rng,N,engine="wan",face="",src=""):
     wd=OUT/f"c{idx:03d}"
     png,meta=await build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine,face,src)
-    tg_photo(png,meta["cap"])
+    if not src: tg_photo(png,meta["cap"])   # 🖼 "Из фото": base is the same original every clip → skip preview, go straight to video
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
 
@@ -1853,7 +1853,7 @@ STORY_BANK=[
 async def one_story(idx,story,plan,audio,rng,N,engine="wan",face="",src=""):
     wd=OUT/f"s{idx:03d}"
     png,meta=await build_story_scenario(idx,story,plan,rng,N,wd,engine,face,src)
-    tg_photo(png,meta["cap"])
+    if not src: tg_photo(png,meta["cap"])   # 🖼 "Из фото": same original base each clip → skip preview, go straight to video
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
 # DEEP-MERGE seed pools: curated STORY_BANK bundles the unified build_scenario can adopt whole.
