@@ -1905,9 +1905,7 @@ def main_keyboard(st: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
     # Owner-only: manage who can use the bot. Only the admin's state carries is_admin=True.
     if st and st.get("is_admin"):
         rows.append([InlineKeyboardButton("👥 Пользователи", callback_data="acl:list")])
-    rows.append([InlineKeyboardButton("🧩 КОМПЛЕКС (авто-сцены)", callback_data="cx:menu")])
-    rows.append([InlineKeyboardButton("🧩📷 ПОЛУКОМПЛЕКС (фото→выбор)", callback_data="cxh:menu")])
-    rows.append([InlineKeyboardButton("🧩🎯 КОМПЛЕКС по лицу (фото)", callback_data="cx:photo")])
+    rows.append([InlineKeyboardButton("🧩 КОМПЛЕКС", callback_data="cx:root")])
     rows.append(
         [
             InlineKeyboardButton("⛔🚮 Stop + Clear", callback_data="queue:stopclear"),
@@ -1927,11 +1925,21 @@ COMPLEX_SCRIPT = Path(__file__).with_name("tools") / "complex_gen.py"
 CX_PROCS: dict[int, subprocess.Popen] = {}
 CX_COUNTS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 30, 50)
 
+def cx_root_keyboard() -> InlineKeyboardMarkup:
+    """Single КОМПЛЕКС entry point — all four modes live under one button to keep the main menu clean."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧩 Обычный (авто-сцены)", callback_data="cx:menu")],
+        [InlineKeyboardButton("🧩📷 Полу (фото→выбор)", callback_data="cxh:menu")],
+        [InlineKeyboardButton("🧩🎯 По лицу (фейслок)", callback_data="cx:photo")],
+        [InlineKeyboardButton("🧩🖼 Из фото (трансформация)", callback_data="cx:src")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:main")],
+    ])
+
 def cx_engine_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 ВАН", callback_data="cx:eng:wan"),
          InlineKeyboardButton("🧬 Эрос", callback_data="cx:eng:eros")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:main")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="cx:root")],
     ])
 
 def cx_partner_keyboard() -> InlineKeyboardMarkup:
@@ -1962,11 +1970,13 @@ def cx_is_running(chat_id: int) -> bool:
 CX_ANIM: dict[int, list[subprocess.Popen]] = {}   # ПОЛУКОМПЛЕКС per-photo animate jobs
 
 def cx_launch(chat_id: int, engine: str, prompt: str, count: int, face: str = "", photos: bool = False,
-              partner: str = "auto") -> None:
+              partner: str = "auto", src: str = "") -> None:
     args = [sys.executable, str(COMPLEX_SCRIPT), "-n", str(count), "--engine", engine,
             "--chat", str(chat_id), "--audio", "1", "--partner", partner, "--prompt", prompt]
     if face:
         args += ["--face", face]   # 'tati' or an uploaded image filename in ComfyUI/input
+    if src:
+        args += ["--src", src]     # 🖼 real source photo (ComfyUI/input filename): img2img base + facelock
     if photos:
         args += ["--photos"]       # ПОЛУКОМПЛЕКС: render stills only, animate later on tap
     # own session/process group so cx_stop can kill the whole batch (python + ffmpeg children)
@@ -5086,14 +5096,25 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     path = TMP_DIR / file_name
     await tg_file.download_to_drive(custom_path=str(path))
 
-    # 🧩📷 КОМПЛЕКС по фото — this photo is the face-lock source, not a generation input
+    # 🧩🎯 КОМПЛЕКС по лицу — this photo is the face-lock source, not a generation input
     if st.pop("cx_face_await_photo", False):
         face_name = f"cxface_{update.effective_user.id}_{uuid.uuid4().hex}.jpg"
         await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / face_name, path.read_bytes())
         st["cx_mode"] = "full"
-        st["cx_face"] = face_name
+        st["cx_face"] = face_name; st["cx_src"] = ""
         await send_ui_message(update.message, context,
             "📷 Лицо принято — будет на всех клипах.\n\nВыбери движок:", reply_markup=cx_engine_keyboard())
+        return
+
+    # 🧩🖼 КОМПЛЕКС из фото — the WHOLE photo is the img2img base (+ facelock): transform, don't invent
+    if st.pop("cx_src_await_photo", False):
+        src_name = f"cxsrc_{update.effective_user.id}_{uuid.uuid4().hex}.jpg"
+        await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / src_name, path.read_bytes())
+        st["cx_mode"] = "full"
+        st["cx_src"] = src_name; st["cx_face"] = ""
+        await send_ui_message(update.message, context,
+            "🖼 Фото-исходник принято — превратим его в историю (лицо сохраним).\n\nВыбери движок:",
+            reply_markup=cx_engine_keyboard())
         return
 
     with Image.open(path) as img:
@@ -5292,9 +5313,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await context.bot.send_message(chat_id=chat_id, text="Промпт пока не задан.")
         return
 
+    if data == "cx:root":
+        txt = ("🧩 КОМПЛЕКС — выбери режим:\n\n"
+               "• 🧩 Обычный — рандомные лица, всё сразу рендерится в видео\n"
+               "• 🧩📷 Полу — сначала все ФОТО, потом оживляешь выбранные\n"
+               "• 🧩🎯 По лицу — твоё фото-лицо на всех клипах (тело придумывается заново)\n"
+               "• 🧩🖼 Из фото — берём ТВОЁ фото ЦЕЛИКОМ как основу и оживляем по истории: "
+               "тот же человек с фото, но в баре/на пляже и т.д., промт применяется к каждому кадру, потом секс")
+        await replace_ui_message_from_callback(query, context, txt, reply_markup=cx_root_keyboard())
+        return
+
     if data == "cx:menu":
         st["cx_mode"] = "full"
-        st["cx_face"] = ""; st.pop("cx_face_pick", None); st.pop("cx_face_await_photo", None)   # normal complex — random faces
+        st["cx_face"] = ""; st["cx_src"] = ""; st.pop("cx_face_pick", None); st.pop("cx_face_await_photo", None); st.pop("cx_src_await_photo", None); st.pop("cx_src_pick", None)   # normal complex — random faces
         txt = ("🧩 КОМПЛЕКС — авто-конвейер сцен с развитием.\n\n"
                "Промт задаёт: возраст · пропорции тела · число персонажей (партнёр: муж/жен/антро/соло).\n"
                "Рандом: сценарий · поза · движение · одежда · локация · этнос.\n\n"
@@ -5304,7 +5335,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data == "cxh:menu":
         st["cx_mode"] = "photos"
-        st["cx_face"] = ""; st.pop("cx_face_pick", None); st.pop("cx_face_await_photo", None)
+        st["cx_face"] = ""; st["cx_src"] = ""; st.pop("cx_face_pick", None); st.pop("cx_face_await_photo", None); st.pop("cx_src_await_photo", None); st.pop("cx_src_pick", None)
         txt = ("🧩📷 ПОЛУКОМПЛЕКС — сначала все ФОТО, потом ты выбираешь, какие оживить.\n\n"
                "Всё как в КОМПЛЕКСЕ (тот же промт/рандом), но видео не рендерится сразу — "
                "под каждым фото будет кнопка 🎬 Анимировать.\n\nВыбери движок:")
@@ -5315,12 +5346,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Face-lock is a FULL complex run. Do not inherit a stale "photos" value from a
         # previously opened semi-complex menu.
         st["cx_mode"] = "full"
-        st["cx_face_await_photo"] = True; st["cx_face"] = ""; st.pop("cx_face_pick", None)
+        st["cx_face_await_photo"] = True; st["cx_face"] = ""; st["cx_src"] = ""; st.pop("cx_face_pick", None); st.pop("cx_src_await_photo", None); st.pop("cx_src_pick", None)
         await replace_ui_message_from_callback(
             query, context,
             "🎯 КОМПЛЕКС по лицу: пришли ОДНО фото с чётким лицом анфас — это лицо будет на всех клипах "
             "(хоть Таня, хоть другое), ИЛИ выбери из недавних.\nПричёска будет рандомной — ReActor переносит только лицо.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📷 Выбрать из недавних (10)", callback_data="cxface:recent")]]))
+        return
+
+    if data == "cx:src":
+        # 🖼 "Из фото": the WHOLE real photo becomes the img2img base (+ facelock), not just a face stamp.
+        st["cx_mode"] = "full"
+        st["cx_src_await_photo"] = True; st["cx_src"] = ""; st["cx_face"] = ""; st.pop("cx_face_pick", None); st.pop("cx_face_await_photo", None); st.pop("cx_src_pick", None)
+        await replace_ui_message_from_callback(
+            query, context,
+            "🖼 КОМПЛЕКС из фото: пришли ОДНО фото — оно САМО станет базой (новая база не генерится).\n"
+            "Фото оживляется по истории (бар, пляж и т.д.), промт применяется к каждому кадру, дальше секс.\n"
+            "ИЛИ выбери из недавних.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📷 Выбрать из недавних (10)", callback_data="cxsrc:recent")]]))
+        return
+
+    if data == "cxsrc:recent":
+        user_id = update.effective_user.id if update.effective_user else 0
+        library = rebuild_media_library_from_disk(context, user_id, st["max_side"])
+        if not library:
+            await replace_ui_message_from_callback(query, context,
+                "Пока нет сохранённых фото — пришли одно.", reply_markup=None)
+            return
+        st["cx_src_pick"] = True; st.pop("cx_src_await_photo", None)
+        await replace_media_preview_from_callback(query, context, index=0)
         return
 
     if data == "cxface:recent":
@@ -5380,9 +5434,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         eng = st.get("cx_engine", "wan")
         face = str(st.get("cx_face") or "")
+        src = str(st.get("cx_src") or "")
         photos = st.get("cx_mode") == "photos"
         partner = str(st.get("cx_partner") or "auto")
-        cx_launch(chat_id, eng, prompt, count, face, photos=photos, partner=partner)
+        cx_launch(chat_id, eng, prompt, count, face, photos=photos, partner=partner, src=src)
 
         async def _cx_watchdog(cid: int) -> None:
             # catch an instant crash (e.g. bad args) so it doesn't look like a 20-min hang
@@ -5394,7 +5449,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "Скорее всего скрипт был перезаписан. Запусти заново.")
         asyncio.create_task(_cx_watchdog(chat_id))
 
-        face_line = f"\n🎯 Фейслок: {face}" if face else ""
+        face_line = (f"\n🖼 Из фото: {src}" if src else (f"\n🎯 Фейслок: {face}" if face else ""))
         pt_lbl = {"mix": "🎲 микс (секс+соло)", "man": "👥 секс с мужиком",
                   "solo": "👤 соло", "auto": "🧠 по промту", "stories": "📖 банк сценариев",
                   "bankmix": "📚🎲 банк + микс (50/50)"}.get(partner, partner)
@@ -5568,9 +5623,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             face_name = f"cxface_{user_id}_{uuid.uuid4().hex}.jpg"
             await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / face_name, Path(media["path"]).read_bytes())
             st["cx_mode"] = "full"
-            st["cx_face"] = face_name
+            st["cx_face"] = face_name; st["cx_src"] = ""
             await replace_ui_message_from_callback(query, context,
                 "📷 Лицо из недавних выбрано — будет на всех клипах.\n\nВыбери движок:",
+                reply_markup=cx_engine_keyboard())
+            return
+
+        if st.pop("cx_src_pick", False):   # 🧩🖼 picking the img2img source photo from recent photos
+            user_id = update.effective_user.id if update.effective_user else 0
+            src_name = f"cxsrc_{user_id}_{uuid.uuid4().hex}.jpg"
+            await asyncio.to_thread(save_bytes, COMFY_INPUT_DIR / src_name, Path(media["path"]).read_bytes())
+            st["cx_mode"] = "full"
+            st["cx_src"] = src_name; st["cx_face"] = ""
+            await replace_ui_message_from_callback(query, context,
+                "🖼 Фото-исходник из недавних выбрано — превратим его в историю.\n\nВыбери движок:",
                 reply_markup=cx_engine_keyboard())
             return
 

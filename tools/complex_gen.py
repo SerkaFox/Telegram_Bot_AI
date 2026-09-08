@@ -1212,9 +1212,13 @@ def inject_mopmix_realism(wf,loras=MOPMIX_REALISM):
     if trig and "text" in p109: p109["text"]=f'{p109["text"]}, {trig}'
     return wf
 TAN_NEG="(tan lines:1.5), bikini tan lines, bra tan lines, farmer's tan, uneven skin tone, sunburn marks"
-async def gen_photo_mopmix(prompt,dst,neg_extra="",skip_breast_lora=False):
+CX_SRC_DENOISE=float(os.getenv("CX_SRC_DENOISE","0.62"))   # 🖼 "из фото": how far img2img redraws the source
+async def gen_photo_mopmix(prompt,dst,neg_extra="",skip_breast_lora=False,src_image="",denoise=CX_SRC_DENOISE):
     wf=b.load_workflow(b.WORKFLOW_MOPMIX)
-    wf=b.patch_mopmix_workflow(wf,prompt=prompt,resolution=PHOTO_RES,image_name="",seed=b.make_seed(),text_only=True)
+    if src_image:   # 🖼 img2img: start from the user's real photo so it keeps her, only restyled into the scene
+        wf=b.patch_mopmix_workflow(wf,prompt=prompt,resolution=PHOTO_RES,image_name=src_image,seed=b.make_seed(),text_only=False,denoise=denoise)
+    else:
+        wf=b.patch_mopmix_workflow(wf,prompt=prompt,resolution=PHOTO_RES,image_name="",seed=b.make_seed(),text_only=True)
     extra=(neg_extra+", "+TAN_NEG) if neg_extra else TAN_NEG      # always suppress tan lines
     if wf.get("6",{}).get("inputs",{}).get("text") is not None:
         wf["6"]["inputs"]["text"]=f'{wf["6"]["inputs"]["text"]}, {extra}'
@@ -1226,6 +1230,13 @@ async def gen_photo_pony(prompt,dst):
     g=pony_graph(prompt,832,1216,b.make_seed())
     pid=await asyncio.to_thread(b.queue_prompt,g,str(uuid.uuid4()))
     return await asyncio.to_thread(wait_photo,pid,dst)
+def src_to_base(src,dst):
+    """🖼 "Из фото": the user's REAL photo IS the base frame — no still is generated. Copy it in as a
+    proper PNG (the upload is a .jpg; png_size()/AR-fit need a real PNG header) and animate off it."""
+    from PIL import Image
+    with Image.open(b.COMFY_INPUT_DIR/src) as im:
+        im.convert("RGB").save(dst)
+    return Path(dst)
 
 # ---------- face-lock: stamp a fixed real face onto every still via ReActor ----------
 FACE_SOURCES={"tati":"tati_face.jpg"}                     # key -> reference in ComfyUI/input
@@ -1314,12 +1325,13 @@ async def gen_video_eros(image_name,prompt,dst,dialogue=True,seconds=BEAT_SECOND
     raise TimeoutError("eros timeout")
 
 # ---------- one scenario = still (both present) + 3 chained acts -> concat ----------
-async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan",face=""):
+async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan",face="",src=""):
     """Roll one scenario and render just the STILL. Returns (png, meta) where meta carries
     everything needed to animate the still later (beats/engine/face). Shared by full КОМПЛЕКС
-    and ПОЛУКОМПЛЕКС (photos-first)."""
+    and ПОЛУКОМПЛЕКС (photos-first). `src` = 🖼 real source photo (comfy-input filename): beat-0 is
+    img2img off it AND it doubles as the facelock source so her identity carries through every beat."""
     wd.mkdir(parents=True,exist_ok=True)
-    fsrc=(FACE_SOURCES.get(face,face)) if face else None   # 'tati' key OR uploaded image filename in comfy input
+    fsrc=(FACE_SOURCES.get(face,face)) if face else (src or None)   # face key/filename, else the src photo locks her face
     eth=rng.choice(ETH); hair=(FACE_HAIR.get(face) or rng.choice(HAIR)) if face else rng.choice(HAIR)
     partner=plan["partner"]
     facefeat=rng.choice(FACES); view=rng.choice(VIEWS); expr=rng.choice(EXPRS)
@@ -1383,13 +1395,14 @@ async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan
         shot+=", the woman faces the camera with her face clearly visible, the man's face is turned away or seen from behind"
     sp=("photorealistic amateur photo, "+still+", "+shot+STILL_SUFFIX) if mode!="pony" else (still+", "+shot)
     neg2=(neg+", "+bneg) if (neg and bneg) else (neg or bneg)
-    if mode=="pony": png=await gen_photo_pony(sp,wd/"still.png")
-    else:            png=await gen_photo_mopmix(sp,wd/"still.png",neg2,skip_breast_lora=skipbr)
-    if fsrc:                                                # stamp the locked face onto the still
+    if src:            png=src_to_base(src,wd/"still.png")  # 🖼 the ORIGINAL photo IS the base — no new base generated
+    elif mode=="pony": png=await gen_photo_pony(sp,wd/"still.png")
+    else:              png=await gen_photo_mopmix(sp,wd/"still.png",neg2,skip_breast_lora=skipbr)
+    if fsrc and not src:                                    # stamp the locked face onto the still (src base already IS her)
         try: png=await face_swap(png,wd/"still_face.png",fsrc)
         except Exception as e: print("  facelock still fail",e)
     pmap={"man":"👥+♂","mmf":"👥+♂♂","woman":"👥+♀","anthro":"👥+🐾","none":"👤"}
-    ftag=" · 🎯 лицо" if fsrc else ""
+    ftag=" · 🖼 из фото" if src else (" · 🎯 лицо" if fsrc else "")
     cap=(f"📸 #{idx+1}/{N} · {pmap.get(plan['partner'],'👤')} «{label}»{ftag}\n🌍 {eth} · 👗 {outfit}\n📍 {setting}")
     meta={"idx":idx,"label":label,"eth":eth,"outfit":outfit,"setting":setting,
           "beats":[[bp,ls] for bp,ls in beats],"engine":engine,"fsrc":fsrc,"cap":cap}
@@ -1436,9 +1449,9 @@ async def animate_scenario(png,wd,meta,audio,N):
     LOG.open("a").write(json.dumps({"i":idx,"climax":label,"eth":eth,"outfit":outfit,"setting":setting,"ok":bool(ok)})+"\n")
     return bool(ok)
 
-async def one_scenario(idx,plan,climaxes,mode,neg,still_t,audio,rng,N,engine="wan",face=""):
+async def one_scenario(idx,plan,climaxes,mode,neg,still_t,audio,rng,N,engine="wan",face="",src=""):
     wd=OUT/f"c{idx:03d}"
-    png,meta=await build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine,face)
+    png,meta=await build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine,face,src)
     tg_photo(png,meta["cap"])
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
@@ -1463,10 +1476,11 @@ def _story_still_tpl(p,has2):
     return STILL_MAN
 def _story_neg(p):
     return NEG_MMF if p in ("mmf","rej") else ANTI_CLONE
-async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face=""):
-    """Build a STILL + 3-act manifest from a curated STORY_BANK entry (same meta shape as build_scenario)."""
+async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face="",src=""):
+    """Build a STILL + 3-act manifest from a curated STORY_BANK entry (same meta shape as build_scenario).
+    `src` = 🖼 real source photo: beat-0 img2img off it + facelock so her identity carries through."""
     wd.mkdir(parents=True,exist_ok=True)
-    fsrc=(FACE_SOURCES.get(face,face)) if face else None
+    fsrc=(FACE_SOURCES.get(face,face)) if face else (src or None)
     eth=rng.choice(ETH); hair=(FACE_HAIR.get(face) or rng.choice(HAIR)) if face else rng.choice(HAIR)
     facefeat=rng.choice(FACES); view=rng.choice(VIEWS); expr=rng.choice(EXPRS)
     if fsrc:
@@ -1511,12 +1525,13 @@ async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face=""):
         shot+=", the woman faces the camera with her face clearly visible, the man's face is turned away or seen from behind"
     sp="photorealistic amateur photo, "+still+", "+shot+STILL_SUFFIX
     neg2=(neg+", "+bneg) if (neg and bneg) else (neg or bneg)
-    png=await gen_photo_mopmix(sp,wd/"still.png",neg2,skip_breast_lora=skipbr)
-    if fsrc:
+    if src: png=src_to_base(src,wd/"still.png")   # 🖼 the ORIGINAL photo IS the base — no new base generated
+    else:   png=await gen_photo_mopmix(sp,wd/"still.png",neg2,skip_breast_lora=skipbr)
+    if fsrc and not src:                          # src base already IS her → no still swap
         try: png=await face_swap(png,wd/"still_face.png",fsrc)
         except Exception as e: print("  facelock still fail",e)
     pmap={"man":"👥+♂","mmf":"👥+♂♂","rej":"👥+♂(2-й уходит)"}
-    lbl=story.get("lbl","история"); ftag=" · 🎯 лицо" if fsrc else ""
+    lbl=story.get("lbl","история"); ftag=" · 🖼 из фото" if src else (" · 🎯 лицо" if fsrc else "")
     cap=f"📖 #{idx+1}/{N} · {pmap.get(p,'👥+♂')} «{lbl}»{ftag}\n👗 {outfit}\n📍 {setting}"
     meta={"idx":idx,"label":lbl,"eth":eth,"outfit":outfit,"setting":setting,
           "beats":[[bp,ls] for bp,ls in beats],"engine":engine,"fsrc":fsrc,"cap":cap}
@@ -1835,9 +1850,9 @@ STORY_BANK=[
   "a1":"on the massage table he rolls her over, lets the towel slip, gropes her breasts and kisses her neck while she smiles",
   "a2":"she straddles him on the table facing away and lowers her ass onto his cock, riding him in anal cowgirl, ass to camera, explicit hardcore","lbl":"Массаж — анал ковгерл"},
 ]
-async def one_story(idx,story,plan,audio,rng,N,engine="wan",face=""):
+async def one_story(idx,story,plan,audio,rng,N,engine="wan",face="",src=""):
     wd=OUT/f"s{idx:03d}"
-    png,meta=await build_story_scenario(idx,story,plan,rng,N,wd,engine,face)
+    png,meta=await build_story_scenario(idx,story,plan,rng,N,wd,engine,face,src)
     tg_photo(png,meta["cap"])
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
@@ -1886,7 +1901,7 @@ def pick_partner(base_partner,mode,rng):
 def plan_for_clip(plan,partner):
     p=dict(plan); p["partner"]=partner; p["people"]=1 if partner=="none" else 2; return p
 
-async def run(prompt,count,engine,audio,face="",partner_mode="auto"):
+async def run(prompt,count,engine,audio,face="",partner_mode="auto",src=""):
     if engine not in ("wan","eros"): engine="wan"
     plan=parse_plan(prompt); base_partner=plan["partner"]
     LOG.write_text("")
@@ -1910,13 +1925,13 @@ async def run(prompt,count,engine,audio,face="",partner_mode="auto"):
                 story_idx=order[idx] if partner_mode=="stories" else hybrid_stories[hybrid_pos]
                 hybrid_pos+=1 if partner_mode=="bankmix" else 0
                 story=STORY_BANK[story_idx]
-                ok+=1 if await one_story(idx,story,plan,audio,rng,count,engine,face) else 0
+                ok+=1 if await one_story(idx,story,plan,audio,rng,count,engine,face,src) else 0
                 print(f"[{idx+1}/{count}] {time.time()-t:.0f}s ok={ok} [story:{story['lbl']}]")
             else:
                 procedural_mode="mix" if partner_mode=="bankmix" else partner_mode
                 cp=plan_for_clip(plan,pick_partner(base_partner,procedural_mode,rng))
                 climaxes,mode,neg,still_t=config_for(cp)
-                ok+=1 if await one_scenario(idx,cp,climaxes,mode,neg,still_t,audio,rng,count,engine,face) else 0
+                ok+=1 if await one_scenario(idx,cp,climaxes,mode,neg,still_t,audio,rng,count,engine,face,src) else 0
                 print(f"[{idx+1}/{count}] {time.time()-t:.0f}s ok={ok} [{cp['partner']}]")
         except Exception as e:
             print(f"[{idx+1}/{count}] CLIP FAIL {e}")
@@ -1924,7 +1939,7 @@ async def run(prompt,count,engine,audio,face="",partner_mode="auto"):
     tg_msg(f"✅ КОМПЛЕКС завершён: {ok}/{count} клипов за {(time.time()-t0)/3600:.1f}ч.")
 
 PICKS=OUT/"picks"
-async def run_photos(prompt,count,engine,audio,face="",partner_mode="auto"):
+async def run_photos(prompt,count,engine,audio,face="",partner_mode="auto",src=""):
     """ПОЛУКОМПЛЕКС phase 1: render ALL stills, persist each with its animate-manifest,
     and send each with a '🎬 Анимировать' button. Animation happens later, on demand."""
     if engine not in ("wan","eros"): engine="wan"
@@ -1949,12 +1964,12 @@ async def run_photos(prompt,count,engine,audio,face="",partner_mode="auto"):
             if partner_mode=="stories" or (partner_mode=="bankmix" and hybrid[idx]):
                 story_idx=order[idx] if partner_mode=="stories" else hybrid_stories[hybrid_pos]
                 hybrid_pos+=1 if partner_mode=="bankmix" else 0
-                png,meta=await build_story_scenario(idx,STORY_BANK[story_idx],plan,rng,count,pdir,engine,face)
+                png,meta=await build_story_scenario(idx,STORY_BANK[story_idx],plan,rng,count,pdir,engine,face,src)
             else:
                 procedural_mode="mix" if partner_mode=="bankmix" else partner_mode
                 cp=plan_for_clip(plan,pick_partner(base_partner,procedural_mode,rng))
                 climaxes,mode,neg,still_t=config_for(cp)
-                png,meta=await build_scenario(idx,cp,climaxes,mode,neg,still_t,rng,count,pdir,engine,face)
+                png,meta=await build_scenario(idx,cp,climaxes,mode,neg,still_t,rng,count,pdir,engine,face,src)
             meta["png"]=str(png); meta["audio"]=int(audio); meta["N"]=count
             (pdir/"plan.json").write_text(json.dumps(meta))
             tg_photo_btn(png,meta["cap"],f"cxa:{runid}:{idx:03d}")
@@ -1985,6 +2000,7 @@ def main():
     ap.add_argument("--chat",type=int,default=0)
     ap.add_argument("-p","--prompt",default="")
     ap.add_argument("--face",default="")   # 'tati' or an uploaded image filename in ComfyUI/input
+    ap.add_argument("--src",default="")    # 🖼 real source photo (ComfyUI/input filename): img2img base + facelock
     ap.add_argument("--photos",action="store_true")   # ПОЛУКОМПЛЕКС: render stills only, animate on demand
     ap.add_argument("--animate",default="")            # 'runid:idx' — animate one chosen still
     ap.add_argument("--partner",default="auto",choices=["auto","mix","man","solo","stories","bankmix"])  # bankmix = 50/50 curated bank + procedural mix
@@ -1998,9 +2014,9 @@ def main():
     prompt=(a.prompt or " ".join(a.rest)).strip()
     if not prompt: print("no prompt"); sys.exit(2)
     if a.photos:
-        asyncio.run(run_photos(prompt,a.count,a.engine,bool(a.audio),a.face,a.partner))
+        asyncio.run(run_photos(prompt,a.count,a.engine,bool(a.audio),a.face,a.partner,a.src))
     else:
-        asyncio.run(run(prompt,a.count,a.engine,bool(a.audio),a.face,a.partner))
+        asyncio.run(run(prompt,a.count,a.engine,bool(a.audio),a.face,a.partner,a.src))
 
 if __name__=="__main__":
     main()
