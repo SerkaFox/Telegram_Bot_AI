@@ -1937,6 +1937,7 @@ def cx_engine_keyboard() -> InlineKeyboardMarkup:
 def cx_partner_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 По сценариям (банк 100)", callback_data="cx:pt:stories")],
+        [InlineKeyboardButton("📚🎲 Банк + микс (50/50)", callback_data="cx:pt:bankmix")],
         [InlineKeyboardButton("🎲 Микс (секс+соло)", callback_data="cx:pt:mix")],
         [InlineKeyboardButton("👥 Секс с мужиком", callback_data="cx:pt:man")],
         [InlineKeyboardButton("👤 Соло", callback_data="cx:pt:solo"),
@@ -5350,10 +5351,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data.startswith("cx:pt:"):
         pt = data.split(":")[2]
-        st["cx_partner"] = pt if pt in ("mix", "man", "solo", "auto", "stories") else "auto"
+        st["cx_partner"] = pt if pt in ("mix", "man", "solo", "auto", "stories", "bankmix") else "auto"
         st["cx_await"] = True
         pt_lbl = {"mix": "🎲 Микс", "man": "👥 Секс с мужиком", "solo": "👤 Соло", "auto": "🧠 По промту",
-                  "stories": "📖 По банку сценариев (100)"}[st["cx_partner"]]
+                  "stories": "📖 По банку сценариев (100)",
+                  "bankmix": "📚🎲 Банк + микс (50/50)"}[st["cx_partner"]]
         await replace_ui_message_from_callback(
             query, context,
             f"Состав: {pt_lbl}.\n\n✍️ Пришли ОДНИМ сообщением описание тела:\n"
@@ -5394,7 +5396,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         face_line = f"\n🎯 Фейслок: {face}" if face else ""
         pt_lbl = {"mix": "🎲 микс (секс+соло)", "man": "👥 секс с мужиком",
-                  "solo": "👤 соло", "auto": "🧠 по промту"}.get(partner, partner)
+                  "solo": "👤 соло", "auto": "🧠 по промту", "stories": "📖 банк сценариев",
+                  "bankmix": "📚🎲 банк + микс (50/50)"}.get(partner, partner)
         head = ("🧩📷 ПОЛУКОМПЛЕКС запущен: генерирую {n} ФОТО · {e}.{f}\n"
                 "Под каждым фото будет 🎬 Анимировать — оживлю выбранные."
                 if photos else

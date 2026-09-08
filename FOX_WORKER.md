@@ -51,16 +51,36 @@ All calls send `Authorization: Bearer <FOX_WORKER_TOKEN>`.
 
 ## Capabilities
 
-Advertised catalogue: `safe.image.mopmix`, `safe.image.edit`, `safe.video.clean`, `safe.video.wan`,
-`safe.video.ltx`, `safe.video.v2v`, `adult.image`, `adult.video.wan`, `adult.video.eros`.
+Advertised catalogue: `safe.image.mopmix`, `safe.image.edit`, `safe.video.clean`,
+`safe.video.talking`, `safe.video.wan`, `safe.video.ltx`, `safe.video.v2v`, `adult.image`,
+`adult.video.wan`, `adult.video.eros`.
 
-**Enabled now (Phase G2):** `safe.image.mopmix`, `safe.image.edit` (Qwen-Image-Edit), `safe.video.clean`
-(WAN 2.2 clean i2v + MMAudio). Everything else (`safe.video.wan/ltx/v2v`, all adult) is advertised
-but refused with `unsupported_in_current_phase` until wired + tested.
+**Enabled now:** `safe.image.mopmix`, `safe.image.edit` (Qwen-Image-Edit), `safe.video.clean`
+(WAN 2.2 clean i2v + MMAudio), `safe.video.talking` (LTX Sulphur presenter / talking-head with real
+speech + lip-sync). Everything else (`safe.video.wan/ltx/v2v`, all adult) is advertised but refused
+with `unsupported_in_current_phase` until wired + tested.
 
 Routing is by `(type, mode, content_class)`:
 `image/mopmix/safe → safe.image.mopmix` · `image/edit/safe → safe.image.edit` ·
-`video/clean/safe → safe.video.clean`. An adult job can never resolve to a safe capability.
+`video/clean/safe → safe.video.clean` · `video/talking/safe → safe.video.talking`. An adult job can
+never resolve to a safe capability.
+
+### safe.video.talking (presenter / talking-head)
+SAFE talking-head clips from one source image via the **existing LTX Sulphur graph** (`LTX2.3_2.json`,
+node 61 video+audio out) — **never LTX Eros, never NSFW loras** (`selected_loras=[]`, statically
+tested). LTX-2.3's multilingual text encoder voices the line natively, so RU / ES / EN work with no
+translation. Job `options`:
+
+> `dialogue_text` — the exact spoken line (voiced verbatim; **FOX MIX owns the words**, we never
+> rewrite them). · `voice_mode` — `native` (LTX's own voice) or `openvoice` (re-timbre the native
+> track to `voice_reference` via the unchanged OpenVoice V2 pipeline). · `voice_reference` — voice
+> name in `voices/` (default `tati`) for openvoice. · `generate_dialogue` — optional; only when NO
+> `dialogue_text` was sent, asks the existing Ollama line writer for one in-character sentence. ·
+> `duration`/`seconds`, `seed`.
+
+Final artifact: one `video/mp4`, `kind=video`, with `width`/`height`/`duration` metadata (so FOX MIX
+renders a player, not a static poster). `openvoice` mode needs `third_party/OpenVoice` +
+`checkpoints_v2` and the reference sample under `voices/` — present already for the bot's 🎙 Дубляж.
 
 ### Source image transport (image.edit / clean.video) — PROPOSED contract
 Those two capabilities need a **source image**, and the FOX CORE OpenAPI currently exposes **no

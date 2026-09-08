@@ -11,6 +11,7 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     "safe.image.mopmix",
     "safe.image.edit",
     "safe.video.clean",
+    "safe.video.talking",
     "safe.video.wan",
     "safe.video.ltx",
     "safe.video.v2v",
@@ -19,12 +20,14 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     "adult.video.eros",
 )
 
-# Actually wired + tested. Phase G2 adds safe.image.edit and safe.video.clean to safe.image.mopmix.
+# Actually wired + tested. Phase G2 added safe.image.edit and safe.video.clean; this phase adds
+# safe.video.talking (LTX Sulphur presenter / talking-head with native or OpenVoice speech).
 # safe.video.wan/ltx/v2v stay advertised-but-disabled; all adult stays execution-disabled.
 ENABLED_CAPABILITIES: frozenset[str] = frozenset({
     "safe.image.mopmix",
     "safe.image.edit",
     "safe.video.clean",
+    "safe.video.talking",
 })
 
 
@@ -47,6 +50,8 @@ def capability_for_job(job_type: str, mode: str, content_class: str) -> str | No
             return "safe.image.edit"
         if t == "video" and m == "clean":
             return "safe.video.clean"
+        if t == "video" and m == "talking":
+            return "safe.video.talking"
         if t == "video":
             return "safe.video.wan"        # advertised, not enabled
     elif c == "adult":

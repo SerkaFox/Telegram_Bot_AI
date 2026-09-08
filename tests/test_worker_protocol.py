@@ -270,6 +270,109 @@ def test_source_download_retry_on_transient(core, tmp_path):
     assert dest.read_bytes() == core.source_png
 
 
+# ---------- safe.video.talking (presenter / talking-head) ----------
+def _make_png(path):
+    from generator.service import _write_test_png
+    _write_test_png(path)
+    return str(path)
+
+
+def test_talking_mock_metadata_and_voice(tmp_path):
+    svc = SafeGeneratorService()
+    src = _make_png(tmp_path / "src.png")
+    res = svc.generate_talking_video(
+        prompt="the fox presenter makes a small gesture", source_path=src,
+        dialogue_text="Доброе утро! Это FOX MIX.", voice_mode="native",
+        out_dir=tmp_path / "out", mock=True)
+    assert len(res.artifacts) == 1
+    a = res.artifacts[0]
+    assert a.kind == "video" and a.mime_type == "video/mp4"
+    # metadata FOX MIX needs to render a player instead of a static poster
+    assert a.width == 832 and a.height == 468 and a.duration == 8.0
+    assert res.metadata["voice_mode"] == "native" and res.metadata["mode"] == "talking"
+
+
+def test_talking_invalid_voice_mode(tmp_path):
+    svc = SafeGeneratorService()
+    src = _make_png(tmp_path / "src.png")
+    with pytest.raises(Exception) as ei:
+        svc.generate_talking_video(prompt="x", source_path=src, dialogue_text="hi",
+                                   voice_mode="clone_eros", out_dir=tmp_path / "o", mock=True)
+    assert getattr(ei.value, "error_code", "") == "invalid_voice_mode"
+
+
+def test_talking_missing_source(tmp_path):
+    svc = SafeGeneratorService()
+    with pytest.raises(Exception) as ei:
+        svc.generate_talking_video(prompt="x", source_path=str(tmp_path / "nope.png"),
+                                   dialogue_text="hi", out_dir=tmp_path / "o", mock=True)
+    assert getattr(ei.value, "error_code", "") == "missing_source"
+
+
+def test_talking_cancel_before_render(tmp_path):
+    svc = SafeGeneratorService()
+    src = _make_png(tmp_path / "src.png")
+    with pytest.raises(Exception) as ei:
+        svc.generate_talking_video(prompt="x", source_path=src, dialogue_text="hi",
+                                   out_dir=tmp_path / "o", mock=True, should_cancel=lambda: True)
+    assert getattr(ei.value, "error_code", "") == "cancelled"
+
+
+def test_talking_generate_dialogue_optional_mock(tmp_path):
+    # generate_dialogue=True with NO dialogue_text: mock supplies a line, still produces one video.
+    svc = SafeGeneratorService()
+    src = _make_png(tmp_path / "src.png")
+    res = svc.generate_talking_video(prompt="a fox at a news desk", source_path=src,
+                                     generate_dialogue=True, out_dir=tmp_path / "o", mock=True)
+    assert len(res.artifacts) == 1 and res.artifacts[0].kind == "video"
+
+
+def test_talking_video_full_lifecycle_native(core, tmp_path):
+    core.enqueue_job({"id": "job-t", "type": "video", "mode": "talking", "content_class": "safe",
+                      "prompt": "the fox presenter speaks to the camera", "count": 1, "quality": "M",
+                      "options": {"source_url": core.source_url,
+                                  "dialogue_text": "Это главная новость дня.",
+                                  "voice_mode": "native"}})
+    cfg = make_cfg(core.url, core.token, tmp_path)
+    drive_worker(cfg, predicate=lambda: len(core.completed) >= 1, timeout=12)
+    assert not core.failed, f"unexpected failures: {core.failed}"
+    assert core.source_downloads >= 1
+    arts = [a for a in core.artifacts if a["job_id"] == "job-t"]
+    assert len(arts) == 1 and arts[0]["kind"] == "video"
+    # width/height/duration travel with the artifact (mock probe: 832x468, 8.0s)
+    assert arts[0]["width"] == "832" and arts[0]["height"] == "468" and arts[0]["duration"] == "8.0"
+    assert any(s["job_id"] == "job-t" for s in core.started)
+
+
+def test_talking_video_openvoice_lifecycle(core, tmp_path):
+    core.enqueue_job({"id": "job-ov", "type": "video", "mode": "talking", "content_class": "safe",
+                      "prompt": "the fox presenter speaks", "count": 1, "quality": "M",
+                      "options": {"source_url": core.source_url, "dialogue_text": "Hola, buenos días.",
+                                  "voice_mode": "openvoice", "voice_reference": "tati"}})
+    cfg = make_cfg(core.url, core.token, tmp_path)
+    drive_worker(cfg, predicate=lambda: len(core.completed) >= 1, timeout=12)
+    assert not core.failed, f"unexpected failures: {core.failed}"
+    arts = [a for a in core.artifacts if a["job_id"] == "job-ov"]
+    assert len(arts) == 1 and arts[0]["kind"] == "video"
+
+
+def test_talking_pipeline_is_safe_no_eros_loras():
+    """SAFE guarantee (dep-free static check): the talking pipeline must inject NO loras and never
+    reference the Eros / NSFW graph, so safe.video.talking can never pull an adult lora."""
+    import ast
+    import inspect
+    from pathlib import Path as _P
+    src = _P("generator/video.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "talking_video")
+    body = ast.get_source_segment(src, fn)
+    assert "selected_loras=[]" in body           # empty lora list → apply_sulphur_loras is a no-op
+    # never the Eros graph / loras (check for actual identifiers, not the docstring's prose "Eros")
+    for forbidden in ("WORKFLOW_LTX_EROS", "apply_eros", "eros_", "ltx_eros", "patch_ltx_eros"):
+        assert forbidden not in body, f"talking_video must not reference {forbidden}"
+    assert "WORKFLOW_LTX_SULPHUR" in body        # the SFW Sulphur graph only
+
+
 def test_worker_polls_control_endpoint(core, tmp_path):
     # A completed job means the control endpoint was reachable and polled without breaking flow.
     core.enqueue_job({"id": "job-c", "type": "image", "content_class": "safe",

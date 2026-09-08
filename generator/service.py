@@ -286,6 +286,109 @@ class SafeGeneratorService:
                                 metadata={"engine": engine, "mode": mode,
                                           "generation_seconds": round(time.time() - started, 2)})
 
+    def generate_talking_video(
+        self,
+        *,
+        prompt: str,
+        source_path: str,
+        dialogue_text: str = "",
+        voice_mode: str = "native",
+        voice_reference: Optional[str] = None,
+        generate_dialogue: bool = False,
+        out_dir: Path,
+        quality: str = "medium",
+        seconds: Optional[int] = None,
+        seed: Optional[int] = None,
+        mock: bool = False,
+        timeout: int = 900,
+        should_cancel: Optional[Callable[[], bool]] = None,
+        on_progress: Optional[Callable[[int, str], None]] = None,
+    ) -> GenerationResult:
+        """SAFE talking-head / presenter clip (LTX Sulphur) with native or OpenVoice speech.
+
+        FOX MIX owns the words: `dialogue_text` is voiced verbatim. `generate_dialogue=True` is only
+        honoured when no dialogue_text was supplied — it then asks the existing Ollama line writer for
+        one in-character sentence. voice_mode ∈ {native, openvoice}."""
+        if not source_path or not Path(source_path).is_file():
+            raise GenerationError("source image missing", error_code="missing_source")
+        voice_mode = (voice_mode or "native").strip().lower()
+        if voice_mode not in ("native", "openvoice"):
+            raise GenerationError(f"unknown voice_mode: {voice_mode}", error_code="invalid_voice_mode")
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+
+        dialogue = (dialogue_text or "").strip()
+        # A scene prompt OR a spoken line must exist — a talking clip with neither is meaningless.
+        if not prompt.strip() and not dialogue and not generate_dialogue:
+            raise GenerationError("empty prompt and no dialogue", error_code="invalid_prompt")
+
+        if mock:
+            if should_cancel and should_cancel():
+                raise GenerationError("cancelled", error_code="cancelled")
+            if generate_dialogue and not dialogue:
+                dialogue = "Mock generated line."
+            p = out_dir / "mock_talking.mp4"
+            _write_test_mp4(p)
+            if on_progress:
+                on_progress(100, "mock talking")
+            paths, engine, mode = [p], "mock", "talking"
+            probe = {"width": 832, "height": 468, "duration": 8.0}
+        else:
+            # Optionally improvise ONE line only when FOX sent no text (default: FOX owns the words).
+            if generate_dialogue and not dialogue:
+                try:
+                    import telegram_comfyui_bot as b
+                    dialogue = b.generate_dialogue_line(prompt or "") or ""
+                except Exception:
+                    dialogue = ""
+            try:
+                from .video import talking_video
+            except Exception as e:  # pragma: no cover
+                raise GenerationError(f"generator backend unavailable: {e}", error_code="backend_unavailable")
+            try:
+                paths = talking_video(
+                    prompt, source_path, dialogue_text=dialogue, voice_mode=voice_mode,
+                    voice_reference=voice_reference, quality=quality, seconds=seconds, seed=seed,
+                    out_dir=out_dir, timeout=timeout, should_cancel=should_cancel, on_progress=on_progress,
+                )
+            except TimeoutError as e:
+                raise GenerationError(str(e), error_code="timeout", retryable=True)
+            except FileNotFoundError as e:
+                raise GenerationError(str(e), error_code="missing_source")
+            except ValueError as e:
+                raise GenerationError(str(e), error_code="invalid_voice_reference")
+            except GenerationError:
+                raise
+            except Exception as e:
+                raise GenerationError(str(e), error_code="generation_failed")
+            engine = "ltx_sulphur_openvoice" if voice_mode == "openvoice" else "ltx_sulphur"
+            mode = "talking"
+            probe = self._probe_video(paths[0]) if paths else {}
+
+        artifacts = [
+            ArtifactFile(path=p, kind="video", mime_type=_mime_for(p),
+                         width=probe.get("width"), height=probe.get("height"),
+                         duration=probe.get("duration"))
+            for p in paths
+        ]
+        return GenerationResult(artifacts=artifacts,
+                                metadata={"engine": engine, "mode": mode, "voice_mode": voice_mode,
+                                          "generation_seconds": round(time.time() - started, 2)})
+
+    @staticmethod
+    def _probe_video(path: Path) -> dict:
+        """Width/height/duration for artifact metadata (FOX MIX needs them to render a player, not a
+        static poster). Best-effort: reuse the bot's ffprobe helper; empty dict if it fails."""
+        try:
+            import telegram_comfyui_bot as b
+            info = b.probe_video(Path(path))
+            return {"width": info.get("width") or None, "height": info.get("height") or None,
+                    "duration": round(float(info.get("duration") or 0), 3) or None}
+        except Exception:
+            return {}
+
 
 class AdultGeneratorService:
     """Adult generation is deliberately not enabled for FOX in this phase — every call refuses

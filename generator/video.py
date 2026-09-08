@@ -101,3 +101,114 @@ def clean_video(
     dest = out_dir / f"clean_{final_name if final_name.endswith('.mp4') else final_name + '.mp4'}"
     dest.write_bytes(final_blob)
     return [dest]
+
+
+def _build_talking_prompt(scene: str, dialogue: str) -> str:
+    """Compose the LTX Sulphur prompt for a talking-head clip.
+
+    The scene description drives the visuals; the dialogue is embedded verbatim as the exact spoken
+    line so LTX-2.3's multilingual text encoder voices *those words* (RU / ES / EN alike) instead of
+    improvising. FOX MIX owns the words — we never rewrite them here."""
+    scene = (scene or "").strip()
+    dialogue = (dialogue or "").strip()
+    if not dialogue:
+        return scene
+    line = f'The character looks at the camera and clearly speaks these exact words aloud: "{dialogue}".'
+    return f"{scene.rstrip('. ')}. {line}" if scene else line
+
+
+def talking_video(
+    prompt: str,
+    source_path: str,
+    *,
+    dialogue_text: str = "",
+    voice_mode: str = "native",
+    voice_reference: Optional[str] = None,
+    quality: str = "medium",
+    seconds: Optional[int] = None,
+    seed: Optional[int] = None,
+    out_dir: Path,
+    timeout: int = 900,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[int, str], None]] = None,
+) -> list[Path]:
+    """SAFE talking-head / presenter clip from one source image via the existing LTX Sulphur graph.
+
+    `prompt` describes the scene/gesture; `dialogue_text` is the exact spoken line (voiced natively
+    by LTX-2.3). No loras are injected — this is strictly SFW, never LTX Eros / NSFW. With
+    voice_mode="openvoice" the native track is re-timbred to a reference voice via the unchanged
+    OpenVoice V2 pipeline; "native" leaves LTX's own voice. Returns [final_mp4]."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = Path(source_path)
+    if not src.is_file():
+        raise FileNotFoundError(f"source image not found: {source_path}")
+
+    if on_progress:
+        on_progress(5, "preparing")
+
+    preset_w, preset_h = b.LTX_SULPHUR_QUALITY.get(quality, b.LTX_SULPHUR_QUALITY["medium"])
+    sw, sh = _source_dims(src)
+    width, height = b.fit_to_pixel_budget(sw, sh, preset_w * preset_h)
+    max_seconds = b.MODE_MAX_SECONDS.get("ltx_sulphur", b.MAX_SECONDS)
+    req_seconds = int(seconds) if seconds else b.DEFAULT_SECONDS
+    req_seconds = max(1, min(req_seconds, max_seconds))
+    item_seed = int(seed) if seed is not None else b.make_seed()
+
+    full_prompt = _build_talking_prompt(prompt, dialogue_text)
+
+    uploaded = b.upload_image_to_comfy(str(src), src.name)
+    wf = b.load_workflow(b.WORKFLOW_LTX_SULPHUR)
+    # selected_loras=[] → apply_sulphur_loras injects nothing: strictly SAFE, no Eros / NSFW lora.
+    wf = b.patch_ltx_sulphur_workflow(
+        wf, prompt=full_prompt, image_name=uploaded, width=width, height=height,
+        seconds=req_seconds, seed=item_seed, selected_loras=[],
+    )
+
+    _wait_for_gpu_gate(should_cancel)
+    if should_cancel and should_cancel():
+        raise RuntimeError("cancelled before render")
+
+    if on_progress:
+        on_progress(15, "rendering")
+    prompt_id = b.queue_prompt(wf, str(uuid.uuid4()))
+    deadline = time.time() + timeout
+    result = None
+    while time.time() < deadline:
+        item = b.get_history(prompt_id).get(prompt_id)
+        if item and item.get("outputs"):
+            result = b.pick_first_result_from_outputs(item["outputs"], preferred_node="61")
+            break
+        time.sleep(b.POLL_SECONDS)
+    if result is None:
+        raise TimeoutError(f"Talking video timed out (prompt_id={prompt_id})")
+
+    blob = b.fetch_file(result["filename"], subfolder=result.get("subfolder", ""),
+                        file_type=result.get("type", "output"))
+    try:
+        b.delete_comfy_result_file(result["filename"], result.get("subfolder", ""))
+    except Exception:
+        pass
+
+    dest = out_dir / f"talking_{result['filename'] if result['filename'].endswith('.mp4') else result['filename'] + '.mp4'}"
+    dest.write_bytes(blob)
+
+    # voice_mode=openvoice: re-timbre LTX's native track to a reference voice via the unchanged
+    # OpenVoice V2 pipeline. Best-effort — a failure keeps the valid native-voice clip.
+    if str(voice_mode or "").strip().lower() == "openvoice":
+        if on_progress:
+            on_progress(88, "openvoice")
+        voice_name = (voice_reference or "").strip() or b.DEFAULT_VOICE_NAME
+        if b.voice_path(voice_name) is None:
+            raise ValueError(f"voice_reference '{voice_name}' not found in {b.VOICES_DIR}")
+        dubbed = out_dir / f"talking_openvoice_{dest.stem}.mp4"
+        b.dub_voice_in_video(dest, dubbed, voice_name)
+        try:
+            dest.unlink(missing_ok=True)
+        except Exception:
+            pass
+        dest = dubbed
+
+    if on_progress:
+        on_progress(95, "encoding")
+    return [dest]

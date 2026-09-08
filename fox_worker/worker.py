@@ -270,6 +270,19 @@ class Worker:
                 seconds=job.options.get("duration") or job.options.get("seconds"),
                 seed=job.options.get("seed"), mock=mock,
                 should_cancel=cancel_event.is_set, on_progress=on_progress)
+        if cap == "safe.video.talking":
+            src = self._fetch_source(job, ws, on_progress)
+            on_progress(10, "waiting_gpu")
+            opts = job.options or {}
+            return self.safe.generate_talking_video(
+                prompt=job.prompt, source_path=src, out_dir=ws.out_dir, quality=job.quality,
+                dialogue_text=opts.get("dialogue_text") or "",
+                voice_mode=opts.get("voice_mode") or "native",
+                voice_reference=opts.get("voice_reference"),
+                generate_dialogue=bool(opts.get("generate_dialogue")),
+                seconds=opts.get("duration") or opts.get("seconds"),
+                seed=opts.get("seed"), mock=mock,
+                should_cancel=cancel_event.is_set, on_progress=on_progress)
         raise GenerationError(f"no producer for {cap}", error_code="unsupported_in_current_phase")
 
     async def _poll_control(self, job_id: str, cancel_event: threading.Event) -> None:
