@@ -901,13 +901,47 @@ COUPLE_SETUP={
   "she crosses the cluttered village courtyard in her {o} when the old man sets down his tools and draws her behind the shed, the man is {m1}{d}",
   "she draws water in the village courtyard in her {o}, the weathered man comes up behind her, hands on her hips, the man is {m1}{d}"],
 }
-def couple_entry(partner,setting,outfit,m1,m2,rng,dog=False):
+# beat-0 = active UNDRESS / CHANGE into the outfit + DEMONSTRATE the body from the prompt
+# (user: "в первой части часто вижу эмоции — заменить на раздевание/переодевание и демонстрацию тела").
+# Prose-driven (loras []), NOT the idle wan_emotion opener. The body phrase comes from the prompt's
+# shape cue (huge breasts / big ass) so beat-0 actually shows off what was requested.
+CX_REVEAL_PROB=float(os.getenv("CX_REVEAL_PROB","0.7"))
+REVEAL_SOLO=[
+ "she strips out of her clothes and changes into {o}, turning to the camera to show off {body}",
+ "she slowly undresses and slips into {o}, deliberately displaying {body}, running her hands over herself",
+ "she peels off what she was wearing and puts on {o}, posing to flaunt {body} at the camera",
+ "she does a slow striptease as she changes into {o}, showing off {body} to the camera",
+ "she changes into {o} in front of the mirror, cupping and presenting {body}",
+ "she pulls off her clothes and puts on {o}, then turns and bends to show {body} off",
+]
+REVEAL_COUPLE=[
+ "she strips out of her clothes and changes into {o} in front of {m1}, showing off {body}",
+ "she slowly undresses and slips into {o} while {m1} watches, displaying {body}",
+ "she peels off her clothes and puts on {o}, flaunting {body} as {m1} steps closer",
+ "she does a striptease out of her clothes into {o} for {m1}, showing off {body}",
+]
+def _reveal_body(plan):
+    sp=(plan or {}).get("shape",("","",False))
+    return ((sp[0] if sp else "") or "").strip() or "her curves"
+def reveal_opener(outfit, plan, rng, partner="none", m1=""):
+    body=_reveal_body(plan)
+    if partner=="mmf":
+        return rng.choice(REVEAL_COUPLE).format(o=outfit, body=body, m1="the two men"), []
+    if partner=="man" and m1:
+        return rng.choice(REVEAL_COUPLE).format(o=outfit, body=body, m1=_short_man(m1)), []
+    return rng.choice(REVEAL_SOLO).format(o=outfit, body=body), []
+
+def couple_entry(partner,setting,outfit,m1,m2,rng,dog=False,plan=None):
     """beat-0 for a couple: both present and busy from the first frame (establishes identity + outfit).
     Draws a VARIED opener from the pool (not always the same walk+grope+emotion). Returns (text,loras).
     dog=True adds the NON-SEXUAL dog-on-a-leash prop, but only to WALK openers (which contain {d})."""
     loc=f"in {setting}" if setting.split()[0] in ("a","an") else setting   # avoid "in by the dumpsters"
     d=DOG if dog else ""
     o=_bare(outfit); s1=_short_man(m1); s2=_short_man(m2)
+    # beat-0 = undress/change into the outfit + show off the requested body (he watches/steps closer —
+    # doubles as the завязка). Skip on dog walks so the dog-on-leash walk opener stays intact.
+    if not dog and rng.random()<CX_REVEAL_PROB:
+        return reveal_opener(outfit,plan,rng,partner,m1)
     if partner=="mmf":
         tpl,loras=rng.choice(MMF_OPENERS)
         return tpl.format(m1=s1,m2=s2,loc=loc,o=o,d=d)+NO_MM, list(loras)
@@ -1374,7 +1408,9 @@ async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan
         label,tr_p,ac_p,ac_l=pick_climax(climaxes,partner,rng)
         if partner in ("man","mmf"):
             dog_on=setting in OUTDOOR_WALK and rng.random()<0.30   # non-sexual dog-on-leash on outdoor walks
-            b0=couple_entry(partner,setting,outfit,m1,m2,rng,dog_on)
+            b0=couple_entry(partner,setting,outfit,m1,m2,rng,dog_on,plan)
+        elif rng.random()<CX_REVEAL_PROB:
+            b0=reveal_opener(outfit,plan,rng)   # solo beat-0 = undress/change + body demo (not idle emotion)
         else:
             b0=(entry_p,[l for l in entry_l if l!="wan_scene_change"] or ["wan_emotion"])
     rough=(setting in GRIMY_SETTINGS) or (m1 in DIRTY_MEN) or (m2 in DIRTY_MEN)  # grime → victim roleplay
