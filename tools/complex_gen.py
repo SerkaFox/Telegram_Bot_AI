@@ -1260,6 +1260,7 @@ def inject_mopmix_realism(wf,loras=MOPMIX_REALISM):
     return wf
 TAN_NEG="(tan lines:1.5), bikini tan lines, bra tan lines, farmer's tan, uneven skin tone, sunburn marks"
 CX_SRC_DENOISE=float(os.getenv("CX_SRC_DENOISE","0.62"))   # 🖼 "из фото": how far img2img redraws the source
+CX_STREAM_AREA=float(os.getenv("CX_STREAM_AREA","0.7"))    # single-stream 12/18s: shrink area for VRAM headroom (real frames are heavy)
 async def gen_photo_mopmix(prompt,dst,neg_extra="",skip_breast_lora=False,src_image="",denoise=CX_SRC_DENOISE):
     wf=b.load_workflow(b.WORKFLOW_MOPMIX)
     if src_image:   # 🖼 img2img: start from the user's real photo so it keeps her, only restyled into the scene
@@ -1325,10 +1326,13 @@ def inject_wan_realism(wf,strength=WAN_REALISM_STRENGTH):
     wf["cx_wan_real_l"]={"class_type":"LoraLoaderModelOnly","inputs":{"model":lp,"lora_name":WAN_REALISM_LOW,"strength_model":float(strength)}}
     n141["model_high_noise"]=["cx_wan_real_h",0]; n141["model_low_noise"]=["cx_wan_real_l",0]
     return wf
-async def gen_video(image_name,prompt,loras,dst,seconds=BEAT_SECONDS,w=W,h=H):
+async def gen_video(image_name,prompt,loras,dst,seconds=BEAT_SECONDS,w=W,h=H,no_stretch=False):
     wf=b.load_workflow(b.WORKFLOW_VIDEO)
+    # no_stretch: generate REAL frames for the full duration (WAN boomerangs at true speed) instead of
+    # RIFE slow-mo-stretching a native ~8s clip — for КОМПЛЕКС single-stream ("не надо растягивать").
     wf=b.patch_video_workflow(wf,prompt=prompt,image_name=image_name,width=w,height=h,seconds=seconds,
-        video_fps=16,seed=b.make_seed(),selected_loras=loras,video_model="svi_fastmove")
+        video_fps=16,seed=b.make_seed(),selected_loras=loras,video_model="svi_fastmove",
+        max_native_seconds=(int(seconds) if no_stretch else None))
     if WAN_REALISM: wf=inject_wan_realism(wf)
     pid=await asyncio.to_thread(b.queue_prompt,wf,str(uuid.uuid4()))
     dl=time.time()+max(700,int(seconds)*100)   # scale timeout for long single-stream clips (12/18s)
@@ -1478,14 +1482,17 @@ async def animate_scenario(png,wd,meta,audio,N):
         k=3 if stream>=18 else 2
         prompt=". then ".join(bp.rstrip(". ,") for bp,_ in beats[:k])
         loras=beats[1][1] or beats[-1][1] or []
+        # many REAL frames (18s×16≈289) are VRAM-heavy on 12GB → shrink the stream a bit for headroom
+        svw,svh=fit_dims(sw,sh,int(base_area*CX_STREAM_AREA))
         ok=False
         try:
             if engine=="eros":
-                blob=await gen_video_eros(img,prompt,wd/"stream.mp4",dialogue=True,seconds=stream,w=vw,h=vh)
+                blob=await gen_video_eros(img,prompt,wd/"stream.mp4",dialogue=True,seconds=stream,w=svw,h=svh)
             else:
-                blob=await gen_video(img,prompt,loras,wd/"stream.mp4",seconds=stream,w=vw,h=vh)
+                # no_stretch → real-time frames (WAN boomerangs) instead of RIFE slow-mo
+                blob=await gen_video(img,prompt,loras,wd/"stream.mp4",seconds=stream,w=svw,h=svh,no_stretch=True)
             raw=wd/"stream_raw.mp4"; await asyncio.to_thread(b.save_bytes,raw,blob)
-            src=wd/"stream_n.mp4"; await asyncio.to_thread(b.normalize_story_segment,raw,src,vw,vh,16)
+            src=wd/"stream_n.mp4"; await asyncio.to_thread(b.normalize_story_segment,raw,src,svw,svh,16)
             if engine=="wan" and audio and b.VIDEO_AUDIO:
                 try:
                     voiced=await b.run_video_audio_postprocess(src.read_bytes(),
@@ -1493,7 +1500,7 @@ async def animate_scenario(png,wd,meta,audio,N):
                     if voiced: src=wd/"voiced.mp4"; await asyncio.to_thread(b.save_bytes,src,voiced[0])
                 except Exception as e: print("  audio fail",e)
             eng_tag="🧬 Эрос" if engine=="eros" else "🎬 ВАН"
-            ok=tg_video(src,f"🎬 #{idx+1}/{N} · «{label}» · {eng_tag} · {stream}с одним потоком (лицо стабильнее)")
+            ok=tg_video(src,f"🎬 #{idx+1}/{N} · «{label}» · {eng_tag} · {stream}с одним потоком · реальная скорость · лицо стабильнее")
         except Exception as e:
             print(f"  [{idx+1}] stream FAIL {e}")
         LOG.open("a").write(json.dumps({"i":idx,"climax":label,"eth":eth,"outfit":outfit,"setting":setting,"stream":stream,"ok":bool(ok)})+"\n")

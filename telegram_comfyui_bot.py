@@ -2782,6 +2782,7 @@ def patch_video_workflow(
     clean: bool = False,
     video_model: str | None = None,
     smooth_mult: int = VIDEO_SMOOTH_MULT,
+    max_native_seconds: int | None = None,
 ) -> dict[str, Any]:
     wf = json.loads(json.dumps(wf))
     prompt_parts = [prompt]
@@ -2809,7 +2810,10 @@ def patch_video_workflow(
     fps = max(1, int(video_fps))
     req_seconds = max(1, int(seconds))
     # Cap generated frames at the native window; RIFE-stretch beyond it (see VIDEO_NATIVE_MAX_SECONDS).
-    native_seconds = min(req_seconds, VIDEO_NATIVE_MAX_SECONDS)
+    # max_native_seconds RAISES that cap so WAN generates REAL frames (it boomerangs to fill the window)
+    # at true speed instead of RIFE slow-mo — used by КОМПЛЕКС single-stream ("не растягивать").
+    cap_seconds = int(max_native_seconds) if max_native_seconds else VIDEO_NATIVE_MAX_SECONDS
+    native_seconds = min(req_seconds, cap_seconds)
     gen_frames = max(1, native_seconds * fps + 1)
     wf["243"]["inputs"]["value"] = native_seconds
     wf["373:359"]["inputs"]["value"] = str(gen_frames)
@@ -5427,8 +5431,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Состав: {pt_lbl}.\n\nДлина ролика:\n"
             "• 🔗 3×6с — три части с развитием (общий → средний → крупный план). Дольше, "
             "но после 2-й части лицо иногда «плывёт», ReActor не всегда спасает.\n"
-            "• 🎬 12с / 18с одним потоком — один непрерывный клип: лицо держится стабильнее "
-            "(ВАН может слегка зацикливать картинку — это норм).",
+            "• 🎬 12с / 18с одним потоком — один непрерывный клип в РЕАЛЬНОЙ скорости (без слоумо/растяжки): "
+            "лицо держится стабильнее, ВАН просто бумерангит/зацикливает движение — это норм. "
+            "18с тяжёлые для видеопамяти — если не осилит, бери 12с.",
             reply_markup=cx_len_keyboard(),
         )
         return
