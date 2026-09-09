@@ -271,11 +271,24 @@ CAMERA_ANGLE_SHIFT=[
  "tight close-up on her ass and his thrusting hips, the camera locked on the impact, clothing shifted aside not removed",
  "low three-quarter angle rising up their bodies to the joined hips, correct body proportions",
 ]
+# WIDE ESTABLISHING shots (user: "мало общих планов, теряется понимание что происходит — камеру
+# отдалять чтобы видеть всё вокруг, потом приближать"). beat-0 opens WIDE to establish the whole
+# scene/surroundings, then the action beat comes in medium, then the escalation goes close.
+CAMERA_ESTABLISH=[
+ "wide establishing shot from far back showing the whole location and everything around them, full bodies head to toe in frame",
+ "wide long shot, the camera far away taking in the entire room and surroundings, both figures small in the full scene",
+ "wide-angle establishing shot of the whole setting, plenty of the environment visible around them, full bodies in frame",
+ "pulled-back wide shot showing the complete scene and where everyone is, the camera holds the whole space",
+ "distant wide shot capturing the full environment and both people head to toe, establishing where they are",
+ "wide cinematic establishing shot, the camera far back so the entire surroundings and both bodies are clearly visible",
+]
 def pick_cameras(rng):
-    """A framing for the action beat + a DISTINCTLY different angle for the escalation beat."""
+    """Camera arc for the 3 acts: beat-0 WIDE establishing (see the whole scene) → action beat medium
+    (push in on the bodies) → escalation beat a DISTINCT close/angle shift."""
+    est=rng.choice(CAMERA_ESTABLISH)
     cam1=rng.choice(CAMERA)
     cam2=rng.choice([c for c in CAMERA_ANGLE_SHIFT if c!=cam1] or CAMERA_ANGLE_SHIFT)
-    return cam1,cam2
+    return est,cam1,cam2
 
 # SCENES = (place, [variants...]) where each variant = (still_hint [prop interaction shown in the still],
 # entry_action [beat-0 video: she interacts with the location's props → "life", then eases into the tease],
@@ -1318,7 +1331,7 @@ async def gen_video(image_name,prompt,loras,dst,seconds=BEAT_SECONDS,w=W,h=H):
         video_fps=16,seed=b.make_seed(),selected_loras=loras,video_model="svi_fastmove")
     if WAN_REALISM: wf=inject_wan_realism(wf)
     pid=await asyncio.to_thread(b.queue_prompt,wf,str(uuid.uuid4()))
-    dl=time.time()+700
+    dl=time.time()+max(700,int(seconds)*100)   # scale timeout for long single-stream clips (12/18s)
     while time.time()<dl:
         it=(await asyncio.to_thread(b.get_history,pid)).get(pid)
         if it and it.get("outputs"):
@@ -1346,7 +1359,7 @@ async def gen_video_eros(image_name,prompt,dst,dialogue=True,seconds=BEAT_SECOND
     wf=b.patch_ltx_eros_workflow(wf,prompt=p,image_name=image_name,width=ew,height=eh,seconds=seconds,
         seed=b.make_seed(),selected_loras=loras)
     pid=await asyncio.to_thread(b.queue_prompt,wf,str(uuid.uuid4()))
-    dl=time.time()+900
+    dl=time.time()+max(900,int(seconds)*120)   # scale timeout for long single-stream clips
     while time.time()<dl:
         it=(await asyncio.to_thread(b.get_history,pid)).get(pid)
         if it and it.get("outputs"):
@@ -1359,7 +1372,7 @@ async def gen_video_eros(image_name,prompt,dst,dialogue=True,seconds=BEAT_SECOND
     raise TimeoutError("eros timeout")
 
 # ---------- one scenario = still (both present) + 3 chained acts -> concat ----------
-async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan",face="",src=""):
+async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan",face="",src="",stream=0):
     """Roll one scenario and render just the STILL. Returns (png, meta) where meta carries
     everything needed to animate the still later (beats/engine/face). Shared by full КОМПЛЕКС
     and ПОЛУКОМПЛЕКС (photos-first). `src` = 🖼 real source photo (comfy-input filename): beat-0 is
@@ -1414,7 +1427,8 @@ async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan
         else:
             b0=(entry_p,[l for l in entry_l if l!="wan_scene_change"] or ["wan_emotion"])
     rough=(setting in GRIMY_SETTINGS) or (m1 in DIRTY_MEN) or (m2 in DIRTY_MEN)  # grime → victim roleplay
-    cam,cam2=pick_cameras(rng)                            # distinct angle per pass (side → above/below/close)
+    est,cam,cam2=pick_cameras(rng)                        # WIDE establishing → medium action → close escalation
+    b0=(f"{b0[0]}, {est}",b0[1])                          # beat-0 opens WIDE so you can see the whole scene
     # THREE-ACT ASSEMBLY, chained by the last frame (act1 opener → act2 transition+action → act3 escalation).
     action_start=wardrobe_transition(outfit,tr_p,rng,partner,ac_p)
     action_full=add_reactions(with_identity(f"{action_start}; then immediately {ac_p}, {cam}",partner,m1,m2),partner,rng,rough)+(dog_clause(rng) if dog_on else "")
@@ -1441,7 +1455,7 @@ async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan
     ftag=" · 🖼 из фото" if src else (" · 🎯 лицо" if fsrc else "")
     cap=(f"📸 #{idx+1}/{N} · {pmap.get(plan['partner'],'👤')} «{label}»{ftag}\n🌍 {eth} · 👗 {outfit}\n📍 {setting}")
     meta={"idx":idx,"label":label,"eth":eth,"outfit":outfit,"setting":setting,
-          "beats":[[bp,ls] for bp,ls in beats],"engine":engine,"fsrc":fsrc,"cap":cap}
+          "beats":[[bp,ls] for bp,ls in beats],"engine":engine,"fsrc":fsrc,"cap":cap,"stream":int(stream)}
     return png,meta
 
 async def animate_scenario(png,wd,meta,audio,N):
@@ -1455,6 +1469,35 @@ async def animate_scenario(png,wd,meta,audio,N):
     sw,sh=png_size(png)
     base_area=(b.LTX_EROS_QUALITY.get("medium",(416,736))[0]*b.LTX_EROS_QUALITY.get("medium",(416,736))[1]) if engine=="eros" else W*H
     vw,vh=fit_dims(sw,sh,base_area)
+    stream=int(meta.get("stream",0))
+    if stream:
+        # ONE continuous clip (12/18s) instead of 3 chained 6s beats. The user prefers this for FACE
+        # retention: chaining re-generates from each last frame and after ~beat 2 even ReActor can't
+        # hold the face; a single pass keeps it (WAN may boomerang back — that's an accepted tradeoff).
+        # Content = the beat arc joined into one flowing prompt (2 beats for 12s, all 3 for 18s).
+        k=3 if stream>=18 else 2
+        prompt=". then ".join(bp.rstrip(". ,") for bp,_ in beats[:k])
+        loras=beats[1][1] or beats[-1][1] or []
+        ok=False
+        try:
+            if engine=="eros":
+                blob=await gen_video_eros(img,prompt,wd/"stream.mp4",dialogue=True,seconds=stream,w=vw,h=vh)
+            else:
+                blob=await gen_video(img,prompt,loras,wd/"stream.mp4",seconds=stream,w=vw,h=vh)
+            raw=wd/"stream_raw.mp4"; await asyncio.to_thread(b.save_bytes,raw,blob)
+            src=wd/"stream_n.mp4"; await asyncio.to_thread(b.normalize_story_segment,raw,src,vw,vh,16)
+            if engine=="wan" and audio and b.VIDEO_AUDIO:
+                try:
+                    voiced=await b.run_video_audio_postprocess(src.read_bytes(),
+                        {"mode":"video","job_id":f"cx{idx}","chat_id":CHAT,"prompt":ac_p},src.name)
+                    if voiced: src=wd/"voiced.mp4"; await asyncio.to_thread(b.save_bytes,src,voiced[0])
+                except Exception as e: print("  audio fail",e)
+            eng_tag="🧬 Эрос" if engine=="eros" else "🎬 ВАН"
+            ok=tg_video(src,f"🎬 #{idx+1}/{N} · «{label}» · {eng_tag} · {stream}с одним потоком (лицо стабильнее)")
+        except Exception as e:
+            print(f"  [{idx+1}] stream FAIL {e}")
+        LOG.open("a").write(json.dumps({"i":idx,"climax":label,"eth":eth,"outfit":outfit,"setting":setting,"stream":stream,"ok":bool(ok)})+"\n")
+        return bool(ok)
     segs=[]; used=[]; ok=False
     try:
         for bi,(bp,loras) in enumerate(beats):
@@ -1485,9 +1528,9 @@ async def animate_scenario(png,wd,meta,audio,N):
     LOG.open("a").write(json.dumps({"i":idx,"climax":label,"eth":eth,"outfit":outfit,"setting":setting,"ok":bool(ok)})+"\n")
     return bool(ok)
 
-async def one_scenario(idx,plan,climaxes,mode,neg,still_t,audio,rng,N,engine="wan",face="",src=""):
+async def one_scenario(idx,plan,climaxes,mode,neg,still_t,audio,rng,N,engine="wan",face="",src="",stream=0):
     wd=OUT/f"c{idx:03d}"
-    png,meta=await build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine,face,src)
+    png,meta=await build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine,face,src,stream)
     if not src: tg_photo(png,meta["cap"])   # 🖼 "Из фото": base is the same original every clip → skip preview, go straight to video
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
@@ -1512,7 +1555,7 @@ def _story_still_tpl(p,has2):
     return STILL_MAN
 def _story_neg(p):
     return NEG_MMF if p in ("mmf","rej") else ANTI_CLONE
-async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face="",src=""):
+async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face="",src="",stream=0):
     """Build a STILL + 3-act manifest from a curated STORY_BANK entry (same meta shape as build_scenario).
     `src` = 🖼 real source photo: beat-0 img2img off it + facelock so her identity carries through."""
     wd.mkdir(parents=True,exist_ok=True)
@@ -1539,7 +1582,7 @@ async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face="",src=
     if any(k in _a1l for k in ("suck","blowjob","cock","unzip","kneel")): _b0l=[]
     elif any(k in _a1l for k in ("kiss","neck","lick")):                  _b0l=rng.choice([["wan_kiss"],["wan_lick"]])
     else:                                                                 _b0l=rng.choice([["wan_emotion"],["wan_kiss"],[]])
-    b0=(with_identity(a1,idp,m1,m2), story.get("l0") or _b0l)
+    b0=(f"{with_identity(a1,idp,m1,m2)}, {rng.choice(CAMERA_ESTABLISH)}", story.get("l0") or _b0l)  # open WIDE to establish the scene
     bridge=story.get("tr") or ("both men expose their erections and everyone moves into the exact action pose"
                                if idp=="mmf" else
                                "the man exposes his erection and they move into the exact action pose")
@@ -1570,7 +1613,7 @@ async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face="",src=
     lbl=story.get("lbl","история"); ftag=" · 🖼 из фото" if src else (" · 🎯 лицо" if fsrc else "")
     cap=f"📖 #{idx+1}/{N} · {pmap.get(p,'👥+♂')} «{lbl}»{ftag}\n👗 {outfit}\n📍 {setting}"
     meta={"idx":idx,"label":lbl,"eth":eth,"outfit":outfit,"setting":setting,
-          "beats":[[bp,ls] for bp,ls in beats],"engine":engine,"fsrc":fsrc,"cap":cap}
+          "beats":[[bp,ls] for bp,ls in beats],"engine":engine,"fsrc":fsrc,"cap":cap,"stream":int(stream)}
     return png,meta
 
 STORY_BANK=[
@@ -1886,9 +1929,9 @@ STORY_BANK=[
   "a1":"on the massage table he rolls her over, lets the towel slip, gropes her breasts and kisses her neck while she smiles",
   "a2":"she straddles him on the table facing away and lowers her ass onto his cock, riding him in anal cowgirl, ass to camera, explicit hardcore","lbl":"Массаж — анал ковгерл"},
 ]
-async def one_story(idx,story,plan,audio,rng,N,engine="wan",face="",src=""):
+async def one_story(idx,story,plan,audio,rng,N,engine="wan",face="",src="",stream=0):
     wd=OUT/f"s{idx:03d}"
-    png,meta=await build_story_scenario(idx,story,plan,rng,N,wd,engine,face,src)
+    png,meta=await build_story_scenario(idx,story,plan,rng,N,wd,engine,face,src,stream)
     if not src: tg_photo(png,meta["cap"])   # 🖼 "Из фото": same original base each clip → skip preview, go straight to video
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
@@ -1937,7 +1980,7 @@ def pick_partner(base_partner,mode,rng):
 def plan_for_clip(plan,partner):
     p=dict(plan); p["partner"]=partner; p["people"]=1 if partner=="none" else 2; return p
 
-async def run(prompt,count,engine,audio,face="",partner_mode="auto",src=""):
+async def run(prompt,count,engine,audio,face="",partner_mode="auto",src="",stream=0):
     if engine not in ("wan","eros"): engine="wan"
     plan=parse_plan(prompt); base_partner=plan["partner"]
     LOG.write_text("")
@@ -1961,13 +2004,13 @@ async def run(prompt,count,engine,audio,face="",partner_mode="auto",src=""):
                 story_idx=order[idx] if partner_mode=="stories" else hybrid_stories[hybrid_pos]
                 hybrid_pos+=1 if partner_mode=="bankmix" else 0
                 story=STORY_BANK[story_idx]
-                ok+=1 if await one_story(idx,story,plan,audio,rng,count,engine,face,src) else 0
+                ok+=1 if await one_story(idx,story,plan,audio,rng,count,engine,face,src,stream) else 0
                 print(f"[{idx+1}/{count}] {time.time()-t:.0f}s ok={ok} [story:{story['lbl']}]")
             else:
                 procedural_mode="mix" if partner_mode=="bankmix" else partner_mode
                 cp=plan_for_clip(plan,pick_partner(base_partner,procedural_mode,rng))
                 climaxes,mode,neg,still_t=config_for(cp)
-                ok+=1 if await one_scenario(idx,cp,climaxes,mode,neg,still_t,audio,rng,count,engine,face,src) else 0
+                ok+=1 if await one_scenario(idx,cp,climaxes,mode,neg,still_t,audio,rng,count,engine,face,src,stream) else 0
                 print(f"[{idx+1}/{count}] {time.time()-t:.0f}s ok={ok} [{cp['partner']}]")
         except Exception as e:
             print(f"[{idx+1}/{count}] CLIP FAIL {e}")
@@ -1975,7 +2018,7 @@ async def run(prompt,count,engine,audio,face="",partner_mode="auto",src=""):
     tg_msg(f"✅ КОМПЛЕКС завершён: {ok}/{count} клипов за {(time.time()-t0)/3600:.1f}ч.")
 
 PICKS=OUT/"picks"
-async def run_photos(prompt,count,engine,audio,face="",partner_mode="auto",src=""):
+async def run_photos(prompt,count,engine,audio,face="",partner_mode="auto",src="",stream=0):
     """ПОЛУКОМПЛЕКС phase 1: render ALL stills, persist each with its animate-manifest,
     and send each with a '🎬 Анимировать' button. Animation happens later, on demand."""
     if engine not in ("wan","eros"): engine="wan"
@@ -2000,12 +2043,12 @@ async def run_photos(prompt,count,engine,audio,face="",partner_mode="auto",src="
             if partner_mode=="stories" or (partner_mode=="bankmix" and hybrid[idx]):
                 story_idx=order[idx] if partner_mode=="stories" else hybrid_stories[hybrid_pos]
                 hybrid_pos+=1 if partner_mode=="bankmix" else 0
-                png,meta=await build_story_scenario(idx,STORY_BANK[story_idx],plan,rng,count,pdir,engine,face,src)
+                png,meta=await build_story_scenario(idx,STORY_BANK[story_idx],plan,rng,count,pdir,engine,face,src,stream)
             else:
                 procedural_mode="mix" if partner_mode=="bankmix" else partner_mode
                 cp=plan_for_clip(plan,pick_partner(base_partner,procedural_mode,rng))
                 climaxes,mode,neg,still_t=config_for(cp)
-                png,meta=await build_scenario(idx,cp,climaxes,mode,neg,still_t,rng,count,pdir,engine,face,src)
+                png,meta=await build_scenario(idx,cp,climaxes,mode,neg,still_t,rng,count,pdir,engine,face,src,stream)
             meta["png"]=str(png); meta["audio"]=int(audio); meta["N"]=count
             (pdir/"plan.json").write_text(json.dumps(meta))
             tg_photo_btn(png,meta["cap"],f"cxa:{runid}:{idx:03d}")
@@ -2040,6 +2083,7 @@ def main():
     ap.add_argument("--photos",action="store_true")   # ПОЛУКОМПЛЕКС: render stills only, animate on demand
     ap.add_argument("--animate",default="")            # 'runid:idx' — animate one chosen still
     ap.add_argument("--partner",default="auto",choices=["auto","mix","man","solo","stories","bankmix"])  # bankmix = 50/50 curated bank + procedural mix
+    ap.add_argument("--stream",type=int,default=0)     # 0=3×6с цепочка; 12/18=один непрерывный клип (лицо стабильнее)
     ap.add_argument("rest",nargs="*")
     a=ap.parse_args()
     global CHAT
@@ -2050,9 +2094,9 @@ def main():
     prompt=(a.prompt or " ".join(a.rest)).strip()
     if not prompt: print("no prompt"); sys.exit(2)
     if a.photos:
-        asyncio.run(run_photos(prompt,a.count,a.engine,bool(a.audio),a.face,a.partner,a.src))
+        asyncio.run(run_photos(prompt,a.count,a.engine,bool(a.audio),a.face,a.partner,a.src,a.stream))
     else:
-        asyncio.run(run(prompt,a.count,a.engine,bool(a.audio),a.face,a.partner,a.src))
+        asyncio.run(run(prompt,a.count,a.engine,bool(a.audio),a.face,a.partner,a.src,a.stream))
 
 if __name__=="__main__":
     main()

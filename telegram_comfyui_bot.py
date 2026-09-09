@@ -1943,13 +1943,23 @@ def cx_engine_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def cx_partner_keyboard() -> InlineKeyboardMarkup:
+    # Trimmed from 6 to 4 modes (user was confused): dropped "Банк+микс" (redundant — Микс already
+    # blends the curated bank internally at 50%). Микс is the recommended default.
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📖 По сценариям (банк 100)", callback_data="cx:pt:stories")],
-        [InlineKeyboardButton("📚🎲 Банк + микс (50/50)", callback_data="cx:pt:bankmix")],
-        [InlineKeyboardButton("🎲 Микс (секс+соло)", callback_data="cx:pt:mix")],
-        [InlineKeyboardButton("👥 Секс с мужиком", callback_data="cx:pt:man")],
-        [InlineKeyboardButton("👤 Соло", callback_data="cx:pt:solo"),
-         InlineKeyboardButton("🧠 По промту", callback_data="cx:pt:auto")],
+        [InlineKeyboardButton("🎲 Микс — всё вперемешку (реком.)", callback_data="cx:pt:mix")],
+        [InlineKeyboardButton("👥 Секс с мужиком", callback_data="cx:pt:man"),
+         InlineKeyboardButton("👤 Соло", callback_data="cx:pt:solo")],
+        [InlineKeyboardButton("📖 Готовые сценарии (100)", callback_data="cx:pt:stories")],
+        [InlineKeyboardButton("🧠 Строго по промту", callback_data="cx:pt:auto")],
+    ])
+
+def cx_len_keyboard() -> InlineKeyboardMarkup:
+    # Video length: chained 3×6s (development, but face may drift after act 2) vs one continuous
+    # 12/18s pass (face holds better; WAN may boomerang). User asked for the single-stream option.
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 3×6с — развитие сцены (реком.)", callback_data="cx:len:0")],
+        [InlineKeyboardButton("🎬 12с одним потоком", callback_data="cx:len:12")],
+        [InlineKeyboardButton("🎬 18с одним потоком", callback_data="cx:len:18")],
     ])
 
 def cx_count_keyboard() -> InlineKeyboardMarkup:
@@ -1970,13 +1980,15 @@ def cx_is_running(chat_id: int) -> bool:
 CX_ANIM: dict[int, list[subprocess.Popen]] = {}   # ПОЛУКОМПЛЕКС per-photo animate jobs
 
 def cx_launch(chat_id: int, engine: str, prompt: str, count: int, face: str = "", photos: bool = False,
-              partner: str = "auto", src: str = "") -> None:
+              partner: str = "auto", src: str = "", stream: int = 0) -> None:
     args = [sys.executable, str(COMPLEX_SCRIPT), "-n", str(count), "--engine", engine,
             "--chat", str(chat_id), "--audio", "1", "--partner", partner, "--prompt", prompt]
     if face:
         args += ["--face", face]   # 'tati' or an uploaded image filename in ComfyUI/input
     if src:
         args += ["--src", src]     # 🖼 real source photo (ComfyUI/input filename): img2img base + facelock
+    if stream:
+        args += ["--stream", str(stream)]   # 12/18 = one continuous clip instead of 3×6s chain
     if photos:
         args += ["--photos"]       # ПОЛУКОМПЛЕКС: render stills only, animate later on tap
     # own session/process group so cx_stop can kill the whole batch (python + ffmpeg children)
@@ -5394,25 +5406,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         note = "🎬 ВАН (визуал/действие)" if st["cx_engine"] == "wan" else "🧬 Эрос (нативный голос + ИИ-диалоги)"
         await replace_ui_message_from_callback(
             query, context,
-            f"Движок: {note}.\n\nКто в кадре? (чтобы не выходило одно соло-дрочево)\n"
-            "• 🎲 Микс — вперемешку секс с мужиком и соло\n"
-            "• 👥 Секс с мужиком — почти всегда ебля/минет\n"
+            f"Движок: {note}.\n\nКто в кадре? (4 режима):\n"
+            "• 🎲 Микс — всё вперемешку: секс с мужиком, тройнички, с женщиной, немного соло; "
+            "сам подмешивает готовые сценарии из банка. Лучший выбор по умолчанию.\n"
+            "• 👥 Секс с мужиком — почти всегда ебля/минет с мужиком\n"
             "• 👤 Соло — только сама\n"
-            "• 🧠 По промту — как напишешь (соло, если партнёр не назван)",
+            "• 📖 Готовые сценарии — только 100 отобранных вручную историй\n"
+            "• 🧠 Строго по промту — ровно как напишешь (соло, если партнёр не назван)",
             reply_markup=cx_partner_keyboard(),
         )
         return
 
     if data.startswith("cx:pt:"):
         pt = data.split(":")[2]
-        st["cx_partner"] = pt if pt in ("mix", "man", "solo", "auto", "stories", "bankmix") else "auto"
-        st["cx_await"] = True
-        pt_lbl = {"mix": "🎲 Микс", "man": "👥 Секс с мужиком", "solo": "👤 Соло", "auto": "🧠 По промту",
-                  "stories": "📖 По банку сценариев (100)",
-                  "bankmix": "📚🎲 Банк + микс (50/50)"}[st["cx_partner"]]
+        st["cx_partner"] = pt if pt in ("mix", "man", "solo", "auto", "stories") else "mix"
+        pt_lbl = {"mix": "🎲 Микс", "man": "👥 Секс с мужиком", "solo": "👤 Соло", "auto": "🧠 Строго по промту",
+                  "stories": "📖 Готовые сценарии (100)"}[st["cx_partner"]]
         await replace_ui_message_from_callback(
             query, context,
-            f"Состав: {pt_lbl}.\n\n✍️ Пришли ОДНИМ сообщением описание тела:\n"
+            f"Состав: {pt_lbl}.\n\nДлина ролика:\n"
+            "• 🔗 3×6с — три части с развитием (общий → средний → крупный план). Дольше, "
+            "но после 2-й части лицо иногда «плывёт», ReActor не всегда спасает.\n"
+            "• 🎬 12с / 18с одним потоком — один непрерывный клип: лицо держится стабильнее "
+            "(ВАН может слегка зацикливать картинку — это норм).",
+            reply_markup=cx_len_keyboard(),
+        )
+        return
+
+    if data.startswith("cx:len:"):
+        val = data.split(":")[2]
+        st["cx_stream"] = int(val) if val in ("0", "12", "18") else 0
+        st["cx_await"] = True
+        len_lbl = {0: "🔗 3×6с (развитие)", 12: "🎬 12с одним потоком", 18: "🎬 18с одним потоком"}[st["cx_stream"]]
+        await replace_ui_message_from_callback(
+            query, context,
+            f"Длина: {len_lbl}.\n\n✍️ Пришли ОДНИМ сообщением описание тела:\n"
             "возраст · пропорции (грудь/жопа/рост) · этнос если важен.\n\n"
             "Пример: «зрелая женщина 40 лет, большая силиконовая грудь, большая жопа»\n"
             "Партнёра писать не обязательно — состав уже выбран кнопкой.",
@@ -5435,9 +5463,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         eng = st.get("cx_engine", "wan")
         face = str(st.get("cx_face") or "")
         src = str(st.get("cx_src") or "")
+        stream = int(st.get("cx_stream") or 0)
         photos = st.get("cx_mode") == "photos"
         partner = str(st.get("cx_partner") or "auto")
-        cx_launch(chat_id, eng, prompt, count, face, photos=photos, partner=partner, src=src)
+        cx_launch(chat_id, eng, prompt, count, face, photos=photos, partner=partner, src=src, stream=stream)
 
         async def _cx_watchdog(cid: int) -> None:
             # catch an instant crash (e.g. bad args) so it doesn't look like a 20-min hang
@@ -5450,9 +5479,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         asyncio.create_task(_cx_watchdog(chat_id))
 
         face_line = (f"\n🖼 Из фото: {src}" if src else (f"\n🎯 Фейслок: {face}" if face else ""))
-        pt_lbl = {"mix": "🎲 микс (секс+соло)", "man": "👥 секс с мужиком",
-                  "solo": "👤 соло", "auto": "🧠 по промту", "stories": "📖 банк сценариев",
-                  "bankmix": "📚🎲 банк + микс (50/50)"}.get(partner, partner)
+        pt_lbl = {"mix": "🎲 микс", "man": "👥 секс с мужиком",
+                  "solo": "👤 соло", "auto": "🧠 по промту", "stories": "📖 готовые сценарии"}.get(partner, partner)
+        len_lbl = {0: "🔗 3×6с (развитие)", 12: "🎬 12с одним потоком", 18: "🎬 18с одним потоком"}.get(stream, "🔗 3×6с")
         head = ("🧩📷 ПОЛУКОМПЛЕКС запущен: генерирую {n} ФОТО · {e}.{f}\n"
                 "Под каждым фото будет 🎬 Анимировать — оживлю выбранные."
                 if photos else
@@ -5460,7 +5489,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await replace_ui_message_from_callback(
             query, context,
             head.format(n=count, e=('🎬 ВАН' if eng == 'wan' else '🧬 Эрос→ВАН'), f=face_line)
-            + f"\nСостав: {pt_lbl}\nТело: {prompt[:150]}",
+            + f"\nСостав: {pt_lbl}\nДлина: {len_lbl}\nТело: {prompt[:150]}",
             reply_markup=cx_stop_keyboard(),
         )
         return
