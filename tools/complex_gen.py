@@ -158,15 +158,19 @@ def shape_cue(prompt):
            r"flat[- ]?chest",r"no breasts",r"no boobs",r"without breasts",r"\b0\s*размер",r"\baa+\s*cup",r"tiny (tits|breasts)"):
         pos.append("(flat chest, small flat breasts, flat-chested, no cleavage:1.3)")
         neg.append("large breasts, big breasts, huge breasts, cleavage, busty, bra, bikini top, tan lines"); skip_breast=True
-    elif has(r"больш\w*\s*груд",r"огромн\w*\s*груд",r"huge (tits|breasts)",r"large breasts",r"busty",r"силикон",r"[3-9]\s*размер",r"\bdd"):
-        pos.append("(large breasts:1.15)")
+    elif has(r"огромн\w*\s*груд",r"гигантск\w*\s*груд",r"huge (tits|breasts)",r"gigantic (tits|breasts)",r"силикон",r"[5-9]\s*размер"):
+        pos.append("(huge breasts, very large breasts, enormous busty chest, deep cleavage:1.4)")
+    elif has(r"больш\w*\s*груд",r"huge (tits|breasts)",r"large breasts",r"busty",r"[3-4]\s*размер",r"\bdd"):
+        pos.append("(large breasts, big busty chest, cleavage:1.3)")
     elif has(r"маленьк\w*\s*груд",r"небольш\w*\s*груд",r"small (breasts|tits)",r"\ba[- ]?cup",r"\b1\s*размер"):
         pos.append("(small breasts:1.2)"); neg.append("huge breasts, large breasts")
     # ass / hips
     if has(r"плоск\w*\s*(поп|задниц|жоп)",r"маленьк\w*\s*(поп|задниц|жоп)",r"small (ass|butt)",r"flat ass",r"no ass",r"узк\w*\s*бедр"):
         pos.append("(small flat ass, narrow hips:1.2)"); neg.append("big ass, huge ass, wide hips, thick thighs")
-    elif has(r"больш\w*\s*(поп|задниц|жоп)",r"огромн\w*\s*(поп|задниц|жоп)",r"big (ass|butt)",r"thicc",r"bubble butt",r"широк\w*\s*бедр",r"wide hips"):
-        pos.append("(big round ass, wide hips:1.15)")
+    elif has(r"огромн\w*\s*(поп|задниц|жоп)",r"гигантск\w*\s*(поп|задниц|жоп)",r"huge (ass|butt)"):
+        pos.append("(huge ass, enormous round ass, very wide hips, thick thighs:1.4)")
+    elif has(r"больш\w*\s*(поп|задниц|жоп)",r"big (ass|butt)",r"thicc",r"bubble butt",r"широк\w*\s*бедр",r"wide hips"):
+        pos.append("(big round ass, wide hips:1.3)")
     # height — stays adult; nearly unrenderable in a solo frame (no scale reference), so weighted hard
     if has(r"маленьк\w*\s*рост",r"низк\w*\s*рост",r"невысок",r"коротышк",r"карлик",r"\bdwarf",r"petite",r"миниатюрн",r"short (woman|girl|stature|height)"):
         pos.append("(petite short adult woman, small stature, tiny frame, short legs:1.3)"); neg.append("tall, long legs, statuesque")
@@ -1259,7 +1263,7 @@ def inject_mopmix_realism(wf,loras=MOPMIX_REALISM):
     if trig and "text" in p109: p109["text"]=f'{p109["text"]}, {trig}'
     return wf
 TAN_NEG="(tan lines:1.5), bikini tan lines, bra tan lines, farmer's tan, uneven skin tone, sunburn marks"
-CX_SRC_DENOISE=float(os.getenv("CX_SRC_DENOISE","0.62"))   # 🖼 "из фото": how far img2img redraws the source
+CX_SRC_DENOISE=float(os.getenv("CX_SRC_DENOISE","0.55"))   # 🖼 "из фото": img2img strength — enough to reshape body from prompt, low enough to keep her (ReActor restores face)
 CX_STREAM_AREA=float(os.getenv("CX_STREAM_AREA","0.7"))    # single-stream 12/18s: shrink area for VRAM headroom (real frames are heavy)
 async def gen_photo_mopmix(prompt,dst,neg_extra="",skip_breast_lora=False,src_image="",denoise=CX_SRC_DENOISE):
     wf=b.load_workflow(b.WORKFLOW_MOPMIX)
@@ -1278,13 +1282,18 @@ async def gen_photo_pony(prompt,dst):
     g=pony_graph(prompt,832,1216,b.make_seed())
     pid=await asyncio.to_thread(b.queue_prompt,g,str(uuid.uuid4()))
     return await asyncio.to_thread(wait_photo,pid,dst)
-def src_to_base(src,dst):
-    """🖼 "Из фото": the user's REAL photo IS the base frame — no still is generated. Copy it in as a
-    proper PNG (the upload is a .jpg; png_size()/AR-fit need a real PNG header) and animate off it."""
-    from PIL import Image
-    with Image.open(b.COMFY_INPUT_DIR/src) as im:
-        im.convert("RGB").save(dst)
-    return Path(dst)
+def src_still_prompt(plan,outfit,setting):
+    """🖼 "Из фото" base via img2img: KEEP her (face/hair/identity) but RESHAPE the body to the
+    requested proportions and restyle into the outfit/scene. Body/scene-focused prompt — deliberately
+    NOT the random eth/hair/face subj (that repainted her into a different woman at v1's 0.62 denoise);
+    ReActor then restores her exact face, so the body can grow without losing identity."""
+    bpos=(plan.get("shape",("","",False))[0] or "").strip()
+    ac=(plan.get("age_cue","") or "").strip()
+    parts=["amateur photorealistic photo of the same woman from the original photo, same face and identity"]
+    if bpos: parts.append(bpos)          # the REQUESTED body — huge breasts / big ass etc.
+    if ac:   parts.append(ac)
+    parts+=[f"now wearing {outfit}", f"in {setting}"]
+    return ", ".join(parts)+STILL_SUFFIX
 
 # ---------- face-lock: stamp a fixed real face onto every still via ReActor ----------
 FACE_SOURCES={"tati":"tati_face.jpg"}                     # key -> reference in ComfyUI/input
@@ -1449,10 +1458,10 @@ async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan
         shot+=", the woman faces the camera with her face clearly visible, the man's face is turned away or seen from behind"
     sp=("photorealistic amateur photo, "+still+", "+shot+STILL_SUFFIX) if mode!="pony" else (still+", "+shot)
     neg2=(neg+", "+bneg) if (neg and bneg) else (neg or bneg)
-    if src:            png=src_to_base(src,wd/"still.png")  # 🖼 the ORIGINAL photo IS the base — no new base generated
+    if src:            png=await gen_photo_mopmix(src_still_prompt(plan,outfit,setting),wd/"still.png",neg2,skip_breast_lora=skipbr,src_image=src,denoise=CX_SRC_DENOISE)  # 🖼 keep HER, reshape body from prompt
     elif mode=="pony": png=await gen_photo_pony(sp,wd/"still.png")
     else:              png=await gen_photo_mopmix(sp,wd/"still.png",neg2,skip_breast_lora=skipbr)
-    if fsrc and not src:                                    # stamp the locked face onto the still (src base already IS her)
+    if fsrc:                                                # lock/restore her exact face (esp. after src img2img reshaped the body)
         try: png=await face_swap(png,wd/"still_face.png",fsrc)
         except Exception as e: print("  facelock still fail",e)
     pmap={"man":"👥+♂","mmf":"👥+♂♂","woman":"👥+♀","anthro":"👥+🐾","none":"👤"}
@@ -1538,7 +1547,7 @@ async def animate_scenario(png,wd,meta,audio,N):
 async def one_scenario(idx,plan,climaxes,mode,neg,still_t,audio,rng,N,engine="wan",face="",src="",stream=0):
     wd=OUT/f"c{idx:03d}"
     png,meta=await build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine,face,src,stream)
-    if not src: tg_photo(png,meta["cap"])   # 🖼 "Из фото": base is the same original every clip → skip preview, go straight to video
+    tg_photo(png,meta["cap"])   # preview the base (in 🖼 "Из фото" it's now a per-clip img2img transform, not the raw same photo)
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
 
@@ -1611,9 +1620,9 @@ async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face="",src=
         shot+=", the woman faces the camera with her face clearly visible, the man's face is turned away or seen from behind"
     sp="photorealistic amateur photo, "+still+", "+shot+STILL_SUFFIX
     neg2=(neg+", "+bneg) if (neg and bneg) else (neg or bneg)
-    if src: png=src_to_base(src,wd/"still.png")   # 🖼 the ORIGINAL photo IS the base — no new base generated
+    if src: png=await gen_photo_mopmix(src_still_prompt(plan,outfit,setting),wd/"still.png",neg2,skip_breast_lora=skipbr,src_image=src,denoise=CX_SRC_DENOISE)  # 🖼 keep HER, reshape body from prompt
     else:   png=await gen_photo_mopmix(sp,wd/"still.png",neg2,skip_breast_lora=skipbr)
-    if fsrc and not src:                          # src base already IS her → no still swap
+    if fsrc:                                      # lock/restore her exact face (esp. after src img2img reshaped the body)
         try: png=await face_swap(png,wd/"still_face.png",fsrc)
         except Exception as e: print("  facelock still fail",e)
     pmap={"man":"👥+♂","mmf":"👥+♂♂","rej":"👥+♂(2-й уходит)"}
@@ -1939,7 +1948,7 @@ STORY_BANK=[
 async def one_story(idx,story,plan,audio,rng,N,engine="wan",face="",src="",stream=0):
     wd=OUT/f"s{idx:03d}"
     png,meta=await build_story_scenario(idx,story,plan,rng,N,wd,engine,face,src,stream)
-    if not src: tg_photo(png,meta["cap"])   # 🖼 "Из фото": same original base each clip → skip preview, go straight to video
+    tg_photo(png,meta["cap"])   # preview the base (in 🖼 "Из фото" it's now a per-clip img2img transform)
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
 # DEEP-MERGE seed pools: curated STORY_BANK bundles the unified build_scenario can adopt whole.
