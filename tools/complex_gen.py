@@ -159,18 +159,18 @@ def shape_cue(prompt):
         pos.append("(flat chest, small flat breasts, flat-chested, no cleavage:1.3)")
         neg.append("large breasts, big breasts, huge breasts, cleavage, busty, bra, bikini top, tan lines"); skip_breast=True
     elif has(r"огромн\w*\s*груд",r"гигантск\w*\s*груд",r"huge (tits|breasts)",r"gigantic (tits|breasts)",r"силикон",r"[5-9]\s*размер"):
-        pos.append("(huge breasts, very large breasts, enormous busty chest, deep cleavage:1.4)")
+        pos.append("(huge breasts, very large breasts:1.3)")
     elif has(r"больш\w*\s*груд",r"huge (tits|breasts)",r"large breasts",r"busty",r"[3-4]\s*размер",r"\bdd"):
-        pos.append("(large breasts, big busty chest, cleavage:1.3)")
+        pos.append("(large breasts, busty:1.2)")
     elif has(r"маленьк\w*\s*груд",r"небольш\w*\s*груд",r"small (breasts|tits)",r"\ba[- ]?cup",r"\b1\s*размер"):
         pos.append("(small breasts:1.2)"); neg.append("huge breasts, large breasts")
     # ass / hips
     if has(r"плоск\w*\s*(поп|задниц|жоп)",r"маленьк\w*\s*(поп|задниц|жоп)",r"small (ass|butt)",r"flat ass",r"no ass",r"узк\w*\s*бедр"):
         pos.append("(small flat ass, narrow hips:1.2)"); neg.append("big ass, huge ass, wide hips, thick thighs")
     elif has(r"огромн\w*\s*(поп|задниц|жоп)",r"гигантск\w*\s*(поп|задниц|жоп)",r"huge (ass|butt)"):
-        pos.append("(huge ass, enormous round ass, very wide hips, thick thighs:1.4)")
+        pos.append("(huge round ass, very wide hips:1.3)")
     elif has(r"больш\w*\s*(поп|задниц|жоп)",r"big (ass|butt)",r"thicc",r"bubble butt",r"широк\w*\s*бедр",r"wide hips"):
-        pos.append("(big round ass, wide hips:1.3)")
+        pos.append("(big round ass, wide hips:1.2)")
     # height — stays adult; nearly unrenderable in a solo frame (no scale reference), so weighted hard
     if has(r"маленьк\w*\s*рост",r"низк\w*\s*рост",r"невысок",r"коротышк",r"карлик",r"\bdwarf",r"petite",r"миниатюрн",r"short (woman|girl|stature|height)"):
         pos.append("(petite short adult woman, small stature, tiny frame, short legs:1.3)"); neg.append("tall, long legs, statuesque")
@@ -1282,18 +1282,37 @@ async def gen_photo_pony(prompt,dst):
     g=pony_graph(prompt,832,1216,b.make_seed())
     pid=await asyncio.to_thread(b.queue_prompt,g,str(uuid.uuid4()))
     return await asyncio.to_thread(wait_photo,pid,dst)
-def src_still_prompt(plan,outfit,setting):
-    """🖼 "Из фото" base via img2img: KEEP her (face/hair/identity) but RESHAPE the body to the
-    requested proportions and restyle into the outfit/scene. Body/scene-focused prompt — deliberately
-    NOT the random eth/hair/face subj (that repainted her into a different woman at v1's 0.62 denoise);
-    ReActor then restores her exact face, so the body can grow without losing identity."""
-    bpos=(plan.get("shape",("","",False))[0] or "").strip()
-    ac=(plan.get("age_cue","") or "").strip()
-    parts=["amateur photorealistic photo of the same woman from the original photo, same face and identity"]
-    if bpos: parts.append(bpos)          # the REQUESTED body — huge breasts / big ass etc.
-    if ac:   parts.append(ac)
-    parts+=[f"now wearing {outfit}", f"in {setting}"]
-    return ", ".join(parts)+STILL_SUFFIX
+def _img_size(path):
+    from PIL import Image
+    with Image.open(path) as im: return im.size
+def src_edit_instruction(plan):
+    """🖼 "Из фото": a plain-English EDIT instruction for Qwen-Image-Edit — enlarge only the body
+    parts the prompt asked for while KEEPING her face/hair/pose/clothing/background. Qwen edits the
+    attribute in place (unlike img2img, which repainted her into an anonymous huge-tits close-up)."""
+    pos=(plan.get("shape",("","",False))[0] or "").lower()
+    wants=[]
+    if "huge breast" in pos or "very large breast" in pos: wants.append("make her breasts much bigger, huge heavy natural breasts")
+    elif "large breast" in pos or "busty" in pos:          wants.append("make her breasts noticeably bigger and fuller")
+    if "huge round ass" in pos:                            wants.append("make her ass much bigger and rounder with wide hips")
+    elif "big round ass" in pos:                           wants.append("make her ass bigger and rounder")
+    if not wants: wants.append("keep her figure")
+    return ("Keep her exact same face, hair, skin, pose, clothing and the background — do not change "
+            "her identity or the scene. Only change her body: "+", ".join(wants)+". Photorealistic, seamless, natural.")
+async def gen_photo_edit(src_image,instruction,dst,w,h):
+    """Qwen-Image-Edit pass: edit ONE attribute (bigger breasts/ass) on the real photo, keep the rest."""
+    wf=b.build_image_edit_workflow(image_name=src_image,prompt=instruction,width=int(w),height=int(h),seed=b.make_seed(),clean=False)
+    pid=await asyncio.to_thread(b.queue_prompt,wf,str(uuid.uuid4()))
+    dl=time.time()+300
+    while time.time()<dl:
+        it=(await asyncio.to_thread(b.get_history,pid)).get(pid)
+        if it and it.get("outputs"):
+            im=(it["outputs"].get("9",{}).get("images") or [None])[0]
+            if im:
+                blob=await asyncio.to_thread(b.fetch_file,im["filename"],im.get("subfolder",""),im.get("type","output"))
+                Path(dst).write_bytes(blob); return Path(dst)
+            if it.get("status",{}).get("status_str")=="error": raise RuntimeError("qwen edit error")
+        await asyncio.sleep(2)
+    raise TimeoutError("qwen edit timeout")
 
 # ---------- face-lock: stamp a fixed real face onto every still via ReActor ----------
 FACE_SOURCES={"tati":"tati_face.jpg"}                     # key -> reference in ComfyUI/input
@@ -1458,7 +1477,10 @@ async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan
         shot+=", the woman faces the camera with her face clearly visible, the man's face is turned away or seen from behind"
     sp=("photorealistic amateur photo, "+still+", "+shot+STILL_SUFFIX) if mode!="pony" else (still+", "+shot)
     neg2=(neg+", "+bneg) if (neg and bneg) else (neg or bneg)
-    if src:            png=await gen_photo_mopmix(src_still_prompt(plan,outfit,setting),wd/"still.png",neg2,skip_breast_lora=skipbr,src_image=src,denoise=CX_SRC_DENOISE)  # 🖼 keep HER, reshape body from prompt
+    if src:                                                # 🖼 "Из фото": Qwen-Image-Edit enlarges body, keeps HER
+        _sw,_sh=_img_size(b.COMFY_INPUT_DIR/src); _qw,_qh=b.IMAGE_EDIT_QUALITY.get("medium",(1024,1024))
+        _ew,_eh=fit_dims(_sw,_sh,_qw*_qh)
+        png=await gen_photo_edit(src,src_edit_instruction(plan),wd/"still.png",_ew,_eh)
     elif mode=="pony": png=await gen_photo_pony(sp,wd/"still.png")
     else:              png=await gen_photo_mopmix(sp,wd/"still.png",neg2,skip_breast_lora=skipbr)
     if fsrc:                                                # lock/restore her exact face (esp. after src img2img reshaped the body)
@@ -1620,7 +1642,10 @@ async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face="",src=
         shot+=", the woman faces the camera with her face clearly visible, the man's face is turned away or seen from behind"
     sp="photorealistic amateur photo, "+still+", "+shot+STILL_SUFFIX
     neg2=(neg+", "+bneg) if (neg and bneg) else (neg or bneg)
-    if src: png=await gen_photo_mopmix(src_still_prompt(plan,outfit,setting),wd/"still.png",neg2,skip_breast_lora=skipbr,src_image=src,denoise=CX_SRC_DENOISE)  # 🖼 keep HER, reshape body from prompt
+    if src:                                       # 🖼 "Из фото": Qwen-Image-Edit enlarges body, keeps HER
+        _sw,_sh=_img_size(b.COMFY_INPUT_DIR/src); _qw,_qh=b.IMAGE_EDIT_QUALITY.get("medium",(1024,1024))
+        _ew,_eh=fit_dims(_sw,_sh,_qw*_qh)
+        png=await gen_photo_edit(src,src_edit_instruction(plan),wd/"still.png",_ew,_eh)
     else:   png=await gen_photo_mopmix(sp,wd/"still.png",neg2,skip_breast_lora=skipbr)
     if fsrc:                                      # lock/restore her exact face (esp. after src img2img reshaped the body)
         try: png=await face_swap(png,wd/"still_face.png",fsrc)
