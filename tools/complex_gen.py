@@ -1285,22 +1285,34 @@ async def gen_photo_pony(prompt,dst):
 def _img_size(path):
     from PIL import Image
     with Image.open(path) as im: return im.size
+CX_SRC_EDIT_NEG=("fat, obese, overweight, chubby, big belly, fat belly, bloated stomach, belly fat, pot belly, "
+                 "beer belly, thick waist, wide torso, thick midsection, love handles, belly rolls, fupa, "
+                 "pregnant, saggy breasts, droopy breasts, deformed")
 def src_edit_instruction(plan):
-    """🖼 "Из фото": a plain-English EDIT instruction for Qwen-Image-Edit — enlarge only the body
-    parts the prompt asked for while KEEPING her face/hair/pose/clothing/background. Qwen edits the
-    attribute in place (unlike img2img, which repainted her into an anonymous huge-tits close-up)."""
-    pos=(plan.get("shape",("","",False))[0] or "").lower()
+    """🖼 "Из фото": a plain-English EDIT instruction for Qwen-Image-Edit — enlarge ONLY breasts/ass
+    the prompt asked for while KEEPING her face/hair/pose/clothing/background AND her slim waist.
+    (Earlier "make breasts bigger" fattened the whole torso and gave saggy natural boobs; now we
+    demand silicone-style firm round breasts + explicitly keep a slim flat stomach.)"""
+    p=(plan.get("shape",("","",False))[0] or "").lower()
+    silicone="силикон" in (plan.get("body","")+plan.get("age_cue","")).lower() or "silicone" in p
     wants=[]
-    if "huge breast" in pos or "very large breast" in pos: wants.append("make her breasts much bigger, huge heavy natural breasts")
-    elif "large breast" in pos or "busty" in pos:          wants.append("make her breasts noticeably bigger and fuller")
-    if "huge round ass" in pos:                            wants.append("make her ass much bigger and rounder with wide hips")
-    elif "big round ass" in pos:                           wants.append("make her ass bigger and rounder")
+    if "huge breast" in p or "very large breast" in p:
+        wants.append("make her breasts much bigger — "+("large firm round silicone-implant breasts, perky and round, augmented fake boobs" if silicone else "big firm round perky breasts"))
+    elif "large breast" in p or "busty" in p:
+        wants.append("make her breasts noticeably bigger and fuller, "+("firm round silicone-implant look" if silicone else "firm and perky"))
+    if "huge round ass" in p:   wants.append("make her ass much bigger and rounder with wide hips")
+    elif "big round ass" in p:  wants.append("make her ass bigger and rounder")
     if not wants: wants.append("keep her figure")
-    return ("Keep her exact same face, hair, skin, pose, clothing and the background — do not change "
-            "her identity or the scene. Only change her body: "+", ".join(wants)+". Photorealistic, seamless, natural.")
-async def gen_photo_edit(src_image,instruction,dst,w,h):
+    return ("Edit this photo. Keep her EXACT same face, hair, skin, pose, clothing and the background — "
+            "do not change her identity or the scene. Keep her torso, waist and stomach EXACTLY as slim as "
+            "in the original photo — do NOT widen her torso, do NOT add any belly or belly fat, keep a "
+            "flat slim toned stomach and a narrow waist. ONLY the breasts (and ass) change size, everything "
+            "else stays identical. Change: "+", ".join(wants)+". Photorealistic, seamless, natural skin.")
+async def gen_photo_edit(src_image,instruction,dst,w,h,negative=CX_SRC_EDIT_NEG):
     """Qwen-Image-Edit pass: edit ONE attribute (bigger breasts/ass) on the real photo, keep the rest."""
     wf=b.build_image_edit_workflow(image_name=src_image,prompt=instruction,width=int(w),height=int(h),seed=b.make_seed(),clean=False)
+    if negative and wf.get("69",{}).get("inputs") is not None:   # anti-fat/anti-saggy negative conditioning
+        wf["69"]["inputs"]["prompt"]=negative
     pid=await asyncio.to_thread(b.queue_prompt,wf,str(uuid.uuid4()))
     dl=time.time()+300
     while time.time()<dl:
