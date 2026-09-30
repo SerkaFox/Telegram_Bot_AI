@@ -192,6 +192,9 @@ def parse_plan(prompt):
     else:          plan["people"]=2; plan["partner"]=ep
     plan["age_cue"]=age_cue(prompt)   # deterministic age emphasis, independent of Ollama
     plan["shape"]=shape_cue(prompt)   # (pos, neg, skip_breast_lora) — honour breast/ass/height
+    # Keep exact user wording for deterministic attributes that Ollama may omit while
+    # summarising the body (notably "silicone").
+    plan["source_prompt"]=prompt
     return plan
 
 # ======================= RANDOM BUILDING BLOCKS =======================
@@ -1285,7 +1288,8 @@ async def gen_photo_pony(prompt,dst):
 def _img_size(path):
     from PIL import Image
     with Image.open(path) as im: return im.size
-CX_SRC_EDIT_NEG=("fat, obese, overweight, chubby, big belly, fat belly, bloated stomach, belly fat, pot belly, "
+CX_SRC_EDIT_NEG=("nude, topless, removed shirt, removed clothing, changed clothing, fat, obese, overweight, chubby, "
+                 "big belly, fat belly, bloated stomach, belly fat, pot belly, "
                  "beer belly, thick waist, wide torso, thick midsection, love handles, belly rolls, fupa, "
                  "pregnant, saggy breasts, droopy breasts, deformed")
 def src_edit_instruction(plan):
@@ -1294,7 +1298,8 @@ def src_edit_instruction(plan):
     (Earlier "make breasts bigger" fattened the whole torso and gave saggy natural boobs; now we
     demand silicone-style firm round breasts + explicitly keep a slim flat stomach.)"""
     p=(plan.get("shape",("","",False))[0] or "").lower()
-    silicone="силикон" in (plan.get("body","")+plan.get("age_cue","")).lower() or "silicone" in p
+    source=(plan.get("source_prompt","")+" "+plan.get("body","")+" "+plan.get("age_cue","")).lower()
+    silicone="силикон" in source or "silicone" in source or "silicone" in p
     wants=[]
     if "huge breast" in p or "very large breast" in p:
         wants.append("make her breasts much bigger — "+("large firm round silicone-implant breasts, perky and round, augmented fake boobs" if silicone else "big firm round perky breasts"))
@@ -1303,14 +1308,19 @@ def src_edit_instruction(plan):
     if "huge round ass" in p:   wants.append("make her ass much bigger and rounder with wide hips")
     elif "big round ass" in p:  wants.append("make her ass bigger and rounder")
     if not wants: wants.append("keep her figure")
-    return ("Edit this photo. Keep her EXACT same face, hair, skin, pose, clothing and the background — "
-            "do not change her identity or the scene. Keep her torso, waist and stomach EXACTLY as slim as "
-            "in the original photo — do NOT widen her torso, do NOT add any belly or belly fat, keep a "
+    return ("Edit only the requested body proportions of the woman. Keep her EXACT same face, hair, skin, pose, "
+            "existing clothing and the background — do not expose her body, remove clothing, change her identity "
+            "or change the scene. Make the requested breast shape visible naturally UNDER her existing clothing. "
+            "Keep her torso, waist and stomach EXACTLY as slim as in the original photo — do NOT widen her torso, "
+            "do NOT add any belly or belly fat, keep a "
             "flat slim toned stomach and a narrow waist. ONLY the breasts (and ass) change size, everything "
             "else stays identical. Change: "+", ".join(wants)+". Photorealistic, seamless, natural skin.")
 async def gen_photo_edit(src_image,instruction,dst,w,h,negative=CX_SRC_EDIT_NEG):
     """Qwen-Image-Edit pass: edit ONE attribute (bigger breasts/ass) on the real photo, keep the rest."""
-    wf=b.build_image_edit_workflow(image_name=src_image,prompt=instruction,width=int(w),height=int(h),seed=b.make_seed(),clean=False)
+    # The nudity LoRA tends to replace the entire torso with a generic voluptuous body,
+    # creating a large belly even when the prompt explicitly forbids it. Keep the source
+    # clothing during this geometry pass; the video beats handle undressing afterwards.
+    wf=b.build_image_edit_workflow(image_name=src_image,prompt=instruction,width=int(w),height=int(h),seed=b.make_seed(),clean=True)
     if negative and wf.get("69",{}).get("inputs") is not None:   # anti-fat/anti-saggy negative conditioning
         wf["69"]["inputs"]["prompt"]=negative
     pid=await asyncio.to_thread(b.queue_prompt,wf,str(uuid.uuid4()))
@@ -1581,7 +1591,8 @@ async def animate_scenario(png,wd,meta,audio,N):
 async def one_scenario(idx,plan,climaxes,mode,neg,still_t,audio,rng,N,engine="wan",face="",src="",stream=0):
     wd=OUT/f"c{idx:03d}"
     png,meta=await build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine,face,src,stream)
-    tg_photo(png,meta["cap"])   # preview the base (in 🖼 "Из фото" it's now a per-clip img2img transform, not the raw same photo)
+    if not src:
+        tg_photo(png,meta["cap"])
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
 
@@ -1985,7 +1996,8 @@ STORY_BANK=[
 async def one_story(idx,story,plan,audio,rng,N,engine="wan",face="",src="",stream=0):
     wd=OUT/f"s{idx:03d}"
     png,meta=await build_story_scenario(idx,story,plan,rng,N,wd,engine,face,src,stream)
-    tg_photo(png,meta["cap"])   # preview the base (in 🖼 "Из фото" it's now a per-clip img2img transform)
+    if not src:
+        tg_photo(png,meta["cap"])
     ok=await animate_scenario(png,wd,meta,audio,N)
     shutil.rmtree(wd,ignore_errors=True); return ok
 # DEEP-MERGE seed pools: curated STORY_BANK bundles the unified build_scenario can adopt whole.
