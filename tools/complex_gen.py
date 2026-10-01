@@ -1143,33 +1143,48 @@ def add_reactions(text, partner, rng, rough=False):
     grime scenes, victim roleplay), not two mechanically thrusting statues."""
     return f"{text.rstrip('. ,')}, {motion_reactions(partner, rng, rough)}"
 
-def action_escalation(action, partner, rng, camera, rough=False):
-    """Write act 3 as continuity, never as a reset to a new generic scene.
-
-    Most variants intensify the existing action; a smaller share changes pose while keeping
-    bodies in contact.  Repeating the concrete act text gives WAN a strong identity/motion
-    anchor and prevents a new couple or location appearing in the final chunk.
-    """
-    same=rng.random()<0.70
-    if same:
-        development=rng.choice([
-            "the same action continues faster and deeper with stronger rhythmic movement and rising intensity",
-            "they keep the exact same position as the rhythm becomes harder and more urgent",
-            "without stopping, the action grows more intense, bodies moving with greater force and momentum",
-            "the same motion continues in a sustained close rhythm, expressions and breathing becoming more intense",
-        ])
-    else:
-        if partner=="none":
-            development="without breaking the flow, she changes to a more intense angle and continues with stronger motion"
-        elif partner=="woman":
-            development="without separating, the women roll into a more intense angle and continue together"
-        elif partner=="mmf":
-            development="without a cut, the two men reposition around the same woman and continue in a more intense arrangement"
-        else:
-            development="without separating or changing location, they shift into a deeper, more intense angle and continue"
-    # MMF: keep BOTH men working simultaneously in the last act too (user: "один просто стоит").
-    busy=" both men keep using her at the same time, neither man stops or just stands watching," if partner=="mmf" else ""
-    return f"continuation of the immediately previous shot, same people, same faces, same location and clothing; {action.rstrip('. ')}, {development},{busy} {motion_reactions(partner, rng, rough)}, {camera}"
+# Act 3 = a real FINISH/climax, not a fast repeat of act 2 (user). Partner-keyed finishers: cumshot
+# (face/tits/ass), creampie, position change, "covered in cum, laughing". Prose-driven + optional cum
+# lora. Each KEEPS the identity/location anchor so no new couple/scene appears in the final chunk.
+FINISH_MAN=[
+ ("he pulls out and cums all over her face and open mouth, thick ropes of cum, she smiles and licks her lips",["wan_facial"]),
+ ("he pulls out and cums all over her big tits, thick cum dripping down her breasts, she laughs",["wan_cumshot"]),
+ ("he pulls out and shoots his cum over her ass and lower back, she looks back over her shoulder smiling",["wan_cumshot"]),
+ ("he cums deep inside her, a creampie, then pulls out and the cum slowly leaks out of her",["wan_cumshot"]),
+ ("without pulling out they switch position — she climbs on top and rides him hard to the finish",[]),
+ ("they switch position — she gets on all fours and he fucks her from behind to the finish",[]),
+ ("she is covered in his cum, laughing happily, scooping it up and licking it off her fingers",["wan_cumshot"]),
+]
+FINISH_MMF=[
+ ("both men pull out and cum on her face and tits at once, a double facial, she laughs covered in cum",["wan_facial"]),
+ ("one man cums in her open mouth while the other cums over her big tits, she smiles covered in cum",["wan_cumshot"]),
+ ("the two men switch her into a new position between them and keep fucking her to the finish, both busy",[]),
+ ("both men cum over her ass and back at the same moment, thick cum running down, she looks back laughing",["wan_cumshot"]),
+]
+FINISH_WOMAN=[
+ ("they grind to a shaking climax together, both women crying out, bodies trembling",[]),
+ ("they switch into a scissoring position and rub to a trembling orgasm together",[]),
+ ("one makes the other squirt, both laughing, soaked and breathless",[]),
+]
+FINISH_SOLO=[
+ ("she cums hard, shaking, then slowly licks her fingers clean, smiling at the camera",[]),
+ ("she rides the toy to a trembling orgasm, back arching, mouth open",[]),
+ ("she finishes herself off gasping, then collapses back on the surface smiling",[]),
+]
+FINISH={"man":FINISH_MAN,"mmf":FINISH_MMF,"woman":FINISH_WOMAN,"none":FINISH_SOLO}
+def action_escalation(partner, rng, camera, rough=False):
+    """Act 3 = a CREATIVE finish/climax (cumshot / position change / covered in cum), NOT a fast
+    repeat of act 2. Keeps the identity+location anchor. Returns (text, extra_loras)."""
+    finish,floras=rng.choice(FINISH.get(partner,FINISH_MAN))
+    busy=" both men stay busy with her at once, neither just stands watching," if partner=="mmf" else ""
+    text=(f"continuation of the immediately previous shot, same people, same faces, same location and clothing; "
+          f"the scene builds to its climax and finish: {finish},{busy} {motion_reactions(partner, rng, rough)}, {camera}")
+    return text, list(floras)
+def body_tag(plan):
+    """Short weighted body descriptor carried into EVERY beat so WAN keeps her big breasts/ass across
+    all 3 acts (user: body held only in the first frame, drifted to a different body by act 3)."""
+    bpos=(plan.get("shape",("","",False))[0] or "").strip()
+    return (", she still has the same body throughout, "+bpos) if bpos else ""
 def pick_climax(climaxes,partner,rng):
     """MMF: weight toward the poses WAN renders reliably (spitroast / sequential / oral) over the
     simultaneous DP / double-vaginal / sandwich ones it often collapses. Others: uniform."""
@@ -1486,8 +1501,10 @@ async def build_scenario(idx,plan,climaxes,mode,neg,still_t,rng,N,wd,engine="wan
     # THREE-ACT ASSEMBLY, chained by the last frame (act1 opener → act2 transition+action → act3 escalation).
     action_start=wardrobe_transition(outfit,tr_p,rng,partner,ac_p)
     action_full=add_reactions(with_identity(f"{action_start}; then immediately {ac_p}, {cam}",partner,m1,m2),partner,rng,rough)+(dog_clause(rng) if dog_on else "")
-    escalation=with_identity(action_escalation(ac_p,partner,rng,cam2,rough),partner,m1,m2)+(dog_clause(rng) if dog_on else "")
-    beats=[b0,(action_full,ac_l),(escalation,ac_l)]
+    esc_text,esc_loras=action_escalation(partner,rng,cam2,rough)   # act 3 = creative finish (cum/pose change/covered)
+    escalation=with_identity(esc_text,partner,m1,m2)+(dog_clause(rng) if dog_on else "")
+    bt=body_tag(plan)                                              # keep her body (big tits/ass) in EVERY beat
+    beats=[(b0[0]+bt,b0[1]),(action_full+bt,ac_l),(escalation+bt,ac_l+esc_loras)]
     still=still_t.format(subj=subj,outfit=outfit,setting=setting,man=m1,man2=m2)
     # STILL composition: bank-seeded → the story-specific opening frame; procedural couples → a varied
     # pose; solo/women → the location prop hint. All keep her face camera-visible so facelock works.
@@ -1650,9 +1667,11 @@ async def build_story_scenario(idx,story,plan,rng,N,wd,engine="wan",face="",src=
     action_start=wardrobe_transition(outfit,bridge,rng,idp,story["a2"])
     action_full=add_reactions(with_identity(
         f'{action_start}; then immediately {story["a2"].rstrip(". ")}, {cam}',idp,m1,m2),idp,rng,rough)+(dog_clause(rng) if dog_on else "")
-    escalation=with_identity(
-        action_escalation(story["a2"],idp,rng,cam3,rough),idp,m1,m2)+(dog_clause(rng) if dog_on else "")
-    beats=[b0,(action_full,story.get("l",[])),(escalation,story.get("l",[]))]
+    esc_text,esc_loras=action_escalation(idp,rng,cam3,rough)      # act 3 = creative finish, not a repeat
+    escalation=with_identity(esc_text,idp,m1,m2)+(dog_clause(rng) if dog_on else "")
+    bt=body_tag(plan)                                            # keep her body in EVERY beat
+    _sl=story.get("l",[])
+    beats=[(b0[0]+bt,b0[1]),(action_full+bt,_sl),(escalation+bt,_sl+esc_loras)]
     has2=bool(story.get("m2")) or p in ("mmf","rej")
     still_t=_story_still_tpl(p,has2); neg=_story_neg(p)
     still=still_t.format(subj=subj,outfit=outfit,setting=setting,man=m1,man2=m2)
