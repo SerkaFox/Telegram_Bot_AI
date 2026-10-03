@@ -1146,20 +1146,22 @@ def add_reactions(text, partner, rng, rough=False):
 # Act 3 = a real FINISH/climax, not a fast repeat of act 2 (user). Partner-keyed finishers: cumshot
 # (face/tits/ass), creampie, position change, "covered in cum, laughing". Prose-driven + optional cum
 # lora. Each KEEPS the identity/location anchor so no new couple/scene appears in the final chunk.
+# NOTE: every cum line states the semen SHOOTS FROM HIS ERECT COCK (he strokes/jerks his hard cock,
+# cum spurts from the tip of the penis) — WAN otherwise renders "cum" as drool/spit from the MOUTH.
 FINISH_MAN=[
- ("he pulls out and cums all over her face and open mouth, thick ropes of cum, she smiles and licks her lips",["wan_facial"]),
- ("he pulls out and cums all over her big tits, thick cum dripping down her breasts, she laughs",["wan_cumshot"]),
- ("he pulls out and shoots his cum over her ass and lower back, she looks back over her shoulder smiling",["wan_cumshot"]),
- ("he cums deep inside her, a creampie, then pulls out and the cum slowly leaks out of her",["wan_cumshot"]),
- ("without pulling out they switch position — she climbs on top and rides him hard to the finish",[]),
- ("they switch position — she gets on all fours and he fucks her from behind to the finish",[]),
- ("she is covered in his cum, laughing happily, scooping it up and licking it off her fingers",["wan_cumshot"]),
+ ("he pulls his hard cock out, strokes it over her face and cums, thick ropes of semen spurting from the tip of his cock onto her face and open mouth, she smiles and licks her lips",["wan_facial"]),
+ ("he pulls his erect cock out and jerks it over her chest, cum spurting from the head of his penis all over her big tits, thick cum dripping down her breasts, she laughs",["wan_cumshot"]),
+ ("he pulls his cock out and strokes it over her ass, shooting cum from the tip of his penis over her ass and lower back, she looks back over her shoulder smiling",["wan_cumshot"]),
+ ("he thrusts deep and cums inside her with his cock buried in her, a creampie, then pulls his cock out and the cum slowly leaks out of her pussy",["wan_cumshot"]),
+ ("without pulling out they switch position — she climbs on top and rides his cock hard to the finish",[]),
+ ("they switch position — she gets on all fours and he fucks her from behind with his cock to the finish",[]),
+ ("he strokes his cock and finishes on her, she is covered in his cum laughing happily, scooping it up and licking it off her fingers",["wan_cumshot"]),
 ]
 FINISH_MMF=[
- ("both men pull out and cum on her face and tits at once, a double facial, she laughs covered in cum",["wan_facial"]),
- ("one man cums in her open mouth while the other cums over her big tits, she smiles covered in cum",["wan_cumshot"]),
- ("the two men switch her into a new position between them and keep fucking her to the finish, both busy",[]),
- ("both men cum over her ass and back at the same moment, thick cum running down, she looks back laughing",["wan_cumshot"]),
+ ("both men pull their hard cocks out and stroke them over her, cum spurting from the tips of both cocks onto her face and tits at once, a double facial from their cocks, she laughs covered in cum",["wan_facial"]),
+ ("one man strokes his cock and cums over her big tits while the other shoots his cum from his cock onto her face, both loads from their cocks, she smiles covered in cum",["wan_cumshot"]),
+ ("the two men switch her into a new position between them and keep fucking her with their cocks to the finish, both busy",[]),
+ ("both men pull out and stroke their cocks over her ass and back, cum spurting from both cocks at the same moment, thick cum running down, she looks back laughing",["wan_cumshot"]),
 ]
 FINISH_WOMAN=[
  ("they grind to a shaking climax together, both women crying out, bodies trembling",[]),
@@ -1172,6 +1174,10 @@ FINISH_SOLO=[
  ("she finishes herself off gasping, then collapses back on the surface smiling",[]),
 ]
 FINISH={"man":FINISH_MAN,"mmf":FINISH_MMF,"woman":FINISH_WOMAN,"none":FINISH_SOLO}
+# Stops WAN from rendering the cumshot as drool/spit/vomit from the MOUTH — applied as the beat's
+# negative whenever the prompt mentions cum.
+CUM_NEG=("cum coming from mouth, cum from the mouth, spitting, spit, drooling, saliva, dribbling, "
+         "vomiting, throwing up, puking, gagging, mouth foam, semen from mouth")
 def action_escalation(partner, rng, camera, rough=False):
     """Act 3 = a CREATIVE finish/climax (cumshot / position change / covered in cum), NOT a fast
     repeat of act 2. Keeps the identity+location anchor. Returns (text, extra_loras)."""
@@ -1223,12 +1229,12 @@ def wait_photo(pid,dst):
     dl=time.time()+240
     while time.time()<dl:
         it=b.get_history(pid).get(pid)
+        if it and it.get("status",{}).get("status_str")=="error": raise RuntimeError("photo comfy error")
         if it and it.get("outputs"):
             im=(it["outputs"].get("128",{}).get("images") or [None])[0]
             if im:
                 blob=b.fetch_file(im["filename"],im.get("subfolder",""),im.get("type","output"))
                 dst.write_bytes(blob); return dst
-            if it.get("status",{}).get("status_str")=="error": raise RuntimeError("photo comfy error")
         time.sleep(2)
     raise TimeoutError("photo timeout")
 PONY_CKPT=getattr(b,"PONY_FURRY_CHECKPOINT","ponyRealism_V23ULTRA.safetensors")
@@ -1342,12 +1348,12 @@ async def gen_photo_edit(src_image,instruction,dst,w,h,negative=CX_SRC_EDIT_NEG)
     dl=time.time()+300
     while time.time()<dl:
         it=(await asyncio.to_thread(b.get_history,pid)).get(pid)
+        if it and it.get("status",{}).get("status_str")=="error": raise RuntimeError("qwen edit error")
         if it and it.get("outputs"):
             im=(it["outputs"].get("9",{}).get("images") or [None])[0]
             if im:
                 blob=await asyncio.to_thread(b.fetch_file,im["filename"],im.get("subfolder",""),im.get("type","output"))
                 Path(dst).write_bytes(blob); return Path(dst)
-            if it.get("status",{}).get("status_str")=="error": raise RuntimeError("qwen edit error")
         await asyncio.sleep(2)
     raise TimeoutError("qwen edit timeout")
 
@@ -1369,12 +1375,12 @@ async def face_swap(target_png,dst,source_name):
     dl=time.time()+240
     while time.time()<dl:
         it=(await asyncio.to_thread(b.get_history,pid)).get(pid)
+        if it and it.get("status",{}).get("status_str")=="error": raise RuntimeError("reactor error")
         if it and it.get("outputs"):
             im=(it["outputs"].get("4",{}).get("images") or [None])[0]
             if im:
                 blob=await asyncio.to_thread(b.fetch_file,im["filename"],im.get("subfolder",""),im.get("type","output"))
                 Path(dst).write_bytes(blob); return Path(dst)
-            if it.get("status",{}).get("status_str")=="error": raise RuntimeError("reactor error")
         await asyncio.sleep(2)
     raise TimeoutError("reactor timeout")
 # native WAN 2.2 I2V realism enhancer (anti-"doll" for motion), spliced always-on onto node 141's
@@ -1391,23 +1397,23 @@ def inject_wan_realism(wf,strength=WAN_REALISM_STRENGTH):
     wf["cx_wan_real_l"]={"class_type":"LoraLoaderModelOnly","inputs":{"model":lp,"lora_name":WAN_REALISM_LOW,"strength_model":float(strength)}}
     n141["model_high_noise"]=["cx_wan_real_h",0]; n141["model_low_noise"]=["cx_wan_real_l",0]
     return wf
-async def gen_video(image_name,prompt,loras,dst,seconds=BEAT_SECONDS,w=W,h=H,no_stretch=False):
+async def gen_video(image_name,prompt,loras,dst,seconds=BEAT_SECONDS,w=W,h=H,no_stretch=False,negative=""):
     wf=b.load_workflow(b.WORKFLOW_VIDEO)
     # no_stretch: generate REAL frames for the full duration (WAN boomerangs at true speed) instead of
     # RIFE slow-mo-stretching a native ~8s clip — for КОМПЛЕКС single-stream ("не надо растягивать").
     wf=b.patch_video_workflow(wf,prompt=prompt,image_name=image_name,width=w,height=h,seconds=seconds,
         video_fps=16,seed=b.make_seed(),selected_loras=loras,video_model="svi_fastmove",
-        max_native_seconds=(int(seconds) if no_stretch else None))
+        max_native_seconds=(int(seconds) if no_stretch else None),continuity_negative=negative)
     if WAN_REALISM: wf=inject_wan_realism(wf)
     pid=await asyncio.to_thread(b.queue_prompt,wf,str(uuid.uuid4()))
     dl=time.time()+max(700,int(seconds)*100)   # scale timeout for long single-stream clips (12/18s)
     while time.time()<dl:
         it=(await asyncio.to_thread(b.get_history,pid)).get(pid)
+        if it and it.get("status",{}).get("status_str")=="error": raise RuntimeError("video comfy error")
         if it and it.get("outputs"):
             arr=(it["outputs"].get("314",{}).get("gifs") or it["outputs"].get("314",{}).get("videos") or [])
             if arr:
                 im=arr[0]; return await asyncio.to_thread(b.fetch_file,im["filename"],im.get("subfolder",""),im.get("type","output"))
-            if it.get("status",{}).get("status_str")=="error": raise RuntimeError("video comfy error")
         await asyncio.sleep(3)
     raise TimeoutError("video timeout")
 
@@ -1431,12 +1437,12 @@ async def gen_video_eros(image_name,prompt,dst,dialogue=True,seconds=BEAT_SECOND
     dl=time.time()+max(900,int(seconds)*120)   # scale timeout for long single-stream clips
     while time.time()<dl:
         it=(await asyncio.to_thread(b.get_history,pid)).get(pid)
+        if it and it.get("status",{}).get("status_str")=="error": raise RuntimeError("eros comfy error")
         if it and it.get("outputs"):
             out=it["outputs"].get(EROS_NODE,{})
             arr=out.get("gifs") or out.get("videos") or out.get("images") or []
             if arr:
                 im=arr[0]; return await asyncio.to_thread(b.fetch_file,im["filename"],im.get("subfolder",""),im.get("type","output"))
-            if it.get("status",{}).get("status_str")=="error": raise RuntimeError("eros comfy error")
         await asyncio.sleep(3)
     raise TimeoutError("eros timeout")
 
@@ -1560,7 +1566,7 @@ async def animate_scenario(png,wd,meta,audio,N):
                 blob=await gen_video_eros(img,prompt,wd/"stream.mp4",dialogue=True,seconds=stream,w=svw,h=svh)
             else:
                 # no_stretch → real-time frames (WAN boomerangs) instead of RIFE slow-mo
-                blob=await gen_video(img,prompt,loras,wd/"stream.mp4",seconds=stream,w=svw,h=svh,no_stretch=True)
+                blob=await gen_video(img,prompt,loras,wd/"stream.mp4",seconds=stream,w=svw,h=svh,no_stretch=True,negative=(CUM_NEG if "cum" in prompt.lower() else ""))
             raw=wd/"stream_raw.mp4"; await asyncio.to_thread(b.save_bytes,raw,blob)
             src=wd/"stream_n.mp4"; await asyncio.to_thread(b.normalize_story_segment,raw,src,svw,svh,16)
             if engine=="wan" and audio and b.VIDEO_AUDIO:
@@ -1581,7 +1587,7 @@ async def animate_scenario(png,wd,meta,audio,N):
             if engine=="eros":                          # LTX Eros: native voice + Ollama dialogue
                 blob=await gen_video_eros(img,bp,wd/f"b{bi}.mp4",dialogue=True,w=vw,h=vh)
             else:                                        # WAN svi_fastmove
-                blob=await gen_video(img,bp,loras,wd/f"b{bi}.mp4",w=vw,h=vh)
+                blob=await gen_video(img,bp,loras,wd/f"b{bi}.mp4",w=vw,h=vh,negative=(CUM_NEG if "cum" in bp.lower() else ""))
             raw=wd/f"b{bi}_raw.mp4"; await asyncio.to_thread(b.save_bytes,raw,blob)
             seg=wd/f"b{bi}_n.mp4"; await asyncio.to_thread(b.normalize_story_segment,raw,seg,vw,vh,16)
             segs.append(seg); used.append("💬эрос" if engine=="eros" else (loras[0] if loras else "переход"))
