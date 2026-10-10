@@ -1957,7 +1957,8 @@ def cx_len_keyboard() -> InlineKeyboardMarkup:
     # Video length: chained 3×6s (development, but face may drift after act 2) vs one continuous
     # 12/18s pass (face holds better; WAN may boomerang). User asked for the single-stream option.
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 3×6с — развитие сцены (реком.)", callback_data="cx:len:0")],
+        [InlineKeyboardButton("🔗 3×6с — развитие (плавно, но плывёт)", callback_data="cx:len:0")],
+        [InlineKeyboardButton("✂️ 3×6с — склейки (стабильно, как Civitai)", callback_data="cx:len:anchor")],
         [InlineKeyboardButton("🎬 12с одним потоком", callback_data="cx:len:12")],
         [InlineKeyboardButton("🎬 18с одним потоком", callback_data="cx:len:18")],
     ])
@@ -1980,7 +1981,7 @@ def cx_is_running(chat_id: int) -> bool:
 CX_ANIM: dict[int, list[subprocess.Popen]] = {}   # ПОЛУКОМПЛЕКС per-photo animate jobs
 
 def cx_launch(chat_id: int, engine: str, prompt: str, count: int, face: str = "", photos: bool = False,
-              partner: str = "auto", src: str = "", stream: int = 0) -> None:
+              partner: str = "auto", src: str = "", stream: int = 0, anchor: int = 0) -> None:
     args = [sys.executable, str(COMPLEX_SCRIPT), "-n", str(count), "--engine", engine,
             "--chat", str(chat_id), "--audio", "1", "--partner", partner, "--prompt", prompt]
     if face:
@@ -1989,6 +1990,8 @@ def cx_launch(chat_id: int, engine: str, prompt: str, count: int, face: str = ""
         args += ["--src", src]     # 🖼 real source photo (ComfyUI/input filename): img2img base + facelock
     if stream:
         args += ["--stream", str(stream)]   # 12/18 = one continuous clip instead of 3×6s chain
+    if anchor:
+        args += ["--anchor", "1"]   # ✂️ each beat from the same locked still, hard cuts (no drift)
     if photos:
         args += ["--photos"]       # ПОЛУКОМПЛЕКС: render stills only, animate later on tap
     # own session/process group so cx_stop can kill the whole batch (python + ffmpeg children)
@@ -3977,6 +3980,10 @@ async def wait_for_result_from_prompt(
     while time.time() < deadline:
         history = await asyncio.to_thread(get_history, prompt_id)
         item = history.get(prompt_id)
+        # Un job con error (p.ej. OOM de MMAudio) deja status=error y outputs
+        # vacio: sin esta comprobacion el bucle agota el timeout entero (15 min).
+        if item and item.get("status", {}).get("status_str") == "error":
+            raise RuntimeError(f"ComfyUI error for prompt_id={prompt_id}")
         if item and item.get("outputs"):
             return pick_first_result_from_outputs(item["outputs"], preferred_node=preferred_node)
         await asyncio.sleep(POLL_SECONDS)
@@ -5440,9 +5447,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data.startswith("cx:len:"):
         val = data.split(":")[2]
-        st["cx_stream"] = int(val) if val in ("0", "12", "18") else 0
+        if val == "anchor":
+            st["cx_anchor"] = 1; st["cx_stream"] = 0
+        else:
+            st["cx_anchor"] = 0; st["cx_stream"] = int(val) if val in ("0", "12", "18") else 0
         st["cx_await"] = True
-        len_lbl = {0: "🔗 3×6с (развитие)", 12: "🎬 12с одним потоком", 18: "🎬 18с одним потоком"}[st["cx_stream"]]
+        len_lbl = ("✂️ 3×6с склейки (стабильно)" if st.get("cx_anchor") else
+                   {0: "🔗 3×6с (развитие)", 12: "🎬 12с одним потоком", 18: "🎬 18с одним потоком"}[st["cx_stream"]])
         await replace_ui_message_from_callback(
             query, context,
             f"Длина: {len_lbl}.\n\n✍️ Пришли ОДНИМ сообщением описание тела:\n"
@@ -5469,9 +5480,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         face = str(st.get("cx_face") or "")
         src = str(st.get("cx_src") or "")
         stream = int(st.get("cx_stream") or 0)
+        anchor = int(st.get("cx_anchor") or 0)
         photos = st.get("cx_mode") == "photos"
         partner = str(st.get("cx_partner") or "auto")
-        cx_launch(chat_id, eng, prompt, count, face, photos=photos, partner=partner, src=src, stream=stream)
+        cx_launch(chat_id, eng, prompt, count, face, photos=photos, partner=partner, src=src, stream=stream, anchor=anchor)
 
         async def _cx_watchdog(cid: int) -> None:
             # catch an instant crash (e.g. bad args) so it doesn't look like a 20-min hang
@@ -5486,7 +5498,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         face_line = (f"\n🖼 Из фото: {src}" if src else (f"\n🎯 Фейслок: {face}" if face else ""))
         pt_lbl = {"mix": "🎲 микс", "man": "👥 секс с мужиком",
                   "solo": "👤 соло", "auto": "🧠 по промту", "stories": "📖 готовые сценарии"}.get(partner, partner)
-        len_lbl = {0: "🔗 3×6с (развитие)", 12: "🎬 12с одним потоком", 18: "🎬 18с одним потоком"}.get(stream, "🔗 3×6с")
+        len_lbl = ("✂️ 3×6с склейки (стабильно)" if anchor else
+                   {0: "🔗 3×6с (развитие)", 12: "🎬 12с одним потоком", 18: "🎬 18с одним потоком"}.get(stream, "🔗 3×6с"))
         head = ("🧩📷 ПОЛУКОМПЛЕКС запущен: генерирую {n} ФОТО · {e}.{f}\n"
                 "Под каждым фото будет 🎬 Анимировать — оживлю выбранные."
                 if photos else
