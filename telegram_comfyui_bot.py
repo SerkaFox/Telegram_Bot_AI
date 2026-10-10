@@ -1953,15 +1953,22 @@ def cx_partner_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🧠 Строго по промту", callback_data="cx:pt:auto")],
     ])
 
-def cx_len_keyboard() -> InlineKeyboardMarkup:
-    # Video length: chained 3×6s (development, but face may drift after act 2) vs one continuous
-    # 12/18s pass (face holds better; WAN may boomerang). User asked for the single-stream option.
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 3×6с — развитие (плавно, но плывёт)", callback_data="cx:len:0")],
-        [InlineKeyboardButton("✂️ 3×6с — склейки (стабильно, как Civitai)", callback_data="cx:len:anchor")],
+def cx_len_keyboard(engine: str = "wan") -> InlineKeyboardMarkup:
+    # Video length: chained 3×6s (development, but face may drift after act 2) vs ✂️ cut mode (each
+    # beat from the locked still — holds the face) vs one continuous 12/18s pass. For 🧬 Эрос the face
+    # drifts worst on the smooth chain, so cuts are put FIRST and marked recommended.
+    anchor_btn = InlineKeyboardButton("✂️ 3×6с — склейки (стабильно, как Civitai)", callback_data="cx:len:anchor")
+    chain_btn = InlineKeyboardButton("🔗 3×6с — развитие (плавно, но плывёт)", callback_data="cx:len:0")
+    if engine == "eros":
+        anchor_btn = InlineKeyboardButton("✂️ 3×6с — склейки (реком. для Эроса)", callback_data="cx:len:anchor")
+        rows = [[anchor_btn], [chain_btn]]
+    else:
+        rows = [[chain_btn], [anchor_btn]]
+    rows += [
         [InlineKeyboardButton("🎬 12с одним потоком", callback_data="cx:len:12")],
         [InlineKeyboardButton("🎬 18с одним потоком", callback_data="cx:len:18")],
-    ])
+    ]
+    return InlineKeyboardMarkup(rows)
 
 def cx_count_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -5414,7 +5421,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data.startswith("cx:eng:"):
         eng = data.split(":")[2]
         st["cx_engine"] = eng if eng in ("wan", "eros") else "wan"
-        note = "🎬 ВАН (визуал/действие)" if st["cx_engine"] == "wan" else "🧬 Эрос (нативный голос + ИИ-диалоги)"
+        if st["cx_engine"] == "eros":
+            st["cx_anchor"] = 1; st["cx_stream"] = 0   # 🧬 Эрос по умолчанию = склейки (держит лицо/речь)
+        note = ("🎬 ВАН (визуал/действие)" if st["cx_engine"] == "wan"
+                else "🧬 Эрос (нативный голос + ИИ-диалоги) — по умолчанию ✂️ склейки (держит лицо)")
         await replace_ui_message_from_callback(
             query, context,
             f"Движок: {note}.\n\nКто в кадре? (4 режима):\n"
@@ -5433,15 +5443,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         st["cx_partner"] = pt if pt in ("mix", "man", "solo", "auto", "stories") else "mix"
         pt_lbl = {"mix": "🎲 Микс", "man": "👥 Секс с мужиком", "solo": "👤 Соло", "auto": "🧠 Строго по промту",
                   "stories": "📖 Готовые сценарии (100)"}[st["cx_partner"]]
+        eng = st.get("cx_engine", "wan")
+        eros_hint = ("\n\n🧬 Для Эроса (речь/диалоги) ЛУЧШЕ всего ✂️ склейки — он рендерит высоким "
+                     "разрешением и держит лицо до конца; на 🔗 цепочке лицо уплывает." if eng == "eros" else "")
         await replace_ui_message_from_callback(
             query, context,
             f"Состав: {pt_lbl}.\n\nДлина ролика:\n"
-            "• 🔗 3×6с — три части с развитием (общий → средний → крупный план). Дольше, "
-            "но после 2-й части лицо иногда «плывёт», ReActor не всегда спасает.\n"
-            "• 🎬 12с / 18с одним потоком — один непрерывный клип в РЕАЛЬНОЙ скорости (без слоумо/растяжки): "
-            "лицо держится стабильнее, ВАН просто бумерангит/зацикливает движение — это норм. "
-            "18с тяжёлые для видеопамяти — если не осилит, бери 12с.",
-            reply_markup=cx_len_keyboard(),
+            "• ✂️ 3×6с склейки — каждый кусок от одного кадра, встык. ЛИЦО/ТЕЛО держатся лучше всего (как на Civitai).\n"
+            "• 🔗 3×6с развитие — плавные переходы (общий→средний→крупный), но лицо к концу «плывёт».\n"
+            "• 🎬 12с / 18с одним потоком — непрерывный клип в реальной скорости; 18с тяжёлые для видеопамяти."
+            + eros_hint,
+            reply_markup=cx_len_keyboard(eng),
         )
         return
 

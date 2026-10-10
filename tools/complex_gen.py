@@ -1586,14 +1586,19 @@ async def animate_scenario(png,wd,meta,audio,N):
             print(f"  [{idx+1}] stream FAIL {e}")
         LOG.open("a").write(json.dumps({"i":idx,"climax":label,"eth":eth,"outfit":outfit,"setting":setting,"stream":stream,"ok":bool(ok)})+"\n")
         return bool(ok)
+    # ✂️ anchor: beats are INDEPENDENT (no last-frame chain), so each one needs an explicit identity
+    # anchor in the prompt or Eros re-rolls her look per segment. Ties every beat to the same woman.
+    anc_ident=(", (the exact same woman as the reference image, same face, same hairstyle, same body, "
+               "consistent identity, same room and lighting throughout:1.2)")
     segs=[]; used=[]; ok=False
     try:
         for bi,(bp,loras) in enumerate(beats):
             vin=anchor_img if anchor else img            # ✂️ anchor: always animate from the locked still
+            vp=(bp+anc_ident) if anchor else bp          # identity anchor only needed in cut mode
             if engine=="eros":                          # LTX Eros: native voice + Ollama dialogue
-                blob=await gen_video_eros(vin,bp,wd/f"b{bi}.mp4",dialogue=True,w=vw,h=vh)
+                blob=await gen_video_eros(vin,vp,wd/f"b{bi}.mp4",dialogue=True,w=vw,h=vh)
             else:                                        # WAN svi_fastmove
-                blob=await gen_video(vin,bp,loras,wd/f"b{bi}.mp4",w=vw,h=vh,negative=(CUM_NEG if "cum" in bp.lower() else ""))
+                blob=await gen_video(vin,vp,loras,wd/f"b{bi}.mp4",w=vw,h=vh,negative=(CUM_NEG if "cum" in vp.lower() else ""))
             raw=wd/f"b{bi}_raw.mp4"; await asyncio.to_thread(b.save_bytes,raw,blob)
             seg=wd/f"b{bi}_n.mp4"; await asyncio.to_thread(b.normalize_story_segment,raw,seg,vw,vh,16)
             segs.append(seg); used.append("💬эрос" if engine=="eros" else (loras[0] if loras else "переход"))
