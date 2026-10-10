@@ -1547,7 +1547,10 @@ async def animate_scenario(png,wd,meta,audio,N):
     img=await asyncio.to_thread(b.upload_image_to_comfy,str(png),png.name)
     # keep the still's aspect ratio in the video so bodies aren't squashed/widened
     sw,sh=png_size(png)
-    base_area=(b.LTX_EROS_QUALITY.get("medium",(416,736))[0]*b.LTX_EROS_QUALITY.get("medium",(416,736))[1]) if engine=="eros" else W*H
+    # Eros/LTX loses the face FAST at low res (416×736 → her face is only ~70px). Render it at HIGH
+    # (576×1024) so the keyframe + output keep her identity. Env CX_EROS_QUALITY to tune/revert.
+    _eq=b.LTX_EROS_QUALITY.get(os.getenv("CX_EROS_QUALITY","high"),b.LTX_EROS_QUALITY["high"])
+    base_area=(_eq[0]*_eq[1]) if engine=="eros" else W*H
     vw,vh=fit_dims(sw,sh,base_area)
     anchor=int(meta.get("anchor",0))     # ✂️ anchor/cuts: every beat animates from the SAME locked still
     anchor_img=img                       # (no last-frame chaining) so drift can't compound across acts
