@@ -1,0 +1,86 @@
+{
+"v2_w1": [
+"f",
+"Hoy salimos a la calle con una pregunta: ¿qué le pedirías a la inteligencia artificial?",
+0.5,
+0.5
+],
+"v2_boy": [
+"v2/refs/vp_boy25.wav",
+"Que me haga los resúmenes de clase. Y que no se equivoque, claro.",
+0.6,
+0.5
+],
+"v2_girl": [
+"v2/refs/vp_girl.wav",
+"Ordenar mis correos. Mi bandeja parece una película de terror.",
+0.65,
+0.5
+],
+"v2_man46": [
+"v2/refs/vp_man48.wav",
+"Las citas y las facturas. Así tendría más tiempo para la gente.",
+0.55,
+0.5
+],
+"v2_woman35": [
+"v2/refs/vp_woman35.wav",
+"Yo ya la uso para traducir y para responder a clientes.",
+0.55,
+0.5
+],
+"v2_w2": [
+"f",
+"¿Y quita trabajo… o lo transforma?",
+0.5,
+0.5
+],
+"v2_man52": [
+"v2/refs/vp_man52.wav",
+"Lo transforma. La experiencia suma, pero hay que actualizarse.",
+0.5,
+0.5
+],
+"v2_woman41": [
+"v2/refs/vp_woman41.wav",
+"Me genera dudas. Por eso quiero entender cómo funciona.",
+0.5,
+0.5
+],
+"v2_man28": [
+"v2/refs/vp_man28.wav",
+"Con buena formación, es una herramienta estupenda.",
+0.6,
+0.5
+],
+"v2_woman58": [
+"v2/refs/vp_woman58.wav",
+"Nunca es tarde para perderle el miedo a la tecnología.",
+0.6,
+0.5
+],
+"v2_m1": [
+"m",
+"Curiosidad, alguna duda… y una idea clara: hay que formarse.",
+0.6,
+0.5
+],
+"v2_m2": [
+"m",
+"Por eso en Meatze ya ha empezado la formación en inteligencia artificial.",
+0.6,
+0.5
+],
+"v2_w3": [
+"f",
+"Además de informática, desarrollo web, administración y comercio. Cursos cien por cien subvencionados para personas desempleadas.",
+0.5,
+0.5
+],
+"v2_m3": [
+"m",
+"En Barakaldo y en Bilbao. ¡Te esperamos!",
+0.6,
+0.5
+]
+}

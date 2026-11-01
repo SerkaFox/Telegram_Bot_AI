@@ -1,0 +1,18 @@
+Use your image generation tool (imagegen) to create photorealistic 16:9 landscape keyframes (1536x1024 or larger) for a Spanish TV advert. They will be animated by a video model: natural real camera photos, natural skin texture, realistic light, no plastic AI look, NO text, NO letters, NO logos, NO signs with words, NO watermarks, screens show only abstract shapes.
+
+STEP 1: first create student_ref.png — a portrait of the recurring character "Laura": Spanish woman, 34, shoulder-length wavy brown hair, natural make-up, warm brown eyes, wearing a mustard-yellow sweater over a white t-shirt and dark jeans. Neutral background. Then use student_ref.png as the identity reference for every image where Laura appears (same face, hair, clothes).
+Attached references: ref_woman.jpg (female presenter, navy suit, light closed-mouth smile), ref_man.jpg (male presenter, navy blazer, light blue shirt, warm friendly expression — not the hard stare), room_b1.jpg (real lobby with white reception desk), room_b2.jpg (real IT classroom, light blue walls, rows of black all-in-one PCs, blue chairs), room_p3.jpg (real classroom, black desks, black monitors). Keep real rooms recognisable and add nothing to their walls.
+
+Create in the CURRENT directory:
+2. day_kitchen.png — early morning, Laura in a small modern flat kitchen holding a coffee mug, looking at a laptop on the table, slightly worried, thoughtful. Window light.
+3. day_street.png — Laura walking along a Bilbao-style street in the morning with a tote bag, confident pace, medium-wide shot, soft overcast light.
+4. day_door.png — Laura arriving at the white reception desk of room_b1.jpg; the female presenter behind/at the desk greeting her with a polite light smile. Medium-wide shot.
+5. day_class.png — Laura sitting at a PC in room_b2.jpg among other adult students (mixed ages 25-55), focused, typing. Medium shot from the side.
+6. day_help.png — the male presenter as a teacher leaning beside Laura's desk in room_p3.jpg, pointing at her monitor (abstract code/charts), both friendly and engaged. Medium shot.
+7. day_team.png — Laura with two classmates laughing lightly together around one monitor in room_b2.jpg, natural candid moment.
+8. day_office.png — Laura in a modern bright office (internship), talking with a colleague at a desk with a laptop, confident, professional. Medium shot.
+9. day_job.png — Laura shaking hands with a manager (woman 50s) in a modern office, smiling, new-job moment. Medium shot.
+10. before_sofa.png — evening, a man (40, short dark hair, grey t-shirt) sitting on a sofa scrolling job offers on a phone, tired and discouraged, dim warm lamp light.
+11. after_office.png — the same man from before_sofa.png (same face), now in a light blue shirt at a modern office desk with two monitors, focused and satisfied, bright daylight.
+
+After generating, list the files with pixel sizes. Retry any failure once; do not skip any.

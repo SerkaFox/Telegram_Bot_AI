@@ -1,0 +1,21 @@
+Use your image generation tool (imagegen) to create photorealistic 16:9 landscape keyframes (1536x1024 or larger) for a Spanish TV street-interview (vox pop) segment, Basque Country city look (Bilbao/Barakaldo: modern streets, ria, wet pavements, cafés, green trees, overcast soft daylight). They will be animated by a video model: natural real camera photos, natural skin, no plastic AI look, NO text, NO letters, NO logos, NO signs with words, NO watermarks. Microphones have a plain dark-blue foam windscreen with NO logo.
+Every interviewee: medium close-up (chest up), looking slightly off-camera toward the interviewer (just left of the lens), relaxed natural expression, mouth closed, hands out of frame, shallow depth of field background.
+
+Attached: ref_woman.jpg = FEMALE PRESENTER (keep face identity exactly; navy suit jacket, white blouse, light closed-mouth smile). ref_man.jpg = MALE PRESENTER (keep face identity exactly; navy blazer, light blue shirt; warm friendly expression, NOT the hard stare of the reference). room_b1.jpg / room_b8.jpg = the real lobby and corridor of the training centre (keep them recognisable, add nothing to the walls).
+
+Create in the CURRENT directory:
+1. rep_woman_street.png — the female presenter on a Bilbao-style riverside street holding a microphone near her chest, looking into the camera, friendly professional reporter. Medium shot.
+2. rep_woman_ask.png — over-the-shoulder: the female presenter (seen from behind/side) holding the microphone toward a young man (25, hoodie) on the street. Medium shot.
+3. vp_girl.png — woman 24, denim jacket, pedestrian street.
+4. vp_man46.png — man 46, rolled-up shirt sleeves, café terrace.
+5. vp_woman35.png — woman 35, backpack strap visible, office building entrance.
+6. vp_man52.png — man 52, dark coat, grey hair, urban square.
+7. vp_woman58.png — woman 58, colourful scarf, covered market background.
+8. vp_man28.png — man 28, beard, café bar background.
+9. vp_woman41.png — woman 41, glasses, quiet café.
+10. vp_man38.png — man 38, apron, small shop counter background.
+11. vp_student25.png — woman 25, ponytail, inside a modern training-centre corridor (use room_b8.jpg as the background).
+12. vp_man48.png — man 48, smart casual blazer, office lobby.
+13. rep_man_lobby.png — the male presenter in the training-centre lobby (room_b1.jpg) holding a microphone, smiling warmly at camera. Medium shot.
+
+After generating, list the files with pixel sizes. Retry any failure once; do not skip any.

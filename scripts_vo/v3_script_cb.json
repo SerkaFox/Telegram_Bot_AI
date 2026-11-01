@@ -1,0 +1,62 @@
+{
+"v3_w1": [
+"f",
+"¿Cómo nos ayuda la inteligencia artificial en el día a día? Mirad.",
+0.5,
+0.5
+],
+"v3_f_office": [
+"f",
+"En la oficina, organiza documentos y prepara la agenda.",
+0.5,
+0.5
+],
+"v3_f_shop": [
+"f",
+"En el comercio, analiza las ventas y ayuda a preparar campañas.",
+0.5,
+0.5
+],
+"v3_f_service": [
+"f",
+"En atención al cliente, responde a las preguntas más sencillas.",
+0.5,
+0.5
+],
+"v3_f_home": [
+"f",
+"Y en casa… también echa una mano.",
+0.5,
+0.5
+],
+"v3_m1": [
+"m",
+"¡Perfecto! ¿Y puede ordenar también mi escritorio?",
+0.7,
+0.5
+],
+"v3_w2": [
+"f",
+"Eso… todavía es experimental.",
+0.5,
+0.5
+],
+"v3_m2": [
+"m",
+"Entonces, mejor aprendo a utilizarla.",
+0.6,
+0.5
+],
+"v3_f_ai": [
+"f",
+"En Meatze ya ha empezado la formación en inteligencia artificial.",
+0.5,
+0.5
+],
+"v3_m_subv": [
+"m",
+"Cursos cien por cien subvencionados para personas desempleadas, en Barakaldo y en Bilbao.",
+0.6,
+0.5
+]
+}

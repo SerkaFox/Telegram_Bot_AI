@@ -1,0 +1,14 @@
+Use your image generation tool (imagegen) to edit REAL photos of a vocational training centre's classrooms. For each file below, take the attached room photo and keep the room EXACTLY the same — same camera angle, framing, perspective, walls, windows, furniture, desks, chairs, monitors, colours and lighting — and only ADD people (and switch the monitor screens on where stated). 16:9 landscape output (1536x1024 or larger, same framing as the source). Photorealistic, natural documentary look, natural skin, realistic everyday clothes, adult learners of mixed ages (25-55) and backgrounds, calm focused atmosphere. NO text, NO letters, NO numbers, NO logos anywhere (screens and boards show only abstract shapes, simple diagrams with boxes, arrows and circles). Do not add posters or anything to the walls.
+ref_man.jpg = the male presenter (keep his face identity; navy blazer, light blue shirt, beige chinos; warm friendly expression).
+
+Create in the CURRENT directory:
+1. cls_b2.png — from room_b2.jpg: about 10 students sitting at the computers, monitors ON showing abstract blue/colourful interfaces; the male presenter (ref_man.jpg) as the teacher standing at the whiteboard, drawing a simple diagram of boxes connected by arrows with a marker, half-turned toward the class.
+2. cls_b2_board.png — close-up of the same whiteboard in room_b2: the teacher's hand (navy blazer sleeve) drawing a simple flow diagram (three boxes and arrows, no text) with a blue marker; students' backs softly out of focus in the foreground.
+3. cls_b6.png — from room_b6.jpg: the big computer lab full of students at the PCs, screens ON (abstract interfaces, simple charts, code-like coloured lines without readable characters), a female teacher (40s, glasses, cardigan) walking between the rows looking at a screen.
+4. cls_b3.png — from room_b3.jpg: four adults around the table with the laptops open, one woman pointing at a laptop screen, the others leaning in, collaborative discussion.
+5. cls_p3.png — from room_p3.jpg: students at the black desks working on the PCs (screens ON), a male teacher (50s, grey beard, sweater) leaning beside one student, pointing at her monitor.
+6. cls_p4.png — from room_p4.jpg: a full class of students at the black desks, screens ON, the projector screen at the front showing a simple abstract diagram; students looking at the front, one raising a hand.
+7. cls_p6.png — from room_p6.jpg: students in pairs working together at the monitors, one explaining to the other, screens ON.
+8. cls_p7.png — from room_p7.jpg: students at the white desks, screens ON, a young female teacher (30s) at the front gesturing toward the whiteboard with a simple diagram.
+
+After generating, list files with pixel sizes. Retry any failure once; do not skip any.

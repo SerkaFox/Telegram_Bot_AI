@@ -1,0 +1,56 @@
+{
+"v1_m1": [
+"m",
+"¿Inteligencia artificial? Os presento a alguien que sabe mucho de eso.",
+0.6,
+0.5
+],
+"v1_w1": [
+"f",
+"¡Hola! Sí, soy una inteligencia artificial.",
+0.5,
+0.5
+],
+"v1_w2": [
+"f",
+"Ayudo a los nuevos profesionales a descubrir el mundo de la tecnología.",
+0.5,
+0.5
+],
+"v1_w3": [
+"f",
+"La inteligencia artificial ya ordena documentos, atiende a clientes, ayuda a vender… y hasta echa una mano en casa.",
+0.5,
+0.5
+],
+"v1_m2": [
+"m",
+"Vale, pero… ¿y dónde se puede aprender todo esto?",
+0.6,
+0.5
+],
+"v1_w4": [
+"f",
+"Aquí, en Meatze. Ya ha empezado la nueva formación en inteligencia artificial.",
+0.5,
+0.5
+],
+"v1_m3": [
+"m",
+"Y además, informática, desarrollo web, administración y comercio.",
+0.6,
+0.5
+],
+"v1_w5": [
+"f",
+"Cursos cien por cien subvencionados para personas desempleadas, con prácticas en empresa.",
+0.5,
+0.5
+],
+"v1_m4": [
+"m",
+"En Barakaldo o en Bilbao. ¡Te esperamos!",
+0.6,
+0.5
+]
+}

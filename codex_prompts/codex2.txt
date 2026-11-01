@@ -1,0 +1,12 @@
+Use your image generation tool (imagegen) to create photorealistic 16:9 landscape images (1536x1024 or larger) for a Spanish TV advert about Artificial Intelligence training. They will be animated by a video model, so they must look like natural real camera photos with realistic lighting, clean modern look, NO text, NO letters, NO logos, NO numbers, NO watermarks, screens may show only abstract shapes/charts without any characters.
+Robots: one consistent design — a friendly, elegant white humanoid service robot with a glossy white shell, dark glass face visor with two soft blue light eyes, slim proportions (not scary, not childish).
+
+Create in the CURRENT directory:
+1. robot_office.png — bright modern office: the robot stands at a desk sorting paper documents into blue folders while a woman office worker (40s) next to it smiles and checks a laptop. Medium shot.
+2. robot_home.png — bright modern home kitchen: the robot is putting plates into a dishwasher while a dad and a child set the table in the background. Medium-wide shot, warm morning light.
+3. robot_shop.png — small local shop / boutique counter: the robot holds a tablet showing a simple abstract rising bar chart (no numbers) and the shop owner (man, 50s, apron) looks at it, pleased. Medium shot.
+4. robot_service.png — modern customer service desk: the robot with a slim headset greets a young woman customer, both friendly, handing her a printed paper. Medium shot.
+5. robot_teach.png — a modern classroom with computers: adult students (diverse ages 25-55) at computers, the robot stands at the front pointing at a large screen with an abstract colourful neural-network diagram (no text). Wide shot.
+6. hands_power.png — close-up: a man's hand in a navy blazer sleeve pressing the power button of a black computer monitor on a black desk, the monitor screen just lighting up with a soft blue glow. Shallow depth of field.
+
+After generating, list the files with their pixel sizes. Retry any failure once; do not skip any.

@@ -1,0 +1,44 @@
+{
+"v7_w1": [
+"f",
+"¿Sí? ¿Dígame? … ¿Quién es?",
+0.5,
+0.5
+],
+"v7_robot": [
+"m",
+"Hola. Soy el futuro. ¿Ya has elegido tu formación?",
+0.4,
+0.5
+],
+"v7_m1": [
+"m",
+"¿Quién llama?",
+0.6,
+0.5
+],
+"v7_w2": [
+"f",
+"El futuro. Pregunta si ya te estás formando.",
+0.5,
+0.5
+],
+"v7_m2": [
+"m",
+"Dile que sí: inteligencia artificial, informática, desarrollo web, administración o comercio.",
+0.6,
+0.5
+],
+"v7_w3": [
+"f",
+"Y todo, cien por cien subvencionado para personas desempleadas.",
+0.5,
+0.5
+],
+"v7_m3": [
+"m",
+"Barakaldo y Bilbao. Tu próximo paso empieza aquí.",
+0.6,
+0.5
+]
+}

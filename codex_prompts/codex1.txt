@@ -1,0 +1,18 @@
+Use your image generation tool (imagegen) to create photorealistic keyframes for a professional Spanish TV advert (16:9 landscape, 1536x1024 or larger landscape) for a vocational training centre. These frames will be animated by a video model, so they must look like real natural camera photos: natural skin texture, realistic lighting, no plastic AI look, no text, no letters, no logos, no posters, no signs, no watermarks.
+
+Attached references:
+- ref_man.jpg = the MALE PRESENTER. Keep his face identity exactly (same face, hair, beard, eyes). The reference has a hard, intense stare — DO NOT copy that expression. He must look warm, approachable, kind and relaxed: soft eyes, gentle genuine closed-mouth smile, slightly raised eyebrows, friendly teacher energy. Outfit: navy blazer over a light blue open-collar shirt, no tie.
+- ref_woman.jpg = the FEMALE PRESENTER. Keep her face identity exactly (dark hair in a low ponytail). Calm, confident, light closed-mouth smile, no teeth. Outfit: navy suit jacket over a white blouse.
+- room_p3.jpg = real classroom with black desks, black monitors, blue chairs, grey floor. Keep this room recognisable: same furniture, colours, lighting, layout. Do not add anything to the walls.
+- room_b2.jpg = real IT classroom with light blue walls, light wooden floor, rows of desks with black all-in-one PCs, blue chairs.
+
+Create these files in the CURRENT directory with exactly these names:
+
+1. man_a.png — room_p3. Medium shot (waist up) of the man standing beside the first black desk, body slightly angled, head turned to camera, warm genuine closed-mouth smile, relaxed shoulders, hands relaxed and low (hands not visible or resting naturally at his sides). Eye-level camera.
+2. man_b.png — room_p3. Medium close-up (chest up) of the man looking at camera, kind friendly expression with a slight head tilt, mid-sentence natural look, hands out of frame. Background softly out of focus.
+3. man_c.png — room_b2. Medium-wide shot of the man walking naturally between the rows of PCs toward the camera, mid-stride, relaxed arms, friendly smile, looking slightly off camera. Natural motion feel.
+4. man_desk.png — room_p3. The man sitting on a blue chair at a black desk in front of a black monitor that is switched OFF (dark screen), his hand reaching to the keyboard, body three-quarters to camera, head turned toward the camera with a friendly smile. Camera at desk height, slightly behind and to the side so the monitor screen is clearly visible on the right third of the frame.
+5. monitor_close.png — room_p3, same desk and black monitor as man_desk.png but a close-up: the monitor screen fills about 75% of the frame (straight-on, slight angle), the man's shoulder slightly visible blurred at the edge. On the screen: the woman from ref_woman.jpg, chest-up, looking into camera with a light smile, in front of a softly glowing deep navy and electric blue digital background with subtle abstract neural-network light lines (no text). It must look like a real photo of a real monitor screen (slight screen glow, realistic bezel).
+6. woman_ai.png — full-frame 16:9 chest-up shot of the woman from ref_woman.jpg looking into camera, light closed-mouth smile, in a premium dark navy digital studio with soft electric-blue rim light and subtle out-of-focus holographic neural-network light lines behind her (no text, no screens with text). Broadcast quality, hands out of frame.
+
+After generating, list the files with their pixel sizes. If one file fails, retry it once; do not skip any.

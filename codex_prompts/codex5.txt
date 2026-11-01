@@ -1,0 +1,18 @@
+Use your image generation tool (imagegen) to create photorealistic 16:9 landscape keyframes (1536x1024 or larger) for a Spanish TV advert of a vocational training centre. They will be animated by a video model: natural real camera photos, natural skin texture, realistic light, no plastic AI look, NO text, NO letters, NO logos, NO signs with words, NO watermarks.
+References: ref_woman.jpg = FEMALE PRESENTER (keep face identity exactly; navy suit jacket, white blouse; calm, light closed-mouth smile). ref_man.jpg = MALE PRESENTER (keep face identity exactly; navy blazer, light blue open-collar shirt, beige chinos; warm friendly kind expression — NOT the hard stare of the reference). robot_office.png = the robot design to reuse (glossy white humanoid, dark visor with two blue light eyes). Room photos room_b1 (lobby with white reception desk), room_b2 (IT classroom, light blue walls), room_b3, room_b8 (Barakaldo centre), room_p2, room_p3, room_p7 (Bilbao centre): keep each room recognisable, same furniture and colours, add nothing to the walls.
+
+Create in the CURRENT directory:
+1. w_tv_green.png — room_b2: the female presenter standing at the front of the classroom next to a large flat TV on a wheeled stand, the TV faces the camera almost straight-on and its screen is a perfectly flat uniform pure chroma green (#00FF00) with no reflections. She looks at camera with a light smile, one hand gesturing gently toward the TV. Medium-wide shot, static camera.
+2. m_desk_mess.png — room_p3: the male presenter sitting at a black desk covered with messy piles of paper, folders and sticky notes, looking at the camera with an amused, self-deprecating smile, shrugging slightly. Medium shot.
+3. w_phone.png — room_b1: the female presenter standing behind the white reception desk answering a classic corded desk telephone (receiver at her ear), surprised and curious expression with a light smile. The male presenter stands at the front of the desk looking at her, curious. Medium-wide shot.
+4. robot_phone.png — a bright futuristic office: the white robot (same design) holding an old-style telephone receiver to its head, friendly pose. Medium shot.
+5. w_call.png — room_b2: the female presenter standing in the classroom holding a tablet in front of her at chest height as if on a video call, looking at the tablet screen with a friendly smile; the tablet screen faces away from camera. Medium shot.
+6. m_call.png — room_p7: the male presenter holding a tablet the same way, smiling at its screen. Medium shot.
+7. w_table.png — room_b3: the female presenter seated at the table, hands resting naturally on the table, looking into the camera, calm professional anchor-like posture. Medium shot, eye level.
+8. m_board.png — room_b2: the male presenter standing next to the blank whiteboard, turning to the camera with a warm smile, one hand open toward the room. Medium shot.
+9. m_lobby_p2.png — room_p2: the male presenter walking toward camera through the Bilbao centre entrance area, relaxed and friendly. Medium-wide shot.
+10. both_lobby.png — room_b1: both presenters standing side by side in front of the reception desk, relaxed, arms at their sides, friendly light smiles, looking at the camera. Medium-wide full body shot.
+11. robot_web.png — modern office: the robot sits at a desk next to a young web developer (man, 27) looking together at two monitors with abstract website layouts (no readable text). Medium shot.
+12. robot_marketing.png — a small creative studio: the robot and a woman (30) look at a large monitor with colourful abstract social media style tiles (no text, no logos). Medium shot.
+
+After generating, list the files with pixel sizes. Retry any failure once; do not skip any.

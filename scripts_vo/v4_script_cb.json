@@ -1,0 +1,56 @@
+{
+"v4_m1": [
+"m",
+"Tres mitos sobre la inteligencia artificial. ¿Empezamos?",
+0.65,
+0.5
+],
+"v4_f_mito1": [
+"f",
+"Mito número uno: la inteligencia artificial es solo para informáticos.",
+0.5,
+0.5
+],
+"v4_w1": [
+"f",
+"Falso. Hoy se usa en administración, en comercio, en marketing… en casi cualquier trabajo.",
+0.5,
+0.5
+],
+"v4_m_mito2": [
+"m",
+"Mito número dos: ya es tarde para aprender.",
+0.6,
+0.5
+],
+"v4_m2": [
+"m",
+"Se aprende practicando, paso a paso, y con buenos profesores.",
+0.6,
+0.5
+],
+"v4_f_mito3": [
+"f",
+"Mito número tres: la inteligencia artificial lo hace todo sola.",
+0.5,
+0.5
+],
+"v4_w2": [
+"f",
+"No. Necesita personas que sepan usarla con criterio. Y eso se aprende.",
+0.5,
+0.5
+],
+"v4_m_ai": [
+"m",
+"Por eso en Meatze ha empezado la formación en inteligencia artificial.",
+0.6,
+0.5
+],
+"v4_f_subv": [
+"f",
+"Cursos cien por cien subvencionados para personas desempleadas, en Barakaldo y en Bilbao.",
+0.5,
+0.5
+]
+}
