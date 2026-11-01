@@ -95,10 +95,10 @@ def V07():
 def V08():
     a = "v8"
     two = [E("DOS CENTROS", BLACK, 36, "white", 0.2, d=0.1, box=ACCENT),
-           E("BARAKALDO", BLACK, 76, "white", 0.32, x=0.1, d=0.3), E("Gabriel Aresti, 3", SEMI, 42, SOFT, 0.43, x=0.1, d=0.5),
-           E("94 478 03 88", SEMI, 42, "white", 0.5, x=0.1, d=0.6),
-           E("BILBAO", BLACK, 76, "white", 0.32, x=0.56, d=0.8), E("Nicolás Alcorta, 4", SEMI, 42, SOFT, 0.43, x=0.56, d=1.0),
-           E("94 421 27 02", SEMI, 42, "white", 0.5, x=0.56, d=1.1),
+           E("BARAKALDO", BLACK, 76, "white", 0.32, x=0.1, d=0.3, mw=0.38), E("Gabriel Aresti, 3", SEMI, 42, SOFT, 0.43, x=0.1, d=0.5, mw=0.38),
+           E("94 478 03 88", SEMI, 42, "white", 0.5, x=0.1, d=0.6, mw=0.38),
+           E("BILBAO", BLACK, 76, "white", 0.32, x=0.56, d=0.8, mw=0.38), E("Nicolás Alcorta, 4", SEMI, 42, SOFT, 0.43, x=0.56, d=1.0, mw=0.38),
+           E("94 421 27 02", SEMI, 42, "white", 0.5, x=0.56, d=1.1, mw=0.38),
            E("Una misma forma de enseñar", MED, 46, "white", 0.7, d=1.4)]
     return intro("DOS CENTROS") + [
         c.talk(CL + "v8_tk_w1.mp4", lt=("Barakaldo", "Gabriel Aresti, 3"), tin=FADE),
@@ -106,7 +106,7 @@ def V08():
         *c.alive("b3", vd(a, "v8_f_b") / 3),
         *c.alive("b6", vd(a, "v8_f_b") / 3 + 0.2),
         c.talk(CL + "v8_tk_w2.mp4", tin=FADE),
-        c.talk(CL + "v8_tk_m1.mp4", lt=("Bilbao", "Nicolás Alcorta, 4"), tin=("slideleft", 0.4)),
+        c.talk(CL + "v8_tk_m1.mp4", lt=("Bilbao", "Nicolás Alcorta, 4"), tin=("slideleft", 0.25)),
         c.clip(CL + "v8_m_walk.mp4", d=vd(a, "v8_m_p", 0.5), vo=vo(a, "v8_m_p"), vo_at=0.15, tin=FADE),
         c.card(two, d=vd(a, "v8_f_map", 2.2), vo=vo(a, "v8_f_map"), vo_at=1.2, tin=FADE),
         c.card(v.ai_card(), d=vd(a, "v8_m_ai") / 2, bg="ai", icon="ia", vo=vo(a, "v8_m_ai"), vo_at=0.2, tin=FADE),

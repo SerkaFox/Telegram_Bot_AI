@@ -84,9 +84,10 @@ def seg(it, out, bug=None):
     if k == "card" and it["bg"] and it["bg"].endswith(".mp4"):
         # moving background: blurred, darkened clip under the card text
         D = it["d"]; els = ",".join(v.render_els(it["els"], W, H))
-        fc = (f"[0:v]setpts=(PTS-STARTPTS)/1.04,fps={FPS},{v.cover(W, H)},gblur=sigma=22,eq=brightness=-0.12:saturation=0.75,"
-              f"drawbox=color={v.NAVY}@0.68:t=fill,vignette=PI/4,{els},fade=in:st=0:d=0.3[v]")
-        enc(["-stream_loop", "-1", "-i", it["bg"]], fc, out, D)
+        k = max(1 / 1.04, D / max(0.1, dur(it["bg"]) - 0.05))   # stretch the blurred bg to the card length: never loops / jumps
+        fc = (f"[0:v]setpts=(PTS-STARTPTS)*{k:.4f},fps={FPS},{v.cover(W, H)},gblur=sigma=10,eq=brightness=-0.06:saturation=0.85,"
+              f"drawbox=color={v.NAVY}@0.5:t=fill,vignette=PI/4,{els},fade=in:st=0:d=0.3[v]")
+        enc(["-i", it["bg"]], fc, out, D)
         return D
     if k == "card" and not it["bg"] and not it["icon"]:
         # title background with a slow push-in and a soft light sweep (never a frozen frame)
@@ -142,10 +143,28 @@ def seg(it, out, bug=None):
     chain = [f"setpts=(PTS-STARTPTS)/{speed:.5f}", f"fps={FPS}", v.cover(W, H)]
     if it.get("fx"):
         for f in it["fx"].split("+"): chain.append(FX[f].format(N=N, W=W, H=H, FPS=FPS))
+    if it.get("pip") and pathlib.Path(it["pip"].replace(".mp4", "_mask.mp4")).exists():
+        # "pop-out" bubble: the cut-out subject (matte video) may break out of the circle above its centre (head, waving hand)
+        R = 380; X, Y = W - R - 90, 210; Sq = 760; CX, CY = 832, 520; PW = int(R * 1.8); Sp = int(Sq * 1.8)
+        m = it["pip"].replace(".mp4", "_mask.mp4"); pr = "setpts=(PTS-STARTPTS)/1.04," + f"fps={FPS},pad=iw+600:ih+600:300:300:black"
+        cx, cy = CX + 300, CY + 300
+        fc = (f"[0:v]{','.join(chain)}[base];"
+              f"[1:v]{pr},split[s1][s2];[2:v]{pr},format=gray[mk];"
+              f"[s1]crop={Sq}:{Sq}:{cx - Sq // 2}:{cy - Sq // 2},scale={R}:{R},format=rgba,"
+              f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-{R / 2},Y-{R / 2}),{R / 2 - 2}),255,0)',fade=in:st=0.15:d=0.35:alpha=1[pc];"
+              f"[s2][mk]alphamerge,crop={Sp}:{Sp}:{cx - Sp // 2}:{cy - Sp // 2},scale={PW}:{PW},"
+              f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*max(lte(hypot(X-{PW / 2},Y-{PW / 2}),{R / 2 - 2}),clip(({PW / 2 + R * 0.42}-Y)/60,0,1)*clip(({PW / 2 + R * 0.12}-X)/60,0,1)+clip(({PW / 2 - R * 0.05}-Y)/40,0,1))',"
+              f"fade=in:st=0.15:d=0.35:alpha=1[pop];"
+              f"color=c=white:s={R + 12}x{R + 12}:r={FPS},format=rgba,geq=r=255:g=255:b=255:a='if(lte(hypot(X-{(R + 12) / 2},Y-{(R + 12) / 2}),{(R + 12) / 2}),235,0)',"
+              f"fade=in:st=0.15:d=0.35:alpha=1[ring];"
+              f"[base][ring]overlay={X - 6}:{Y - 6}:shortest=1[b2];[b2][pc]overlay={X}:{Y}:shortest=1[b3];"
+              f"[b3][pop]overlay={X + R // 2 - PW // 2}:{Y + R // 2 - PW // 2}:shortest=1{(',' + over) if over else ''}[v]")
+        enc(["-ss", f"{it['inn']:.3f}", "-i", str(src), "-i", it["pip"], "-i", m], fc, out, D)
+        return D
     if it.get("pip"):
         R = 380; X, Y = W - R - 70, 70
         fc = (f"[0:v]{','.join(chain)}[base];"
-              f"[1:v]setpts=(PTS-STARTPTS)/1.04,fps={FPS},scale={R}:{R}:force_original_aspect_ratio=increase,crop={R}:{R},format=rgba,"
+              f"[1:v]setpts=(PTS-STARTPTS)/1.04,fps={FPS},crop=ih:ih:max(0\\,(iw-ih)/2-iw*0.08):0,scale={R}:{R},format=rgba,"
               f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-{R / 2},Y-{R / 2}),{R / 2 - 2}),255,0)',fade=in:st=0.15:d=0.35:alpha=1[pc];"
               f"color=c=white:s={R + 12}x{R + 12}:r={FPS},format=rgba,geq=r=255:g=255:b=255:a='if(lte(hypot(X-{(R + 12) / 2},Y-{(R + 12) / 2}),{(R + 12) / 2}),235,0)',"
               f"fade=in:st=0.15:d=0.35:alpha=1[ring];"
@@ -157,11 +176,15 @@ def seg(it, out, bug=None):
     return D
 
 def speech_end(src, thr="-35dB"):
-    """time of the last spoken sound in a clip (trailing silence is cut in the edit)"""
+    """time of the last spoken sound: cut only a silence that runs to the very end of the clip (never a pause between sentences)"""
     r = subprocess.run(["ffmpeg", "-i", str(src), "-vn", "-af", f"silencedetect=noise={thr}:d=0.3", "-f", "null", "-"],
                        capture_output=True, text=True).stderr
-    L = dur(src); ends = [float(l.split("silence_start: ")[1]) for l in r.splitlines() if "silence_start" in l]
-    return min(L, ends[-1] + 0.3) if ends and ends[-1] > 0.5 and L - ends[-1] > 0.2 else L
+    L = dur(src)
+    st = [float(l.split("silence_start: ")[1]) for l in r.splitlines() if "silence_start" in l]
+    en = [float(l.split("silence_end: ")[1].split()[0]) for l in r.splitlines() if "silence_end" in l]
+    if st and st[-1] > 0.5 and (len(en) < len(st) or en[-1] >= L - 0.08):
+        return min(L, st[-1] + 0.3)
+    return L
 
 def talk_audio(it, D, out):
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{it['inn']:.3f}", "-i", it["src"], "-vn", "-t", f"{D:.3f}",
